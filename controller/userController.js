@@ -2358,8 +2358,9 @@ const getStationsTableData = async (req, res) => {
 
 const getNextRotationNumber = async (req, res) => {
   try {
+    const userId = req.user.id;
     // Fetch the latest rotationNumber and increment it for the new rotation
-    const latestRotation = await RotationSummary.findOne({}, {}, { sort: { 'rotationNumber': -1 } });
+    const latestRotation = await RotationSummary.findOne({ userId: userId }, {}, { sort: { 'rotationNumber': -1 } });
     const nextRotationNumber = latestRotation ? parseInt(latestRotation.rotationNumber) + 1 : 1;
 
     // Send the nextRotationNumber as a response
