@@ -18,6 +18,7 @@ const secretKey = "HelloCableBuddy";
 const CSV = require("csv-parser");
 const fs = require("fs");
 const moment = require("moment-timezone");
+require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 
@@ -215,172 +216,38 @@ const AddDataFromRotations = async (req, res, rotationDetailsId) => {
 };
 
 
-// const importUser = async (req, res) => {
-//   try {
-//     var userData = [];
-//     if (req.file.originalname.endsWith(".csv")) {
-//       fs.createReadStream(req.file.path)
-//         .pipe(CSV())
-//         .on("data", (row) => {
-//           const formattedData = {
-//             flight: row["Flight #"],
-//             depStn: row["Dep Stn"],
-//             std: convertDecimalTimeToHours(row["STD (LT)"]),
-//             bt: convertDecimalTimeToHours(row["Bt"]),
-//             sta: convertDecimalTimeToHours(row["STA(LT)"]),
-//             arrStn: row["Arr Stn"],
-//             variant: row["Variant"],
-//             effFromDt: getJsDateFromExcel(row["Eff from Dt"]),
-//             effToDt: getJsDateFromExcel(row["Eff to Dt"]),
-//             dow: row["Dow"],
-//             domINTL: row["Dom / INTL"],
-//             userTag1: row["User Tag 1"],
-//             userTag2: row["User Tag 2"],
-//             remarks1: row["Remarks 1"],
-//             remarks2: row["Remarks 2"],
-//           };
-
-//           userData.push(formattedData);
-//         });
-//     } else if (req.file.originalname.endsWith(".xlsx")) {
-//       const workbook = xlsx.readFile(req.file.path);
-//       const sheetName = workbook.SheetNames[0];
-//       const worksheet = workbook.Sheets[sheetName];
-//       const jsonData = xlsx.utils.sheet_to_json(worksheet);
-
-// function convertDecimalTimeToHours(decimalTime) {
-//   if (typeof decimalTime === "string") {
-//     decimalTime = decimalTime.replace(/( AM| PM)/g, "");
-//     const formattedTime = decimalTime.replace(/:\d{2}(?=\D|$)/, ""); // Remove second time and value from the string
-//     return formattedTime;
-//   }
-
-//   const hoursInDay = 24;
-//   const hours = Math.floor(decimalTime * hoursInDay);
-//   const minutes = Math.round((decimalTime * hoursInDay - hours) * 60);
-
-//   const formattedHours = hours < 10 ? `0${hours}` : `${hours}`;
-//   const formattedMinutes = minutes < 10 ? `0${minutes}` : `${minutes}`;
-
-//   return `${formattedHours}:${formattedMinutes}`;
-// }
-
-//       jsonData.forEach((row) => {
-//         jsonData.forEach((row) => {
-//           const formattedData = processExcelRow(row);
-//           userData.push(formattedData);
-//         });
-
-//         const data = {
-//           flight: row["Flight #"],
-//           depStn: row["Dep Stn"],
-//           std: convertDecimalTimeToHours(row["STD (LT)"]),
-//           bt: convertDecimalTimeToHours(row["BT"]),
-//           sta: convertDecimalTimeToHours(row["STA(LT)"]),
-//           arrStn: row["Arr Stn"],
-//           variant: row["Variant"],
-//           effFromDt: getJsDateFromExcel(row["Eff from Dt"]),
-//           effToDt: getJsDateFromExcel(row["Eff to Dt"]),
-//           dow: row["DoW"],
-//           domINTL: row["Dom / INTL"],
-//           userTag1: row["User Tag 1"],
-//           userTag2: row["User Tag 2"],
-//           remarks1: row["Remarks 1"],
-//           remarks2: row["Remarks 2"],
-//         };
-//         userData.push(data);
-//       });
-//     } else {
-//       throw new Error("Invalid file format");
-//     }
-
-//     userData = userData.map((user) => {
-//       return { ...user, userId: req.user.id };
-//     });
-
-//     const skippedRows = [];
-//     let addedRowsCount = 0;
-//     const userId = req.user.id;
-//     for (const user of userData) {
-//       const { flight, std, sta, variant, dow } = user;
-//       if (!isValidFlightNumber(flight)) {
-//         skippedRows.push(user);
-//         continue; // Skip this iteration and move to the next user
-//       }
-//       const existingData = await Data.findOne({
-//         std,
-//         sta,
-//         variant,
-//         dow,
-//         effFromDt: { $lt: new Date(user.effToDt) },
-//         effToDt: { $gt: new Date(user.effFromDt) },
-//         userId: userId,
-//       });
-//       if (existingData) {
-//         skippedRows.push(user);
-//       } else {
-//         const data = await new Data({ ...user, userId: req.user.id }).save();
-
-//         const newSector = new Sector({
-//           sector1: data.depStn,
-//           sector2: data.arrStn,
-//           variant: data.variant,
-//           bt: data.bt,
-//           sta: data.sta,
-//           dow: data.dow,
-//           flight: data.flight,
-//           std: data.std,
-//           domINTL: data.domINTL,
-//           userTag1: data.userTag1,
-//           userTag2: data.userTag2,
-//           remarks1: data.remarks1,
-//           remarks2: data.remarks2,
-//           networkId: data._id,
-//           userId: req.user.id,
-//         });
-
-//         await newSector.save();
-//         addedRowsCount++;
-//       }
-//     }
-
-//     if (skippedRows.length) {
-//       return res.send({
-//         status: 200,
-//         success: true,
-//         msg: `Added ${addedRowsCount}, Skipped ${skippedRows.length}`,
-//         skippedRows,
-//       });
-//     }
-
-//     res.send({ status: 200, success: true, msg: "Add Successful" });
-//   } catch (error) {
-//     console.log(error);
-//     res.send({ status: 400, success: false, msg: error.message });
-//   }
-// };
-
 const importUser = async (req, res) => {
+  const filePath = req.file.path;
   try {
-    var userData = [];
+    const SCHEDULE_UPLOAD_LIMIT = parseInt(process.env.SCHEDULE_UPLOAD_LIMIT, 10) || 500; // Default to 500 if not set
+    let userData = [];
 
     if (req.file.originalname.endsWith(".csv")) {
-      fs.createReadStream(req.file.path)
-        .pipe(CSV())
-        .on("data", (row) => {
-          const formattedData = processCSVRow(row);
-          userData.push(formattedData);
-        });
+      let rowCount = 0;
+      await new Promise((resolve, reject) => {
+        const stream = fs
+          .createReadStream(req.file.path)
+          .pipe(CSV())
+          .on("data", (row) => {
+            if (rowCount < SCHEDULE_UPLOAD_LIMIT) {
+              const formattedData = processCSVRow(row);
+              userData.push(formattedData);
+              rowCount++;
+            } else {
+              stream.destroy(); // Stop the stream once we hit the limit
+            }
+          })
+          .on("end", resolve)
+          .on("error", reject);
+      });
     } else if (req.file.originalname.endsWith(".xlsx")) {
       const workbook = xlsx.readFile(req.file.path);
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       const jsonData = xlsx.utils.sheet_to_json(worksheet);
 
-      jsonData.forEach((row) => {
-        const formattedData = processExcelRow(row);
-        userData.push(formattedData);
-      });
+      // Take only the first SCHEDULE_UPLOAD_LIMIT rows
+      userData = jsonData.slice(0, SCHEDULE_UPLOAD_LIMIT).map(processExcelRow);
     } else {
       throw new Error("Invalid file format");
     }
@@ -410,84 +277,78 @@ const importUser = async (req, res) => {
         skippedRows.push({ ...user, error: "Invalid departure station" });
         continue;
       }
-
       if (!arrStnValidation) {
-        skippedRows.push({ ...user, error: "Invalid Arr stn station" });
+        skippedRows.push({ ...user, error: "Invalid arrival station" });
         continue;
       }
       if (!VariantValidation) {
-        skippedRows.push({ ...user, error: "Invalid variant station" });
+        skippedRows.push({ ...user, error: "Invalid variant" });
         continue;
       }
       if (!dowValidation) {
         skippedRows.push({ ...user, error: "Invalid day of week" });
         continue;
       }
-      // const existingData = await Data.findOne({
-      // std,
-      // sta,
-      // variant,
-      // dow,
-      // effFromDt: { $lte: new Date(user.effToDt) },
-      // effToDt: { $gte: new Date(user.effFromDt) },
-      // userId: userId,
-      // });
 
-      // if (existingData) {
-      //   skippedRows.push(user);
-      // }
-      else {
-        const isLast = index === userData.length - 1
-        const data = await new Data({ ...user, userId: userId, isScheduled: true, isLast }).save();
+      const isLast = index === userData.length - 1;
+      const data = await new Data({ ...user, userId: userId, isScheduled: true, isLast }).save();
 
-        const newSector = new Sector({
-          sector1: data.depStn,
-          sector2: data.arrStn,
-          variant: data.variant,
-          bt: data.bt,
-          sta: data.sta,
-          dow: data.dow,
-          flight: data.flight,
-          std: data.std,
-          domINTL: data.domINTL.toLowerCase(),
-          userTag1: data.userTag1,
-          fromDt: data.effFromDt,
-          toDt: data.effToDt,
-          userTag2: data.userTag2,
-          remarks1: data.remarks1,
-          remarks2: data.remarks2,
-          gcd: gcd,
-          paxCapacity: paxCapacity,
-          CargoCapT: cargoCapT,
-          paxLF: paxSF,
-          cargoLF: cargoLF,
-          networkId: data._id,
-          userId: userId,
-          isScheduled: true
-        });
-
-        await newSector.save();
-        addedRowsCount++;
-      }
-    }
-
-    if (skippedRows.length) {
-      return res.send({
-        status: 200,
-        success: true,
-        msg: `Added ${addedRowsCount}, Skipped ${skippedRows.length}`,
-        skippedRows,
+      const newSector = new Sector({
+        sector1: data.depStn,
+        sector2: data.arrStn,
+        variant: data.variant,
+        bt: data.bt,
+        sta: data.sta,
+        dow: data.dow,
+        flight: data.flight,
+        std: data.std,
+        domINTL: data.domINTL.toLowerCase(),
+        userTag1: data.userTag1,
+        fromDt: data.effFromDt,
+        toDt: data.effToDt,
+        userTag2: data.userTag2,
+        remarks1: data.remarks1,
+        remarks2: data.remarks2,
+        gcd: gcd,
+        paxCapacity: paxCapacity,
+        CargoCapT: cargoCapT,
+        paxLF: paxSF,
+        cargoLF: cargoLF,
+        networkId: data._id,
+        userId: userId,
+        isScheduled: true,
       });
+
+      await newSector.save();
+      addedRowsCount++;
     }
 
-    // await createConnections(req.user.id);
+    // const discardedRowsCount = Math.max(userData.length - SCHEDULE_UPLOAD_LIMIT, 0);
+    const skippedMessage = skippedRows.length
+      ? `, Skipped ${skippedRows.length} rows due to validation errors`
+      : "";
 
-    res.send({ status: 200, success: true, msg: "Add Successful" });
+    res.send({
+      status: 200,
+      success: true,
+      msg: `Processed ${addedRowsCount} rows.`,
+      skippedRows,
+    });
   } catch (error) {
-    console.log(error);
+    console.error(error);
     res.send({ status: 400, success: false, msg: error.message });
+  } finally {
+    // Delete the uploaded file
+    fs.unlink(filePath, (err) => {
+      if (err) {
+        console.error(`Failed to delete file at ${filePath}:`, err.message);
+      } else {
+        console.log(`File deleted: ${filePath}`);
+      }
+    });
   }
 };
+
 
 function isValidFlightNumber(flightNumber) {
   console.log(flightNumber);

@@ -269,33 +269,50 @@ async function createStations(doc) {
 
 
 async function createFlgts(doc) {
-
   const startDate = new Date(doc.effFromDt);
   const endDate = new Date(doc.effToDt);
   const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-  // Delete existing documents with the same sectorId
-  try {
-    await FLIGHT.deleteMany({ networkId: doc._id });
+  // Fetch flight limit from .env
+  const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
+  let currentFlightCount;
 
-    console.log("Existing flight entries deleted.");
+  try {
+
+    // Delete existing documents with the same networkId
+    // const result = await FLIGHT.deleteMany({ networkId: doc._id });
+    // console.log(`Existing flight entries deleted: ${result.deletedCount}`);
+
   } catch (error) {
-    console.error("Error deleting existing flight entries:", error);
+    console.error("Error during initial setup:", error);
+    return; // Stop further execution if initial setup fails
+  }
+
+  // Get the current count of flights for the user
+  currentFlightCount = await FLIGHT.countDocuments({ userId: doc.userId });
+
+  // If the user has already reached or exceeded the limit, skip creating flights
+  if (currentFlightCount >= FLIGHT_LIMIT) {
+    console.log(`Flight limit of ${FLIGHT_LIMIT} reached for user: ${doc.userId}`);
+    return; // Exit the function
   }
 
   const dow = parseInt(doc.dow);
-  console.log(dow, "this is dow");
   const digitArray = String(dow).split("").map(Number);
-  const firstElement = digitArray[0];
-  const lastElement = digitArray[digitArray.length - 1];
 
   let currentDate = new Date(startDate);
 
   while (currentDate <= endDate) {
-    const dayOfWeek = daysOfWeek[currentDate.getDay()];
-    const formattedDate = currentDate.toLocaleDateString("en-US");
+    // Stop if the overall flight limit is reached
+    if (currentFlightCount >= FLIGHT_LIMIT) {
+      console.log(`Flight limit of ${FLIGHT_LIMIT} reached while processing.`);
+      break;
+    }
 
+    // Check if the current date matches the specified days of the week
     if (digitArray.includes(currentDate.getDay() !== 0 ? currentDate.getDay() : 7)) {
+      const dayOfWeek = daysOfWeek[currentDate.getDay()];
+
       const newFlight = new FLIGHT({
         date: currentDate,
         day: dayOfWeek,
@@ -313,27 +330,28 @@ async function createFlgts(doc) {
         remarks1: doc.remarks1,
         remarks2: doc.remarks2,
         userId: doc.userId,
-        networkId: doc.id,
+        networkId: doc._id,
         rotationNumber: doc.rotationNumber,
-        isComplete: doc.networkId ? true : false,
+        isComplete: !!doc.networkId,
         addedByRotation: doc.addedByRotation,
         effFromDt: doc.effFromDt,
         effToDt: doc.effToDt,
-        dow: doc.dow
+        dow: doc.dow,
       });
 
       try {
         await newFlight.save();
+        currentFlightCount++; // Increment the flight count after successful save
         console.log("New flight entry created.");
       } catch (error) {
         console.error("Error creating new flight entry:", error);
-      } doc.dow
+      }
     }
 
     currentDate.setDate(currentDate.getDate() + 1);
   }
-
 }
+
 
 
 dataSchema.post('save', async function (doc) {
@@ -343,15 +361,6 @@ dataSchema.post('save', async function (doc) {
     await createStations(doc);
 
     await createFlgts(doc);
-
-    //connection to be created only when isLast is true in schedule uploads
-    // if (doc.isLast || typeof doc.isLast === 'undefined') {
-
-    //   await createConnections(doc.userId);
-    //   console.log("createConnections completed successfully.");
-
-    // }
-
 
   } catch (error) {
     console.error("Error in createConnections:", error);
@@ -460,15 +469,27 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
 
     let startDate = new Date(data.fromDt);
     let endDate = new Date(data.toDt);
-    
+
     //set to midnight
     startDate.setHours(0, 0, 0, 0);
     endDate.setHours(0, 0, 0, 0);
 
     const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-    await FLIGHT.deleteMany({ networkId: networkId });
-    console.log("Existing flight entries deleted.");
+    const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
+    let currentFlightCount;
+
+    const result = await FLIGHT.deleteMany({ networkId: networkId });
+    console.log(`Existing flight entries deleted: ${result.deletedCount}`);
+
+    // Get the current count of flights for the user
+    currentFlightCount = await FLIGHT.countDocuments({ userId: doc.userId });
+
+    // If the user has already reached or exceeded the limit, skip creating flights
+    if (currentFlightCount >= FLIGHT_LIMIT) {
+      console.log(`Flight limit of ${FLIGHT_LIMIT} reached for user: ${doc.userId}`);
+      return; // Exit the function
+    }
 
     const firstElement = parseInt(data.dow.charAt(0));
     const lastElement = parseInt(data.dow.charAt(data.dow.length - 1));
@@ -476,6 +497,13 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
     let currentDate = new Date(startDate);
 
     while (currentDate <= endDate) {
+
+      // Stop if the overall flight limit is reached
+      if (currentFlightCount >= FLIGHT_LIMIT) {
+        console.log(`Flight limit of ${FLIGHT_LIMIT} reached while processing.`);
+        break;
+      }
+
       const dayOfWeek = daysOfWeek[currentDate.getDay()];
 
       const currentDayOfWeek = currentDate.getDay() !== 0 ? currentDate.getDay() : 7;
@@ -529,6 +557,8 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
         }
 
         const newFlgt = new FLIGHT(newFlight);
+
+        currentFlightCount++;
 
         console.log(newFlgt, "this is new value");
 
