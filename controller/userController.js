@@ -1050,7 +1050,6 @@ const getFlights = async (req, res) => {
     const { page = 1, limit = 10 } = req.query;
 
     const data = await Flights.find({ userId: id, isComplete: true })
-      .sort({ flight: 1, date: 1 }) // Sort by flight and date
       .skip((page - 1) * limit) // Skip documents for previous pages
       .limit(Number(limit)); // Limit results to `limit`
 
