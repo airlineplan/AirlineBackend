@@ -1265,116 +1265,74 @@ const createConnections = async (req, res) => {
 
     const userId = req.user.id;
 
-    // Fetch user's hometimeZone
+    // Fetch user and stations data
     const user = await User.findById(userId);
-
-    // Pre-fetch stations data into a map
-    const stations = await Stations.find({ userId });
-    const stationsMap = stations.reduce((acc, station) => {
-      acc[station.stationName] = station;
-      return acc;
+    const stations = await Stations.find({ userId: userId });
+    const stationsMap = stations.reduce((map, station) => {
+      map[station.stationName] = station;
+      return map;
     }, {});
 
     // Fetch all flight entries in a single query
-    const allFlights = await Flights.find({ userId });
+    const allFlights = await Flights.find({ userId: userId });
 
-    // Prepare the bulk operations array for updates
-    const bulkOps = [];
-    const updateOperations = [];
+    // Initialize arrays to hold all queries and updates
+    const updateQueries = [];
+    const flightConnections = [];
 
-    // Process each flight to determine connections
     for (const flight of allFlights) {
-      if (flight.userId === userId) {
-        flight.beyondODs = [];
-        flight.behindODs = [];
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: flight._id },
-            update: { $set: { beyondODs: [], behindODs: [] } }
-          }
-        });
-      }
-
       const stationArr = stationsMap[flight.arrStn];
       const stationDep = stationsMap[flight.depStn];
 
-      if (!stationArr) {
-        console.error(`Station not found for flight with arrStn: ${flight.arrStn}`);
-        continue;
+      if (!stationArr || !stationDep) {
+        console.error(`Station not found for flight: ${flight._id}`);
+        continue; // Skip to the next flight if stations are not found
       }
 
       const stdHTZ = convertTimeToTZ(flight.std, stationDep.stdtz, stationArr.stdtz);
+      const domQuery = createDomQuery(flight, stdHTZ, stationArr);
+      const intlQuery = createIntlQuery(flight, stdHTZ, stationArr);
 
-      const domQuery = {
-        depStn: flight.arrStn,
-        arrStn: { $ne: flight.depStn },
-        domIntl: { $regex: new RegExp('dom', 'i') }
-      };
+      const [domFlights, intlFlights] = await Promise.all([
+        Flights.find(domQuery),
+        Flights.find(intlQuery),
+      ]);
 
-      const intlQuery = {
-        depStn: flight.arrStn,
-        arrStn: { $ne: flight.depStn },
-        domIntl: { $regex: new RegExp('intl', 'i') }
-      };
+      // Collect flight IDs for connections
+      const flightIds = [
+        ...domFlights.map(f => f._id),
+        ...intlFlights.map(f => f._id),
+      ];
 
-      if (flight.domIntl.toLowerCase() === 'dom') {
-        const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
-        const ddMaxStdLT = addTimeStrings(flight.sta, stationArr.ddMaxCT);
-        const dInMinStdLT = addTimeStrings(flight.sta, stationArr.dInMinCT);
-        const dInMaxStdLT = addTimeStrings(flight.sta, stationArr.dInMaxCT);
+      // Add the update query for the current flight
+      updateQueries.push(
+        Flights.updateOne(
+          { _id: flight._id },
+          { $set: { beyondODs: flightIds } }
+        )
+      );
 
-        const domConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMinCT);
-        const domConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMaxCT);
-        const intConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMinCT);
-        const intConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMaxCT);
+      // Add behindODs update queries
+      flightConnections.push(...domFlights.map(f => ({
+        updateOne: {
+          filter: { _id: f._id },
+          update: { $addToSet: { behindODs: flight._id } },
+        }
+      })));
 
-        const sameDayDom = compareTimes(domConnectingTimeMax, "23:59") <= 0;
-        const nextDayDom = compareTimes(domConnectingTimeMin, "23:59") > 0;
-        const partialDayDom = compareTimes(domConnectingTimeMin, "23:59") <= 0 && compareTimes(domConnectingTimeMax, "23:59") > 0;
-
-        const sameDayInt = compareTimes(intConnectingTimeMax, "23:59") <= 0;
-        const nextDayInt = compareTimes(intConnectingTimeMin, "23:59") > 0;
-        const partialDayInt = compareTimes(intConnectingTimeMin, "23:59") <= 0 && compareTimes(intConnectingTimeMax, "23:59") > 0;
-
-        // Build queries
-        buildQueries(flight, sameDayDom, nextDayDom, partialDayDom, ddMinStdLT, ddMaxStdLT, domQuery);
-        buildQueries(flight, sameDayInt, nextDayInt, partialDayInt, dInMinStdLT, dInMaxStdLT, intlQuery);
-
-        // Fetch connected flights in bulk
-        const domFlights = await Flights.find(domQuery);
-        const intlFlights = await Flights.find(intlQuery);
-
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: flight._id },
-            update: { $set: { beyondODs: [...domFlights.map(f => f._id), ...intlFlights.map(f => f._id)] } }
-          }
-        });
-
-        // Prepare behindODs updates
-        domFlights.forEach(f => {
-          updateOperations.push({
-            updateOne: {
-              filter: { _id: f._id },
-              update: { $addToSet: { behindODs: flight._id } }
-            }
-          });
-        });
-
-        intlFlights.forEach(f => {
-          updateOperations.push({
-            updateOne: {
-              filter: { _id: f._id },
-              update: { $addToSet: { behindODs: flight._id } }
-            }
-          });
-        });
-      }
+      flightConnections.push(...intlFlights.map(f => ({
+        updateOne: {
+          filter: { _id: f._id },
+          update: { $addToSet: { behindODs: flight._id } },
+        }
+      })));
     }
 
-    // Execute bulk operations
-    if (bulkOps.length) await Flights.bulkWrite(bulkOps);
-    if (updateOperations.length) await Flights.bulkWrite(updateOperations);
+    // Perform all updates in bulk (for beyondODs and behindODs)
+    await Promise.all([
+      ...updateQueries,
+      ...flightConnections.map(update => Flights.bulkWrite([update])),
+    ]);
 
     console.log("Connections Completed");
     res.status(200).json({ message: "Connections Completed" });
@@ -1384,24 +1342,37 @@ const createConnections = async (req, res) => {
   }
 };
 
-function buildQueries(flight, sameDay, nextDay, partialDay, minTime, maxTime, query) {
-  if (sameDay) {
-    query.std = { $gte: minTime, $lte: maxTime };
-    query.date = new Date(flight.date);
-  } else if (nextDay) {
-    query.std = { $gte: minTime, $lte: maxTime };
-    query.date = new Date(addDays(flight.date, 1));
-  } else if (partialDay) {
-    const paramB = calculateTimeDifference(minTime, "23:59");
-    const minPlusB = addTimeStrings(minTime, paramB);
-    const maxMinusB = calculateTimeDifference(paramB, maxTime);
+const createDomQuery = (flight, stdHTZ, stationArr) => {
+  // Logic for creating domQuery, including times and filters
+  const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
+  const ddMaxStdLT = addTimeStrings(flight.sta, stationArr.ddMaxCT);
 
-    query.$or = [
-      { std: { $gte: minTime, $lte: maxMinusB }, date: new Date(flight.date) },
-      { std: { $gte: minPlusB, $lte: maxTime }, date: new Date(addDays(flight.date, 1)) }
-    ];
-  }
-}
+  const domQuery = {
+    depStn: flight.arrStn,
+    arrStn: { $ne: flight.depStn },
+    domIntl: { $regex: new RegExp('dom', 'i') },
+    std: { $gte: ddMinStdLT, $lte: ddMaxStdLT },
+    date: new Date(flight.date),
+  };
+
+  return domQuery;
+};
+
+const createIntlQuery = (flight, stdHTZ, stationArr) => {
+  // Logic for creating intlQuery, including times and filters
+  const inDMinStdLT = addTimeStrings(flight.sta, stationArr.inDMinCT);
+  const inDMaxStdLT = addTimeStrings(flight.sta, stationArr.inDMaxCT);
+
+  const intlQuery = {
+    depStn: flight.arrStn,
+    arrStn: { $ne: flight.depStn },
+    domIntl: { $regex: new RegExp('intl', 'i') },
+    std: { $gte: inDMinStdLT, $lte: inDMaxStdLT },
+    date: new Date(flight.date),
+  };
+
+  return intlQuery;
+};
 
 
 // const createConnections = async (req, res) => {
