@@ -1280,7 +1280,9 @@ const createConnections = async (req, res) => {
     const updateQueries = [];
     const flightConnections = [];
 
+    let count = 0; 
     for (const flight of allFlights) {
+      count++;
       const stationArr = stationsMap[flight.arrStn];
       const stationDep = stationsMap[flight.depStn];
 
