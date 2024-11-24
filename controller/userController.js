@@ -1045,8 +1045,12 @@ const AdminLogin = (req, res) => {
 const getFlights = async (req, res) => {
   try {
     const id = req.user.id;
-    //TODO: change to this
+    
+    console.log("id is : ",id);
+    
     const data = await Flights.find({ userId: id, isComplete: true }).sort({ flight: 1, date: 1 });
+
+    console.log("initial data is : ",data.length);
 
     let timeZone;
     if (Array.isArray(data) && data.length > 0) {
@@ -1057,6 +1061,8 @@ const getFlights = async (req, res) => {
       startDate = timeZoneCorrectedDates(startDate, timeZone);
       endDate = timeZoneCorrectedDates(endDate, timeZone);
     }
+
+    console.log("final data is : ",data.length);
 
     // const data = await Flights.find({ userId: id});
     res.json(data);
