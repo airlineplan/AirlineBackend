@@ -1258,83 +1258,235 @@ function addDays(date, days) {
   return result; // Return the new date object
 }
 
-
 const createConnections = async (req, res) => {
   try {
     console.log("Create Connection called");
 
     const userId = req.user.id;
 
-    // Fetch user and stations data
+    // Fetch user's hometimeZone
     const user = await User.findById(userId);
+
+    // Pre-fetch stations data into a map
+    const stationsMap = {};
     const stations = await Stations.find({ userId: userId });
-    const stationsMap = stations.reduce((map, station) => {
-      map[station.stationName] = station;
-      return map;
-    }, {});
+    for (const station of stations) {
+      stationsMap[station.stationName] = station;
+    }
 
-    // Fetch all flight entries in a single query
-    const allFlights = await Flights.find({ userId: userId });
+    // Reset beyondODs and behindODs fields for all flights
+    await Flights.updateMany({ userId: userId }, { $set: { beyondODs: [], behindODs: [] } });
 
-    // Initialize arrays to hold all queries and updates
-    const updateQueries = [];
-    const flightConnections = [];
+    // Use a cursor to iterate over flights without loading all into memory
+    const flightCursor = Flights.find({ userId: userId }).cursor();
 
-    let count = 0; 
-    for (const flight of allFlights) {
-      console.log("count is : ", count++);
+    for await (const flight of flightCursor) {
       const stationArr = stationsMap[flight.arrStn];
       const stationDep = stationsMap[flight.depStn];
 
       if (!stationArr || !stationDep) {
-        console.error(`Station not found for flight: ${flight._id}`);
-        continue; // Skip to the next flight if stations are not found
+        console.error(`Station not found for flight with arrStn: ${flight.arrStn} or depStn: ${flight.depStn}`);
+        continue; // Skip to the next flight
       }
 
       const stdHTZ = convertTimeToTZ(flight.std, stationDep.stdtz, stationArr.stdtz);
-      const domQuery = createDomQuery(flight, stdHTZ, stationArr);
-      const intlQuery = createIntlQuery(flight, stdHTZ, stationArr);
+      // const staHTZ = convertTimeToTZ(flight.sta, stationArr.stdtz, hometimeZone);
 
-      const [domFlights, intlFlights] = await Promise.all([
-        Flights.find(domQuery),
-        Flights.find(intlQuery),
-      ]);
 
-      // Collect flight IDs for connections
-      const flightIds = [
-        ...domFlights.map(f => f._id),
-        ...intlFlights.map(f => f._id),
-      ];
 
-      // Add the update query for the current flight
-      updateQueries.push(
-        Flights.updateOne(
-          { _id: flight._id },
-          { $set: { beyondODs: flightIds } }
-        )
+      const domQuery = {
+        depStn: flight.arrStn,
+        arrStn: { $ne: flight.depStn },
+        domIntl: { $regex: new RegExp('dom', 'i') }
+      };
+
+      const intlQuery = {
+        depStn: flight.arrStn,
+        arrStn: { $ne: flight.depStn },
+        domIntl: { $regex: new RegExp('intl', 'i') }
+      };
+
+      if (flight.domIntl.toLowerCase() === 'dom') {
+        const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
+        const ddMaxStdLT = addTimeStrings(flight.sta, stationArr.ddMaxCT);
+        const dInMinStdLT = addTimeStrings(flight.sta, stationArr.dInMinCT);
+        const dInMaxStdLT = addTimeStrings(flight.sta, stationArr.dInMaxCT);
+
+        const domConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMinCT);
+        const domConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMaxCT);
+        const intConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMinCT);
+        const intConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMaxCT);
+
+        const sameDayDom = compareTimes(domConnectingTimeMax, "23:59") <= 0;
+        const nextDayDom = compareTimes(domConnectingTimeMin, "23:59") > 0;
+        const partialDayDom = compareTimes(domConnectingTimeMin, "23:59") <= 0 && compareTimes(domConnectingTimeMax, "23:59") > 0;
+
+
+        const sameDayInt = compareTimes(intConnectingTimeMax, "23:59") <= 0;
+        const nextDayInt = compareTimes(intConnectingTimeMin, "23:59") > 0;
+        const partialDayInt = compareTimes(intConnectingTimeMin, "23:59") <= 0 && compareTimes(intConnectingTimeMax, "23:59") > 0;
+
+        // B = 23:59 - domConnectingTimeMin
+        const paramBDom = calculateTimeDifference(domConnectingTimeMin, "23:59");
+
+        if (sameDayDom) {
+
+          domQuery.std = { $gte: ddMinStdLT, $lte: ddMaxStdLT };
+          domQuery.date = new Date(flight.date)
+
+        } else if (nextDayDom) {
+          // min to max on the next day
+          domQuery.std = { $gte: ddMinStdLT, $lte: ddMaxStdLT };
+          domQuery.date = new Date(addDays(flight.date, 1))
+        } else if (partialDayDom) {
+          // minstd to max - B on the same date
+          // min + B to max on the next date
+          const ddminPlusB = addTimeStrings(ddMinStdLT, paramBDom);
+          const ddmaxMinusB = calculateTimeDifference(paramBDom, ddMaxStdLT);
+
+          domQuery.$or = [
+            { std: { $gte: ddMinStdLT, $lte: ddmaxMinusB }, date: new Date(flight.date) },
+            { std: { $gte: ddminPlusB, $lte: ddMaxStdLT }, date: new Date(addDays(flight.date, 1)) }
+          ];
+        }
+
+        if (sameDayInt) {
+          // min to max on the same day
+          intlQuery.std = { $gte: dInMinStdLT, $lte: dInMaxStdLT };
+          intlQuery.date = new Date(flight.date);
+        } else if (nextDayInt) {
+          // min to max on the next day
+          intlQuery.std = { $gte: dInMinStdLT, $lte: dInMaxStdLT };
+          intlQuery.date = new Date(addDays(flight.date, 1));
+        } else if (partialDayInt) {
+          // minstd to max - B on the same date
+          // min + B to max on the next date
+          const dinminPlusB = addTimeStrings(dInMinStdLT, paramBDom);
+          const dinmaxMinusB = calculateTimeDifference(paramBDom, dInMaxStdLT);
+
+          intlQuery.$or = [
+            { std: { $gte: dInMinStdLT, $lte: dinmaxMinusB }, date: new Date(flight.date) },
+            { std: { $gte: dinminPlusB, $lte: dInMaxStdLT }, date: new Date(addDays(flight.date, 1)) }
+          ];
+        }
+
+      } else if (flight.domIntl.toLowerCase() === 'intl') {
+        const inDMinStdLT = addTimeStrings(flight.sta, stationArr.inDMinCT);
+        const inDMaxStdLT = addTimeStrings(flight.sta, stationArr.inDMaxCT);
+        const inInMinStdLT = addTimeStrings(flight.sta, stationArr.inInMinDT);
+        const inInMaxStdLT = addTimeStrings(flight.sta, stationArr.inInMaxDT);
+
+        const domConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.inDMinCT);
+        const domConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.inDMaxCT);
+        const intConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.inInMinDT);
+        const intConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.inInMaxDT);
+
+        const sameDayDom = compareTimes(domConnectingTimeMax, "23:59") <= 0;
+        const nextDayDom = compareTimes(domConnectingTimeMin, "23:59") > 0;
+        const partialDayDom = compareTimes(domConnectingTimeMin, "23:59") <= 0 && compareTimes(domConnectingTimeMax, "23:59") > 0;
+
+        const sameDayInt = compareTimes(intConnectingTimeMax, "23:59") <= 0;
+        const nextDayInt = compareTimes(intConnectingTimeMin, "23:59") > 0;
+        const partialDayInt = compareTimes(intConnectingTimeMin, "23:59") <= 0 && compareTimes(intConnectingTimeMax, "23:59") > 0;
+
+        const paramBInt = calculateTimeDifference(intConnectingTimeMin, "23:59");
+
+        if (sameDayDom) {
+          domQuery.std = { $gte: inDMinStdLT, $lte: inDMaxStdLT };
+          domQuery.date = new Date(flight.date);
+
+        } else if (nextDayDom) {
+
+          domQuery.std = { $gte: inDMinStdLT, $lte: inDMaxStdLT };
+          domQuery.date = new Date(addDays(flight.date, 1))
+        } else if (partialDayDom) {
+
+          const indminPlusB = addTimeStrings(inDMinStdLT, paramBInt);
+          const indmaxMinusB = calculateTimeDifference("24:00", inDMaxStdLT);
+
+          const flightDateUTC = new Date(flight.date);
+          flightDateUTC.setUTCHours(0, 0, 0, 0);
+
+          // Calculate the next day in UTC for comparison
+          const nextDayDateUTC = new Date(flightDateUTC);
+          nextDayDateUTC.setDate(nextDayDateUTC.getDate() + 1);
+
+          domQuery.$or = [
+            {
+              std: { $gte: inDMinStdLT, $lte: "23:59" },
+              date: { $gte: flightDateUTC, $lt: nextDayDateUTC }
+            },
+            {
+              std: { $gte: "00:00", $lte: indmaxMinusB },
+              date: { $gte: nextDayDateUTC, $lt: addDays(nextDayDateUTC, 1) }
+            }
+          ];
+        }
+
+        if (sameDayInt) {
+          intlQuery.std = { $gte: inInMinStdLT, $lte: inInMaxStdLT };
+          intlQuery.date = new Date(flight.date);
+        } else if (nextDayInt) {
+          intlQuery.std = { $gte: inInMinStdLT, $lte: inInMaxStdLT };
+          intlQuery.date = new Date(addDays(flight.date, 1));
+        } else if (partialDayInt) {
+
+          const dinminPlusB = addTimeStrings(inInMinStdLT, paramBInt);
+          const ininmaxMinusB = calculateTimeDifference("24:00", inInMaxStdLT);
+
+          const flightDateUTC = new Date(flight.date);
+          flightDateUTC.setUTCHours(0, 0, 0, 0);
+
+          // Calculate the next day in UTC for comparison
+          const nextDayDateUTC = new Date(flightDateUTC);
+          nextDayDateUTC.setDate(nextDayDateUTC.getDate() + 1);
+
+          intlQuery.$or = [
+            {
+              std: { $gte: inInMinStdLT, $lte: "23:59" },
+              date: { $gte: flightDateUTC, $lt: nextDayDateUTC }
+            },
+            {
+              std: { $gte: "00:00", $lte: ininmaxMinusB },
+              date: { $gte: nextDayDateUTC, $lt: addDays(nextDayDateUTC, 1) }
+            }
+          ];
+        }
+      }
+      // Optimize inner queries to only fetch _id and process with cursors
+      const domFlightCursor = Flights.find(domQuery).select('_id').cursor();
+      const intlFlightCursor = Flights.find(intlQuery).select('_id').cursor();
+
+      const beyondODsIds = [];
+
+      // Process domFlights
+      for await (const domFlight of domFlightCursor) {
+        beyondODsIds.push(domFlight._id);
+
+        // Update behindODs field of the domFlight
+        await Flights.updateOne(
+          { _id: domFlight._id },
+          { $addToSet: { behindODs: flight._id } }
+        );
+      }
+
+      // Process intlFlights
+      for await (const intlFlight of intlFlightCursor) {
+        beyondODsIds.push(intlFlight._id);
+
+        // Update behindODs field of the intlFlight
+        await Flights.updateOne(
+          { _id: intlFlight._id },
+          { $addToSet: { behindODs: flight._id } }
+        );
+      }
+
+      // Update beyondODs field of the current flight
+      await Flights.updateOne(
+        { _id: flight._id },
+        { $set: { beyondODs: beyondODsIds } }
       );
-
-      // Add behindODs update queries
-      flightConnections.push(...domFlights.map(f => ({
-        updateOne: {
-          filter: { _id: f._id },
-          update: { $addToSet: { behindODs: flight._id } },
-        }
-      })));
-
-      flightConnections.push(...intlFlights.map(f => ({
-        updateOne: {
-          filter: { _id: f._id },
-          update: { $addToSet: { behindODs: flight._id } },
-        }
-      })));
     }
-
-    // Perform all updates in bulk (for beyondODs and behindODs)
-    await Promise.all([
-      ...updateQueries,
-      ...flightConnections.map(update => Flights.bulkWrite([update])),
-    ]);
 
     console.log("Connections Completed");
     res.status(200).json({ message: "Connections Completed" });
@@ -1343,39 +1495,6 @@ const createConnections = async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
-
-const createDomQuery = (flight, stdHTZ, stationArr) => {
-  // Logic for creating domQuery, including times and filters
-  const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
-  const ddMaxStdLT = addTimeStrings(flight.sta, stationArr.ddMaxCT);
-
-  const domQuery = {
-    depStn: flight.arrStn,
-    arrStn: { $ne: flight.depStn },
-    domIntl: { $regex: new RegExp('dom', 'i') },
-    std: { $gte: ddMinStdLT, $lte: ddMaxStdLT },
-    date: new Date(flight.date),
-  };
-
-  return domQuery;
-};
-
-const createIntlQuery = (flight, stdHTZ, stationArr) => {
-  // Logic for creating intlQuery, including times and filters
-  const inDMinStdLT = addTimeStrings(flight.sta, stationArr.inDMinCT);
-  const inDMaxStdLT = addTimeStrings(flight.sta, stationArr.inDMaxCT);
-
-  const intlQuery = {
-    depStn: flight.arrStn,
-    arrStn: { $ne: flight.depStn },
-    domIntl: { $regex: new RegExp('intl', 'i') },
-    std: { $gte: inDMinStdLT, $lte: inDMaxStdLT },
-    date: new Date(flight.date),
-  };
-
-  return intlQuery;
-};
-
 
 // const createConnections = async (req, res) => {
 //   try {
