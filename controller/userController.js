@@ -1282,7 +1282,7 @@ const createConnections = async (req, res) => {
 
     let count = 0; 
     for (const flight of allFlights) {
-      count++;
+      console.log("count is : ", count++);
       const stationArr = stationsMap[flight.arrStn];
       const stationDep = stationsMap[flight.depStn];
 
