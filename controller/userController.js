@@ -1258,129 +1258,151 @@ function addDays(date, days) {
   return result; // Return the new date object
 }
 
+
 const createConnections = async (req, res) => {
   try {
     console.log("Create Connection called");
 
     const userId = req.user.id;
 
-    // Fetch user's hometimeZone (if needed, uncomment)
-    // const user = await User.findById(userId);
+    // Fetch user's hometimeZone
+    const user = await User.findById(userId);
 
-    // Pre-fetch stations data and create a map
-    const stationsMap = {};
+    // Pre-fetch stations data into a map
     const stations = await Stations.find({ userId });
-    for (const station of stations) {
-      stationsMap[station.stationName] = station;
-    }
+    const stationsMap = stations.reduce((acc, station) => {
+      acc[station.stationName] = station;
+      return acc;
+    }, {});
 
-    // Fetch all flights for the user in a single query
-    const allFlights = await Flights.find({ userId }).lean(); // Use lean() to reduce memory overhead
-    const flightCount = allFlights.length;
+    // Fetch all flight entries in a single query
+    const allFlights = await Flights.find({ userId });
 
-    console.log(`Fetched ${flightCount} flights for user ${userId}`);
+    // Prepare the bulk operations array for updates
+    const bulkOps = [];
+    const updateOperations = [];
 
-    // Initialize fields for all flights in batches
-    const initBatches = [];
-    for (let i = 0; i < flightCount; i += 1000) {
-      const batch = allFlights.slice(i, i + 1000).map((flight) => ({
-        updateOne: {
-          filter: { _id: flight._id },
-          update: { $set: { beyondODs: [], behindODs: [] } },
-        },
-      }));
-      initBatches.push(batch);
-    }
-    for (const batch of initBatches) {
-      await Flights.bulkWrite(batch);
-    }
-    console.log("Initialized beyondODs and behindODs fields");
-
-    // Process flights in smaller batches
-    const processBatch = async (flightsBatch) => {
-      const bulkUpdates = [];
-      for (const flight of flightsBatch) {
-        const stationArr = stationsMap[flight.arrStn];
-        const stationDep = stationsMap[flight.depStn];
-
-        if (!stationArr || !stationDep) {
-          console.error(`Missing station data for flight ${flight._id}`);
-          continue; // Skip this flight
-        }
-
-        const stdHTZ = convertTimeToTZ(flight.std, stationDep.stdtz, stationArr.stdtz);
-
-        // Build queries (similar logic as before)
-        const domQuery = {
-          depStn: flight.arrStn,
-          arrStn: { $ne: flight.depStn },
-          domIntl: { $regex: /dom/i },
-        };
-        const intlQuery = {
-          depStn: flight.arrStn,
-          arrStn: { $ne: flight.depStn },
-          domIntl: { $regex: /intl/i },
-        };
-
-        // Logic for determining query ranges (same as before)
-        // Populate domQuery and intlQuery based on dom/intl conditions
-        // ...
-
-        // Execute queries for connections
-        const [domFlights, intlFlights] = await Promise.all([
-          Flights.find(domQuery).lean(),
-          Flights.find(intlQuery).lean(),
-        ]);
-
-        const beyondODs = [...domFlights.map((f) => f._id), ...intlFlights.map((f) => f._id)];
-
-        // Add updates for the current flight
-        bulkUpdates.push({
+    // Process each flight to determine connections
+    for (const flight of allFlights) {
+      if (flight.userId === userId) {
+        flight.beyondODs = [];
+        flight.behindODs = [];
+        bulkOps.push({
           updateOne: {
             filter: { _id: flight._id },
-            update: { $set: { beyondODs } },
-          },
+            update: { $set: { beyondODs: [], behindODs: [] } }
+          }
+        });
+      }
+
+      const stationArr = stationsMap[flight.arrStn];
+      const stationDep = stationsMap[flight.depStn];
+
+      if (!stationArr) {
+        console.error(`Station not found for flight with arrStn: ${flight.arrStn}`);
+        continue;
+      }
+
+      const stdHTZ = convertTimeToTZ(flight.std, stationDep.stdtz, stationArr.stdtz);
+
+      const domQuery = {
+        depStn: flight.arrStn,
+        arrStn: { $ne: flight.depStn },
+        domIntl: { $regex: new RegExp('dom', 'i') }
+      };
+
+      const intlQuery = {
+        depStn: flight.arrStn,
+        arrStn: { $ne: flight.depStn },
+        domIntl: { $regex: new RegExp('intl', 'i') }
+      };
+
+      if (flight.domIntl.toLowerCase() === 'dom') {
+        const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
+        const ddMaxStdLT = addTimeStrings(flight.sta, stationArr.ddMaxCT);
+        const dInMinStdLT = addTimeStrings(flight.sta, stationArr.dInMinCT);
+        const dInMaxStdLT = addTimeStrings(flight.sta, stationArr.dInMaxCT);
+
+        const domConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMinCT);
+        const domConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.ddMaxCT);
+        const intConnectingTimeMin = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMinCT);
+        const intConnectingTimeMax = addTimeStrings(stdHTZ, flight.bt, stationArr.dInMaxCT);
+
+        const sameDayDom = compareTimes(domConnectingTimeMax, "23:59") <= 0;
+        const nextDayDom = compareTimes(domConnectingTimeMin, "23:59") > 0;
+        const partialDayDom = compareTimes(domConnectingTimeMin, "23:59") <= 0 && compareTimes(domConnectingTimeMax, "23:59") > 0;
+
+        const sameDayInt = compareTimes(intConnectingTimeMax, "23:59") <= 0;
+        const nextDayInt = compareTimes(intConnectingTimeMin, "23:59") > 0;
+        const partialDayInt = compareTimes(intConnectingTimeMin, "23:59") <= 0 && compareTimes(intConnectingTimeMax, "23:59") > 0;
+
+        // Build queries
+        buildQueries(flight, sameDayDom, nextDayDom, partialDayDom, ddMinStdLT, ddMaxStdLT, domQuery);
+        buildQueries(flight, sameDayInt, nextDayInt, partialDayInt, dInMinStdLT, dInMaxStdLT, intlQuery);
+
+        // Fetch connected flights in bulk
+        const domFlights = await Flights.find(domQuery);
+        const intlFlights = await Flights.find(intlQuery);
+
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: flight._id },
+            update: { $set: { beyondODs: [...domFlights.map(f => f._id), ...intlFlights.map(f => f._id)] } }
+          }
         });
 
-        // Add behindODs updates for connected flights
-        domFlights.forEach((f) =>
-          bulkUpdates.push({
+        // Prepare behindODs updates
+        domFlights.forEach(f => {
+          updateOperations.push({
             updateOne: {
               filter: { _id: f._id },
-              update: { $addToSet: { behindODs: flight._id } },
-            },
-          })
-        );
-        intlFlights.forEach((f) =>
-          bulkUpdates.push({
+              update: { $addToSet: { behindODs: flight._id } }
+            }
+          });
+        });
+
+        intlFlights.forEach(f => {
+          updateOperations.push({
             updateOne: {
               filter: { _id: f._id },
-              update: { $addToSet: { behindODs: flight._id } },
-            },
-          })
-        );
+              update: { $addToSet: { behindODs: flight._id } }
+            }
+          });
+        });
       }
-
-      // Execute bulk updates
-      if (bulkUpdates.length > 0) {
-        await Flights.bulkWrite(bulkUpdates);
-      }
-    };
-
-    // Process all flights in batches
-    const batchSize = 1000;
-    for (let i = 0; i < flightCount; i += batchSize) {
-      const flightsBatch = allFlights.slice(i, i + batchSize);
-      await processBatch(flightsBatch);
     }
+
+    // Execute bulk operations
+    if (bulkOps.length) await Flights.bulkWrite(bulkOps);
+    if (updateOperations.length) await Flights.bulkWrite(updateOperations);
 
     console.log("Connections Completed");
     res.status(200).json({ message: "Connections Completed" });
   } catch (error) {
-    console.error("Error processing flight connections:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error processing flight connections:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+function buildQueries(flight, sameDay, nextDay, partialDay, minTime, maxTime, query) {
+  if (sameDay) {
+    query.std = { $gte: minTime, $lte: maxTime };
+    query.date = new Date(flight.date);
+  } else if (nextDay) {
+    query.std = { $gte: minTime, $lte: maxTime };
+    query.date = new Date(addDays(flight.date, 1));
+  } else if (partialDay) {
+    const paramB = calculateTimeDifference(minTime, "23:59");
+    const minPlusB = addTimeStrings(minTime, paramB);
+    const maxMinusB = calculateTimeDifference(paramB, maxTime);
+
+    query.$or = [
+      { std: { $gte: minTime, $lte: maxMinusB }, date: new Date(flight.date) },
+      { std: { $gte: minPlusB, $lte: maxTime }, date: new Date(addDays(flight.date, 1)) }
+    ];
+  }
+}
+
 
 // const createConnections = async (req, res) => {
 //   try {
