@@ -1045,31 +1045,27 @@ const AdminLogin = (req, res) => {
 const getFlights = async (req, res) => {
   try {
     const id = req.user.id;
-    
-    console.log("id is : ",id);
-    
-    const data = await Flights.find({ userId: id, isComplete: true }).sort({ flight: 1, date: 1 });
 
-    console.log("initial data is : ",data.length);
+    // Get pagination parameters from the query (default to page 1, 10 rows per page)
+    const { page = 1, limit = 10 } = req.query;
 
-    let timeZone;
-    if (Array.isArray(data) && data.length > 0) {
-      timeZone = data[0].timeZone;
-    }
+    const data = await Flights.find({ userId: id, isComplete: true })
+      .sort({ flight: 1, date: 1 }) // Sort by flight and date
+      .skip((page - 1) * limit) // Skip documents for previous pages
+      .limit(Number(limit)); // Limit results to `limit`
 
-    if (timeZone) {
-      startDate = timeZoneCorrectedDates(startDate, timeZone);
-      endDate = timeZoneCorrectedDates(endDate, timeZone);
-    }
+    // Get the total count for pagination
+    const total = await Flights.countDocuments({ userId: id, isComplete: true });
 
-    console.log("final data is : ",data.length);
+    console.log("Query finished, page : "+ page + " data length : "+ data.length);
 
-    // const data = await Flights.find({ userId: id});
-    res.json(data);
+    res.json({ data, total }); // Send both data and total count
   } catch (error) {
+    console.error("Error occurred in getFlights:", error); // Detailed error log
     res.status(500).json({ error: "Internal server error" });
   }
 };
+
 
 function regexForFindingSuperset(inputString) {
   // Create an array of positive lookahead assertions for each letter in the input string
