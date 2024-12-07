@@ -59,6 +59,7 @@ user.post("/send-contactEmail", jsonParser, userLogin.sendContactEmail);
 
 user.post("/change-passowrd", jsonParser, userLogin.changePassword);
 user.get("/flight", verifyToken, userController.getFlights);
+user.post("/searchflights", verifyToken, userController.searchFlights);
 user.post("/flightsWoRotations", verifyToken, jsonParser, userController.getFlightsWoRotations);
 user.get("/listVariants", verifyToken, userController.getVariants);
 user.get("/listRotations", verifyToken, userController.getRotations);

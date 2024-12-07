@@ -9,9 +9,12 @@ app.use(cors());
 
 require("./config/db");
 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 app.use("/", userRoutes);
 
-// app.use(express.static("dist"));
+app.use(express.static("dist"));
 
 
 // app.get("*", (req, res) => {
