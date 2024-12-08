@@ -576,10 +576,6 @@ const downloadExpenses = async (req, res) => {
       { header: "Rotations #", key: "rotationNumber" },
     ];
 
-    let count = 1;
-    const batchSize = 10000; // Process entries in batches
-    let skip = 0;
-
     // Set response headers for download
     res.setHeader(
       "Content-Type",
@@ -587,32 +583,29 @@ const downloadExpenses = async (req, res) => {
     );
     res.setHeader("Content-Disposition", `attachment; filename=FLGTs.xlsx`);
 
-    while (true) {
-      const productData = await Flights.find({ userId })
-        .skip(skip)
-        .limit(batchSize);
+    let count = 1;
 
-      if (productData.length === 0) break;
+    // Use MongoDB cursor to stream data
+    const cursor = Flights.find({ userId }).cursor();
 
-      productData.forEach((product) => {
-        const excelProduct = {
-          s_no: count,
-          ...product.toObject(),
-          seats: parseFloat(product.seats),
-          CargoCapT: parseFloat(product.CargoCapT),
-          dist: parseFloat(product.dist),
-          pax: parseInt(product.pax, 10),
-          CargoT: parseFloat(product.CargoT),
-          ask: parseInt(product.ask, 10),
-          rsk: parseInt(product.rsk, 10),
-          cargoAtk: parseInt(product.cargoAtk, 10),
-          cargoRtk: parseInt(product.cargoRtk, 10),
-        };
-        worksheet.addRow(excelProduct).commit();
-        count++;
-      });
+    for await (const product of cursor) {
+      const excelProduct = {
+        s_no: count,
+        ...product.toObject(),
+        date: product.date ? new Date(product.date).toISOString().split("T")[0] : "",
+        seats: parseFloat(product.seats),
+        CargoCapT: parseFloat(product.CargoCapT),
+        dist: parseFloat(product.dist),
+        pax: parseInt(product.pax, 10),
+        CargoT: parseFloat(product.CargoT),
+        ask: parseInt(product.ask, 10),
+        rsk: parseInt(product.rsk, 10),
+        cargoAtk: parseInt(product.cargoAtk, 10),
+        cargoRtk: parseInt(product.cargoRtk, 10),
+      };
 
-      skip += batchSize; // Move to the next batch
+      worksheet.addRow(excelProduct).commit();
+      count++;
     }
 
     worksheet.commit(); // Finalize the worksheet
@@ -622,6 +615,7 @@ const downloadExpenses = async (req, res) => {
     res.status(500).send("An error occurred while generating the file.");
   }
 };
+
 
 // const downloadExpenses = async (req, res) => {
 //   try {
