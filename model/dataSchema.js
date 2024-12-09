@@ -3,7 +3,7 @@ const FLIGHT = require("../model/flight");
 const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
-const userData = require("../model/userData");
+const userData = require("../model/userSchema");
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
