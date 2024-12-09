@@ -121,13 +121,12 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
-flightSchema.createIndexes([
-  { key: { userId: 1 } },
-  { key: { depStn: 1 } },
-  { key: { arrStn: 1 } },
-  { key: { domIntl: 1 } },
-  { key: { std: 1 } },
-  { key: { date: 1 } }
-]);
+flightSchema.index({ userId: 1 });
+flightSchema.index({ depStn: 1 });
+flightSchema.index({ arrStn: 1 });
+flightSchema.index({ domIntl: 1 });
+flightSchema.index({ std: 1 });
+flightSchema.index({ date: 1 });
+
 
 module.exports = mongoose.model("FLIGHT", flightSchema);
