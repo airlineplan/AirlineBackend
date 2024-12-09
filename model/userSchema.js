@@ -19,6 +19,10 @@ const userSchema = new mongoose.Schema({
   hometimeZone: {
     type: String,
     default: 'UTC+5:30'
+  },
+  todoConnection : {
+    type: Boolean,
+    default: false
   }
 });
 

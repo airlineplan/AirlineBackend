@@ -3,6 +3,7 @@ const FLIGHT = require("../model/flight");
 const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
+const userData = require("../model/userData");
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
@@ -341,6 +342,10 @@ async function createFlgts(doc) {
 
       try {
         await newFlight.save();
+        
+        //tracker for creating connections
+        userData.findByIdAndUpdate(req.user.id, { todoConnection: true });
+
         currentFlightCount++; // Increment the flight count after successful save
         console.log("New flight entry created.");
       } catch (error) {

@@ -90,10 +90,6 @@ const flightSchema = new mongoose.Schema(
     rotationNumber: {
       type: String
     },
-    // pendingConnection: {
-    //   type: Boolean,
-    //   default : false,
-    // },
     beyondODs: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -115,7 +111,7 @@ const flightSchema = new mongoose.Schema(
     },
     dow: {
       type: String,
-    },
+    }
   }
 );
 

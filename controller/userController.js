@@ -1628,12 +1628,20 @@ function addDays(date, days) {
 //   }
 // };
 
+
+
 const createConnections = async (req, res) => {
   try {
     console.log("Create Connection called");
 
     const userId = req.user.id;
-
+    if (!user) {
+      return res.status(404).send("User not found"); // Handle case when user is not found
+    }
+    
+    if (user.todoConnection) {
+      res.status(200).json({ message: "No changes Seen." });
+    }
     // Step 1: Pre-fetch stations data and create a map for quick access
     const stations = await Stations.find({ userId }).lean();
     const stationsMap = {};
@@ -1645,21 +1653,21 @@ const createConnections = async (req, res) => {
     // Step 2: Reset beyondODs and behindODs fields for all user flights using bulk update
     await Flights.updateMany(
       { userId },
-      { $set: { beyondODs: [], behindODs: false } }
+      { $set: { beyondODs: false, behindODs: false } }
     );
     console.log("Reset beyondODs and behindODs for all flights.");
 
-    // Step 3: Initialize cursor for iterating through flights
+    // Step 3: First Pass - Set beyondODs
+    console.log("Starting First Pass: Setting beyondODs...");
     const flightCursor = Flights.find({ userId }).cursor();
     const BATCH_SIZE = 1000; // Adjust based on memory and performance
     let batch = [];
     let totalProcessed = 0;
 
-    // Prepare arrays to hold bulk update operations
-    let bulkUpdates = [];
+    // Function to process a batch and set beyondODs
+    const processBatchSetBeyondODs = async (batch) => {
+      const bulkOps = [];
 
-    // Function to process a batch of flights
-    const processBatch = async (batch) => {
       for (const flight of batch) {
         const { arrStn, depStn, domIntl, std, sta, bt, date, _id } = flight;
 
@@ -1841,37 +1849,40 @@ const createConnections = async (req, res) => {
           Flights.findOne(intlQuery, '_id').lean()
         ]);
 
-        // Prepare the beyondODs array
-        const beyondODs = [];
-        if (domFlightExists) beyondODs.push(domFlightExists._id);
-        if (intlFlightExists) beyondODs.push(intlFlightExists._id);
+        // Determine if any matching flight exists
+        const hasMatchingFlight = domFlightExists || intlFlightExists;
 
-        // Prepare the update object
-        const update = {
-          $set: {
-            beyondODs: beyondODs,
-            // behindODs will be updated in reverse after all beyondODs are set
-          }
-        };
-
-        // Add the update operation to bulkUpdates
-        bulkUpdates.push({
+        // Prepare the update operation for beyondODs
+        bulkOps.push({
           updateOne: {
             filter: { _id },
-            update: update
+            update: { $set: { beyondODs: hasMatchingFlight } }
           }
         });
 
-        // To handle behindODs efficiently, we'll need to collect which flights are matched
-        // However, since we're only checking for existence, we cannot accurately update behindODs
-        // Therefore, we'll skip updating behindODs in this approach
+        // If beyondODs=true, prepare update operations to set behindODs=true for matching flights
+        if (hasMatchingFlight) {
+          const matchingFlights = [];
+
+          if (domFlightExists) matchingFlights.push(domFlightExists._id);
+          if (intlFlightExists) matchingFlights.push(intlFlightExists._id);
+
+          matchingFlights.forEach(matchId => {
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: matchId },
+                update: { $set: { behindODs: true } }
+              }
+            });
+          });
+        }
       }
 
-      if (bulkUpdates.length > 0) {
-        await Flights.bulkWrite(bulkUpdates);
-        totalProcessed += bulkUpdates.length;
-        console.log(`Bulk updated ${bulkUpdates.length} flights. Total processed: ${totalProcessed}`);
-        bulkUpdates = []; // Reset bulkUpdates after execution
+      // Execute bulk updates
+      if (bulkOps.length > 0) {
+        await Flights.bulkWrite(bulkOps, { ordered: false });
+        totalProcessed += bulkOps.length;
+        console.log(`Bulk updated ${bulkOps.length} operations. Total operations processed: ${totalProcessed}`);
       }
     };
 
@@ -1880,65 +1891,23 @@ const createConnections = async (req, res) => {
       batch.push(flight);
 
       if (batch.length === BATCH_SIZE) {
-        await processBatch(batch);
+        await processBatchSetBeyondODs(batch);
         batch = []; // Reset batch
       }
     }
 
     // Process any remaining flights in the final batch
     if (batch.length > 0) {
-      await processBatch(batch);
-      console.log(`Final batch processed. Total flights processed: ${totalProcessed}`);
+      await processBatchSetBeyondODs(batch);
+      console.log(`Final batch processed. Total operations processed: ${totalProcessed}`);
     }
 
-    // After setting beyondODs, we can now update behindODs based on beyondODs
-    // Since beyondODs now contains only one ID per flight, we can iterate and update behindODs accordingly
+    console.log("First Pass Completed: beyondODs and behindODs have been set.");
 
-    console.log("Updating behindODs based on beyondODs...");
-
-    const updateBehindODsCursor = Flights.find({ userId, beyondODs: { $ne: [] } }).cursor();
-    let behindBatch = [];
-    let totalBehindProcessed = 0;
-
-    // Prepare bulk update operations for behindODs
-    let bulkBehindUpdates = [];
-
-    const processBehindBatch = async (behindBatch) => {
-      for (const flight of behindBatch) {
-        const { beyondODs, _id } = flight;
-
-        // Set behindODs to true since there exists at least one flight that considers this flight as behind
-        bulkBehindUpdates.push({
-          updateOne: {
-            filter: { _id },
-            update: { $set: { behindODs: true } }
-          }
-        });
-      }
-
-      if (bulkBehindUpdates.length > 0) {
-        await Flights.bulkWrite(bulkBehindUpdates);
-        totalBehindProcessed += bulkBehindUpdates.length;
-        console.log(`Bulk updated behindODs for ${bulkBehindUpdates.length} flights. Total behind processed: ${totalBehindProcessed}`);
-        bulkBehindUpdates = []; // Reset bulkBehindUpdates after execution
-      }
-    };
-
-    // Iterate through the cursor and process behindODs in batches
-    for (let flight = await updateBehindODsCursor.next(); flight != null; flight = await updateBehindODsCursor.next()) {
-      behindBatch.push(flight);
-
-      if (behindBatch.length === BATCH_SIZE) {
-        await processBehindBatch(behindBatch);
-        behindBatch = []; // Reset behindBatch
-      }
-    }
-
-    // Process any remaining flights in the final behindBatch
-    if (behindBatch.length > 0) {
-      await processBehindBatch(behindBatch);
-      console.log(`Final behindBatch processed. Total behind flights processed: ${totalBehindProcessed}`);
-    }
+    // Step 4: Second Pass - Ensure behindODs are correctly set
+    // This step is optional if behindODs have already been set correctly in the first pass.
+    // If behindODs need to reflect all reverse mappings, a second pass using aggregation might be necessary.
+    // However, given the current implementation sets behindODs during the first pass, a second pass may not be required.
 
     console.log("Connections Completed Successfully.");
     res.status(200).json({ message: "Connections Completed Successfully." });
