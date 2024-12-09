@@ -1657,7 +1657,7 @@ const createConnections = async (req, res) => {
 
     for await (const flight of flightCursor) {
       processedCount++;
-      if (processedCount % 10000 === 0) {
+      if (processedCount % 1000 === 0) {
         console.log(`Processed ${processedCount} flights`);
       }
 
