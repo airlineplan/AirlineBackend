@@ -1841,8 +1841,8 @@ const createConnections = async (req, res) => {
       }
 
       // Log the queries for debugging
-      console.log("domQuery is : " + JSON.stringify(domQuery));
-      console.log("intlQuery is : " + JSON.stringify(intlQuery));
+      // console.log("domQuery is : " + JSON.stringify(domQuery));
+      // console.log("intlQuery is : " + JSON.stringify(intlQuery));
 
       // Find connecting flights using lean queries to improve performance
       const [domFlights, intlFlights] = await Promise.all([
