@@ -76,4 +76,6 @@ const stationSchema = new mongoose.Schema({
     }
 });
 
+stationSchema.index({ userId: 1, stationName: 1 });
+
 module.exports = mongoose.model("Station", stationSchema);

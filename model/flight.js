@@ -121,4 +121,8 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
+flightSchema.index({ userId: 1, depStn: 1, arrStn: 1, date: 1 });
+flightSchema.index({ depStn: 1, arrStn: 1, date: 1, domIntl: 1 });
+
+
 module.exports = mongoose.model("FLIGHT", flightSchema);
