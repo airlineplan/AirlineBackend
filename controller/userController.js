@@ -1635,6 +1635,8 @@ const createConnections = async (req, res) => {
     console.log("Create Connection called");
 
     const userId = req.user.id;
+    const user = await User.findById(userId);
+    
     if (!user) {
       return res.status(404).send("User not found"); // Handle case when user is not found
     }
