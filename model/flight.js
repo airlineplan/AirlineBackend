@@ -121,7 +121,7 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
-Flights.createIndexes([
+flightSchema.createIndexes([
   { key: { userId: 1 } },
   { key: { depStn: 1 } },
   { key: { arrStn: 1 } },
