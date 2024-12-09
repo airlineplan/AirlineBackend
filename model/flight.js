@@ -90,12 +90,10 @@ const flightSchema = new mongoose.Schema(
     rotationNumber: {
       type: String
     },
-    beyondODs: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'FLIGHT',
-      },
-    ],
+    beyondODs: {
+      type: Boolean,
+      default: false
+    },
     behindODs: {
       type: Boolean,
       default: false

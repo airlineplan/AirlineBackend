@@ -1636,7 +1636,7 @@ const createConnections = async (req, res) => {
 
     const userId = req.user.id;
     const user = await User.findById(userId);
-    
+
     if (!user) {
       return res.status(404).send("User not found"); // Handle case when user is not found
     }
@@ -2169,6 +2169,7 @@ const createConnections = async (req, res) => {
 //     res.status(500).json({ error: 'Internal server error' });
 //   }
 // };
+
 
 const populateDashboardDropDowns = async (req, res) => {
   try {
