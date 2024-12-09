@@ -1646,13 +1646,11 @@ const createConnections = async (req, res) => {
 
     // Define batch size
     const batchSize = 1000;
-    let cursor = Flights.find({ userId: userId }).cursor();
-    let batch;
+    const cursorOptions = { batchSize: batchSize };
+    const cursor = Flights.find({ userId: userId }).cursor(cursorOptions);
+    let batch = await cursor.nextBatch();
 
-    while (await cursor.hasNext()) {
-      batch = await cursor.next(batchSize);
-      if (!batch || batch.length === 0) break;
-
+    while (batch.length > 0) {
       // Collect update operations
       const updateOperations = [];
 
@@ -1849,7 +1847,13 @@ const createConnections = async (req, res) => {
       if (updateOperations.length > 0) {
         await Flights.bulkWrite(updateOperations, { ordered: false });
       }
+
+      // Fetch the next batch
+      batch = await cursor.nextBatch();
     }
+
+    // Close the cursor
+    await cursor.close();
 
     console.log("Connections Completed");
     res.status(200).json({ message: "Connections Completed" });
