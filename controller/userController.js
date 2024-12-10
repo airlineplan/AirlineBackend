@@ -1628,28 +1628,6 @@ function addDays(date, days) {
 //   }
 // };
 
-const compareTimes = (time1, time2) => {
-  // Compare two "HH:mm" time strings
-  const [h1, m1] = time1.split(':').map(Number);
-  const [h2, m2] = time2.split(':').map(Number);
-  if (h1 !== h2) return h1 - h2;
-  return m1 - m2;
-};
-
-const calculateTimeDifference = (startTime, endTime) => {
-  // Calculate the difference between two "HH:mm" time strings
-  const [h1, m1] = startTime.split(':').map(Number);
-  const [h2, m2] = endTime.split(':').map(Number);
-  const total1 = h1 * 60 + m1;
-  const total2 = h2 * 60 + m2;
-  return (total2 - total1 + 1440) % 1440; // Difference in minutes
-};
-
-const addDays = (date, days = 1) => {
-  const result = new Date(date);
-  result.setDate(result.getDate() + days);
-  return result;
-};
 
 // Helper function to normalize date to UTC midnight
 const normalizeDate = (date) => {
@@ -3319,12 +3297,6 @@ const addRotationDetailsFlgtChange = async (req, res) => {
 
     startEffDate.setDate(startEffDate.getDate() + 1);
     startEffDate.setHours(0, 0, 0, 0);
-
-    const normalizeDate = (date) => {
-      const d = new Date(date);
-      d.setHours(0, 0, 0, 0);
-      return d;
-    };
 
     const existingFlightsDates = existingFlights.map(flight => flight.date);
     const allFlightsWithSameNetworkIdDates = allFlightsWithSameNetworkId.map(flight => flight.date);
