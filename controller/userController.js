@@ -1688,7 +1688,7 @@ const createConnections = async (req, res) => {
       return res.status(404).send("User not found"); // Handle case when user is not found
     }
     
-    if (user.todoConnection) {
+    if (!user.todoConnection) {
       return res.status(200).json({ message: "No changes Seen." });
     }
 
