@@ -17,6 +17,7 @@ const jwt = require("jsonwebtoken");
 const secretKey = "HelloCableBuddy";
 const CSV = require("csv-parser");
 const fs = require("fs");
+const mongoose = require('mongoose');
 const moment = require("moment-timezone");
 require("dotenv").config();
 const { DateTime } = require('luxon');
