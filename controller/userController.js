@@ -1976,7 +1976,7 @@ const createConnections = async (req, res) => {
     flightsWithBeyondODs.forEach(flightId => {
       bulkOps.push({
         updateOne: {
-          filter: { _id: mongoose.Types.ObjectId(flightId) },
+          filter: { _id: new mongoose.Types.ObjectId(flightId) },
           update: { $set: { beyondODs: true } }
         }
       });
@@ -1986,7 +1986,7 @@ const createConnections = async (req, res) => {
     flightsWithBehindODs.forEach(flightId => {
       bulkOps.push({
         updateOne: {
-          filter: { _id: mongoose.Types.ObjectId(flightId) },
+          filter: { _id: new mongoose.Types.ObjectId(flightId) },
           update: { $set: { behindODs: true } }
         }
       });
