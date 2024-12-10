@@ -1628,7 +1628,75 @@ function addDays(date, days) {
 //   }
 // };
 
+const compareTimes = (time1, time2) => {
+  // Compare two "HH:mm" time strings
+  const [h1, m1] = time1.split(':').map(Number);
+  const [h2, m2] = time2.split(':').map(Number);
+  if (h1 !== h2) return h1 - h2;
+  return m1 - m2;
+};
 
+const calculateTimeDifference = (startTime, endTime) => {
+  // Calculate the difference between two "HH:mm" time strings
+  const [h1, m1] = startTime.split(':').map(Number);
+  const [h2, m2] = endTime.split(':').map(Number);
+  const total1 = h1 * 60 + m1;
+  const total2 = h2 * 60 + m2;
+  return (total2 - total1 + 1440) % 1440; // Difference in minutes
+};
+
+const addDays = (date, days = 1) => {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+};
+
+// Helper function to normalize date to UTC midnight
+const normalizeDate = (date) => {
+  const d = new Date(date);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+};
+
+// Binary Search Helper
+const binarySearchByStd = (arr, targetTime, findStart) => {
+  let low = 0;
+  let high = arr.length - 1;
+  let result = -1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const cmp = compareTimes(arr[mid].std, targetTime);
+    if (cmp === 0) {
+      result = mid;
+      if (findStart) {
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    } else if (cmp < 0) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  if (result === -1) {
+    if (findStart) {
+      if (low < arr.length && compareTimes(arr[low].std, targetTime) >= 0) {
+        return low;
+      }
+      return -1;
+    } else {
+      if (high >= 0 && compareTimes(arr[high].std, targetTime) <= 0) {
+        return high;
+      }
+      return -1;
+    }
+  }
+
+  return result;
+};
 
 const createConnections = async (req, res) => {
   try {
