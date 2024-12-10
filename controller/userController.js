@@ -2507,32 +2507,58 @@ const getDashboardData = async (req, res) => {
 
           const validRotationFlights = flightsInPeriod.filter(flight => typeof flight.rotationNumber === 'string' && flight.rotationNumber.trim() !== '');
 
-
           function getFlightsWithBehindODs(flightsInPeriod) {
             let flightsWithBehindODs = [];
-
+          
             flightsInPeriod.forEach(flight => {
-              // Check if the behindODs array exists and has at least one entry
-              if (flight.behindODs && flight.behindODs.length > 0) {
+              // Check if behindODs is true
+              if (flight.behindODs) {
                 flightsWithBehindODs.push(flight);
               }
             });
-
+          
             return flightsWithBehindODs;
           }
-
+          
           function getFlightsWithBeyondODs(flightsInPeriod) {
             let flightsWithBeyondODs = [];
-
+          
             flightsInPeriod.forEach(flight => {
-              // Check if the behindODs array exists and has at least one entry
-              if (flight.beyondODs && flight.beyondODs.length > 0) {
+              // Check if beyondODs is true
+              if (flight.beyondODs) {
                 flightsWithBeyondODs.push(flight);
               }
             });
-
+          
             return flightsWithBeyondODs;
           }
+
+          //This is for behindOD & beyond as array 
+          // function getFlightsWithBehindODs(flightsInPeriod) {
+          //   let flightsWithBehindODs = [];
+
+          //   flightsInPeriod.forEach(flight => {
+          //     // Check if the behindODs array exists and has at least one entry
+          //     if (flight.behindODs && flight.behindODs.length > 0) {
+          //       flightsWithBehindODs.push(flight);
+          //     }
+          //   });
+
+          //   return flightsWithBehindODs;
+          // }
+
+          // function getFlightsWithBeyondODs(flightsInPeriod) {
+          //   let flightsWithBeyondODs = [];
+
+          //   flightsInPeriod.forEach(flight => {
+          //     // Check if the behindODs array exists and has at least one entry
+          //     if (flight.beyondODs && flight.beyondODs.length > 0) {
+          //       flightsWithBeyondODs.push(flight);
+          //     }
+          //   });
+
+          //   return flightsWithBeyondODs;
+          // }
 
           const bhdODFlgts = getFlightsWithBehindODs(flightsInPeriod)
           const beyODFlgts = getFlightsWithBeyondODs(flightsInPeriod)
