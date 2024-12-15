@@ -91,6 +91,7 @@ const AddData = async (req, res) => {
       domINTL: domINTL.toLowerCase()
     });
 
+    newData.userId = userId;
     const data = await newData.save();
 
     const newSector = new Sector({
@@ -184,6 +185,7 @@ const AddDataFromRotations = async (req, res, rotationDetailsId) => {
       domINTL: domINTL.toLowerCase()
     });
 
+    newData.userId = userId;
     const data = await newData.save();
 
     const newSector = new Sector({

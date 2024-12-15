@@ -344,7 +344,7 @@ async function createFlgts(doc) {
         await newFlight.save();
         
         //tracker for creating connections
-        userData.findByIdAndUpdate(req.user.id, { todoConnection: true });
+        userData.findByIdAndUpdate(doc.userId, { todoConnection: true });
 
         currentFlightCount++; // Increment the flight count after successful save
         console.log("New flight entry created.");
