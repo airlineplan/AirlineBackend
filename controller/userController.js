@@ -1141,7 +1141,7 @@ const getFlights = async (req, res) => {
     // Get the total count for pagination
     const total = await Flights.countDocuments({ userId: id, isComplete: true });
 
-    console.log("Query finished, page : "+ page + " data length : "+ data.length);
+    console.log("Query finished, page : " + page + " data length : " + data.length);
 
     res.json({ data, total }); // Send both data and total count
   } catch (error) {
@@ -1153,7 +1153,7 @@ const getFlights = async (req, res) => {
 const searchFlights = async (req, res) => {
   try {
     const {
-      flight, depStn, std, bt, sta, arrStn, variant, date, day, rotations, 
+      flight, depStn, std, bt, sta, arrStn, variant, date, day, rotations,
       seats, cargoT, dist, pax, ask, rsk, cargoAtk, cargoRtk, domIntl,
       userTag1, userTag2, remarks1, remarks2, page, limit,
     } = req.body;
@@ -1689,10 +1689,10 @@ const createConnections = async (req, res) => {
     if (!user) {
       return res.status(404).send("User not found"); // Handle case when user is not found
     }
-    
-    if (!user.todoConnection) {
-      return res.status(200).json({ message: "No changes Seen." });
-    }
+
+    // if (!user.todoConnection) {
+    //   return res.status(200).json({ message: "No changes Seen." });
+    // }
 
     // Step 1: Pre-fetch stations data and create a map for quick access
     const stations = await Stations.find({ userId }).lean();
@@ -1948,7 +1948,12 @@ const createConnections = async (req, res) => {
 
           if (startIdx !== -1 && endIdx !== -1 && startIdx <= endIdx) {
             for (let idx = startIdx; idx <= endIdx; idx++) {
-              results.add(flightsArray[idx]._id.toString());
+              const flightItem = flightsArray[idx];
+
+              // Check that arrStn is not equal to flight.depStn
+              if (flightItem.arrStn !== flight.depStn) {
+                results.add(flightItem._id.toString());
+              }
             }
           }
         }
@@ -2607,27 +2612,27 @@ const getDashboardData = async (req, res) => {
 
           function getFlightsWithBehindODs(flightsInPeriod) {
             let flightsWithBehindODs = [];
-          
+
             flightsInPeriod.forEach(flight => {
               // Check if behindODs is true
               if (flight.behindODs) {
                 flightsWithBehindODs.push(flight);
               }
             });
-          
+
             return flightsWithBehindODs;
           }
-          
+
           function getFlightsWithBeyondODs(flightsInPeriod) {
             let flightsWithBeyondODs = [];
-          
+
             flightsInPeriod.forEach(flight => {
               // Check if beyondODs is true
               if (flight.beyondODs) {
                 flightsWithBeyondODs.push(flight);
               }
             });
-          
+
             return flightsWithBeyondODs;
           }
 
