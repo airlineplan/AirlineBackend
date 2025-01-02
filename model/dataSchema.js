@@ -278,17 +278,6 @@ async function createFlgts(doc) {
   const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
   let currentFlightCount;
 
-  try {
-
-    // Delete existing documents with the same networkId
-    // const result = await FLIGHT.deleteMany({ networkId: doc._id });
-    // console.log(`Existing flight entries deleted: ${result.deletedCount}`);
-
-  } catch (error) {
-    console.error("Error during initial setup:", error);
-    return; // Stop further execution if initial setup fails
-  }
-
   // Get the current count of flights for the user
   currentFlightCount = await FLIGHT.countDocuments({ userId: doc.userId });
 
@@ -342,7 +331,7 @@ async function createFlgts(doc) {
 
       try {
         await newFlight.save();
-        
+
         //tracker for creating connections
         userData.findByIdAndUpdate(doc.userId, { todoConnection: true });
 

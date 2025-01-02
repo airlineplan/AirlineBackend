@@ -22,7 +22,7 @@ var storage = multer.diskStorage({
 var upload = multer({ storage: storage });
 
 const userController = require("../controller/userController");
-// const createConnections = require('../helper/createConnections');
+const createConnections = require('../helper/createConnections');
 
 user.post(
   "/importUser",
@@ -64,7 +64,7 @@ user.post("/flightsWoRotations", verifyToken, jsonParser, userController.getFlig
 user.get("/listVariants", verifyToken, userController.getVariants);
 user.get("/listRotations", verifyToken, userController.getRotations);
 user.get("/dashboard", verifyToken, userController.getDashboardData);
-user.get("/createConnections", verifyToken, userController.createConnections);
+user.get("/createConnections", verifyToken, createConnections);
 user.get("/dashboard/populateDropDowns", verifyToken, userController.populateDashboardDropDowns);
 user.get("/get-stationData", verifyToken, userController.getStationsTableData);
 user.get("/getNextRotationNumber", verifyToken, userController.getNextRotationNumber);

@@ -1,5 +1,7 @@
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
+const Stations = require("./stationSchema");
+
 
 const flightSchema = new mongoose.Schema(
   {
@@ -90,14 +92,18 @@ const flightSchema = new mongoose.Schema(
     rotationNumber: {
       type: String
     },
-    beyondODs: {
-      type: Boolean,
-      default: false
-    },
-    behindODs: {
-      type: Boolean,
-      default: false
-    },
+    // beyondODs: [
+    //   {
+    //     type: mongoose.Schema.Types.ObjectId,
+    //     ref: 'FLIGHT',
+    //   },
+    // ],
+    // behindODs: [
+    //   {
+    //     type: mongoose.Schema.Types.ObjectId,
+    //     ref: 'FLIGHT',
+    //   },
+    // ],
     addedByRotation : {
       type: String 
     },
@@ -113,12 +119,58 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
+// flightSchema.post('save', async function (doc, next) {
+//   try {
+//     console.log('Post-save hook called for flight:', doc._id);
+
+//     await updateConnectionAfterFlightAddition(doc._id);
+    
+//     next();
+//   } catch (error) {
+//     console.error('Error in post-save hook:', error);
+//     next(error);
+//   }
+// });
+
+// flightSchema.pre('deleteMany', async function (next) {
+//   try {
+//     const query = this.getQuery();
+//     const flights = await this.model.find(query, '_id');
+//     this.deletedFlightIds = flights.map(flight => flight._id);
+//     next();
+//   } catch (error) {
+//     console.error('Error in pre-deleteMany hook:', error);
+//     next(error);
+//   }
+// });
+
+// Post-deleteMany hook to access captured IDs after deletion
+// flightSchema.post('deleteMany', async function (result, next) {
+//   try {
+//     if (this.deletedFlightIds) {
+//       console.log('Post-deleteMany hook called. Deleted flight IDs:', this.deletedFlightIds);
+      
+//       for (const flightId of this.deletedFlightIds) {
+//         await updateConnectionAfterFlightDelete(flightId); // Pass the flight ID to the function
+//       }
+//       this.deletedFlightIds = null;
+//     }
+//     next();
+//   } catch (error) {
+//     console.error('Error in post-deleteMany hook:', error);
+//     next(error);
+//   }
+// });
+
+
+//-----------------------------------------------------------
+
+
 flightSchema.index({ userId: 1 });
 flightSchema.index({ depStn: 1 });
 flightSchema.index({ arrStn: 1 });
 flightSchema.index({ domIntl: 1 });
 flightSchema.index({ std: 1 });
 flightSchema.index({ date: 1 });
-
 
 module.exports = mongoose.model("FLIGHT", flightSchema);
