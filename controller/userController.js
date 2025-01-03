@@ -1834,10 +1834,10 @@ const getDashboardData = async (req, res) => {
         timeZone = datas[0].timeZone;
       }
 
-      // if (timeZone) {
-      //   startDate = timeZoneCorrectedDates(startDate, timeZone);
-      //   endDate = timeZoneCorrectedDates(endDate, timeZone);
-      // }
+      if (timeZone) {
+        startDate = timeZoneCorrectedDates(startDate, timeZone);
+        endDate = timeZoneCorrectedDates(endDate, timeZone);
+      }
 
       startDate.setUTCHours(0, 0, 0, 0)
       endDate.setUTCHours(0, 0, 0, 0)
