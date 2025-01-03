@@ -1839,8 +1839,8 @@ const getDashboardData = async (req, res) => {
         endDate = timeZoneCorrectedDates(endDate, timeZone);
       }
 
-      startDate.setUTCHours(0, 0, 0, 0)
-      endDate.setUTCHours(0, 0, 0, 0)
+      // startDate.setUTCHours(0, 0, 0, 0)
+      // endDate.setUTCHours(0, 0, 0, 0)
 
 
       // Calculate the periods based on the periodicity
