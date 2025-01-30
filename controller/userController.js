@@ -1229,6 +1229,25 @@ function regexForFindingSuperset(inputString) {
   return regexPattern;
 }
 
+async function deleteInvalidFlightsForUser(userId) {
+  try {
+    const validNetworkIds = await Data.find({userId:userId}, { _id: 1 }).lean();
+    const validNetworkIdSet = new Set(validNetworkIds.map((net) => net._id.toString())); 
+
+    // Step 2: Delete flights with invalid `networkId` for the given userId
+    const deleteResult = await Flights.deleteMany({
+      userId: userId, 
+      networkId: { $nin: [...validNetworkIdSet] }, 
+    });
+
+    console.log(
+      `Deleted ${deleteResult.deletedCount} flights with invalid network IDs for userId: ${userId}.`
+    );
+  } catch (error) {
+    console.error("Error deleting flights with invalid network IDs:", error);
+    throw error;
+  }
+}
 
 const getFlightsWoRotations = async (req, res) => {
   try {
@@ -1255,16 +1274,15 @@ const getFlightsWoRotations = async (req, res) => {
       isComplete: true,
       $or: [{ rotationNumber: { $exists: false } }, { rotationNumber: null }],
       variant: selectedVariant,
-      effFromDt: { $lte: formattedFromDate },
-      effToDt: { $gte: formattedToDate },
+      effFromDt: { $lte: effFromDate },
+      effToDt: { $gte: effToDate },
       dow: { $regex: dowRegex, $options: 'i' }
     };
 
     const datesArray = [];
-
     // Iterate through each date between fromDate and toDate
     for (let date = fromDate; date <= toDate; date.setDate(date.getDate() + 1)) {
-      const dayOfWeek = date.getDay(); // 0 for Sunday, 1 for Monday, ..., 6 for Saturday
+      const dayOfWeek = date.getDay()+1; // 0 for Sunday, 1 for Monday, ..., 6 for Saturday
 
       // Check if the dayOfWeek matches any selectedDow
       if (dow.includes(String(dayOfWeek))) {
@@ -1283,7 +1301,7 @@ const getFlightsWoRotations = async (req, res) => {
       filter.std = { $gte: allowedStdLt };
     }
 
-
+    await deleteInvalidFlightsForUser(id);
     const data = await Flights.find(filter).sort({ flight: 1, date: 1 });
 
 
@@ -1706,15 +1724,18 @@ const populateDashboardDropDowns = async (req, res) => {
     const filteredSectors = distinctSectors?.[0]?.sector?.filter(sector => sector !== 'undefined-undefined') ?? [];
     const formattedSectors = formatOptions(filteredSectors);
 
-    const data = {
-      from: formatOptions(distinctValues[0].from),
-      to: formatOptions(distinctValues[0].to),
-      variant: formatOptions(distinctValues[0].variant),
-      sector: formattedSectors,
-      userTag1: formatOptions(distinctValues[0].userTag1),
-      userTag2: formatOptions(distinctValues[0].userTag2)
-    };
-
+    let data={};
+    if (!distinctValues) {
+      data = {
+        from: formatOptions(distinctValues[0].from),
+        to: formatOptions(distinctValues[0].to),
+        variant: formatOptions(distinctValues[0].variant),
+        sector: formattedSectors,
+        userTag1: formatOptions(distinctValues[0].userTag1),
+        userTag2: formatOptions(distinctValues[0].userTag2)
+      };  
+    }
+    
     res.json(data);
   } catch (error) {
     console.error(error);
@@ -1915,11 +1936,8 @@ const getDashboardData = async (req, res) => {
 
           flightsQuery.date = {
             $gte: periodStartDate,
-            $lte: periodEndDate
-          }
-
-
-
+            $lte: periodEndDate,
+          };
           // const flightsInPeriod = await Flights.find({
           //   userId: id,
           //   date: {

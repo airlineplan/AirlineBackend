@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const FLIGHT = require("../model/flight");
 const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
+const Connections = require("../model/connectionSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const userData = require("../model/userSchema");
 const Schema = mongoose.Schema;
@@ -475,6 +476,10 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
 
     const result = await FLIGHT.deleteMany({ networkId: networkId });
     console.log(`Existing flight entries deleted: ${result.deletedCount}`);
+
+    const connectionDeleteResult = await Connections.deleteMany({
+      $or: [{ flightID: { $in: result } }, { beyondOD: { $in: result } }],
+    });
 
     // Get the current count of flights for the user
     currentFlightCount = await FLIGHT.countDocuments({ userId: doc.userId });

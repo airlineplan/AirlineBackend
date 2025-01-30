@@ -119,49 +119,25 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
-// flightSchema.post('save', async function (doc, next) {
-//   try {
-//     console.log('Post-save hook called for flight:', doc._id);
+flightSchema.post("deleteMany", async function (result) {
+  const flightIds = this.getQuery()._id ? this.getQuery()._id.$in : [];
+  if (flightIds && flightIds.length > 0) {
+    await Connections.deleteMany({
+      $or: [{ flightID: { $in: flightIds } }, { beyondOD: { $in: flightIds } }],
+    });
+  }
+});
 
-//     await updateConnectionAfterFlightAddition(doc._id);
-    
-//     next();
-//   } catch (error) {
-//     console.error('Error in post-save hook:', error);
-//     next(error);
-//   }
-// });
-
-// flightSchema.pre('deleteMany', async function (next) {
-//   try {
-//     const query = this.getQuery();
-//     const flights = await this.model.find(query, '_id');
-//     this.deletedFlightIds = flights.map(flight => flight._id);
-//     next();
-//   } catch (error) {
-//     console.error('Error in pre-deleteMany hook:', error);
-//     next(error);
-//   }
-// });
-
-// Post-deleteMany hook to access captured IDs after deletion
-// flightSchema.post('deleteMany', async function (result, next) {
-//   try {
-//     if (this.deletedFlightIds) {
-//       console.log('Post-deleteMany hook called. Deleted flight IDs:', this.deletedFlightIds);
-      
-//       for (const flightId of this.deletedFlightIds) {
-//         await updateConnectionAfterFlightDelete(flightId); // Pass the flight ID to the function
-//       }
-//       this.deletedFlightIds = null;
-//     }
-//     next();
-//   } catch (error) {
-//     console.error('Error in post-deleteMany hook:', error);
-//     next(error);
-//   }
-// });
-
+flightSchema.post("findOneAndDelete", async function (deletedFlight) {
+  if (deletedFlight) {
+    await Connections.deleteMany({
+      $or: [
+        { flightID: deletedFlight._id.toString() },
+        { beyondOD: deletedFlight._id.toString() },
+      ],
+    });
+  }
+});
 
 //-----------------------------------------------------------
 
