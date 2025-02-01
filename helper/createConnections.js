@@ -1173,6 +1173,7 @@ module.exports = async function createConnections(req, res) {
     let skip = 0;
     let totalFlights = 0;
 
+    const jobs = [];
     // Paginate through all flights
     while (true) {
       const flightsBatch = await Flights.find({ userId: userId })
@@ -1183,11 +1184,13 @@ module.exports = async function createConnections(req, res) {
       if (flightsBatch.length === 0) break; // Stop when no flights are left
 
       // Add the batch of flights to the queue for processing
-      flightQueue.add({
+      const job = await flightQueue.add({
         flightsBatch,
         stationsMap,
         hometimeZone
       });
+
+      jobs.push(job);
 
       // Increment skip for the next batch
       skip += batchSize;
@@ -1197,10 +1200,13 @@ module.exports = async function createConnections(req, res) {
       console.log(`Processed ${totalFlights} flights`);
     }
 
-    res.status(200).json({ message: "Connections Created" });
+     // Wait for all jobs to complete
+     await Promise.all(jobs.map(job => job.finished()));
+
+     res.status(200).json({ message: "Connections Created" });
   } catch (error) {
     console.error('Error processing flight connections:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    // res.status(500).json({ error: 'Internal server error' });
   }
 };
 
