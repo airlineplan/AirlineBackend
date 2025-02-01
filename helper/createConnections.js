@@ -1200,10 +1200,10 @@ module.exports = async function createConnections(req, res) {
       console.log(`Processed ${totalFlights} flights`);
     }
 
-     // Wait for all jobs to complete
-     await Promise.all(jobs.map(job => job.finished()));
-
-     res.status(200).json({ message: "Connections Created" });
+    // Wait for all jobs to complete
+    await Promise.all(jobs.map(job => job.finished()));
+    console.log('All jobs completed');
+    res.status(200).json({ message: "Connections Created" });
   } catch (error) {
     console.error('Error processing flight connections:', error);
     // res.status(500).json({ error: 'Internal server error' });
