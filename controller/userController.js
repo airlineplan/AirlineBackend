@@ -24,7 +24,7 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 
-// const createConnections = require('../helper/createConnections')
+const createConnections = require('../helper/createConnections')
 
 
 moment.tz.setDefault("America/New_York");
@@ -957,8 +957,6 @@ const deleteSectors = async (req, res) => {
     // Delete sectors
     const deletedSectorData = await Sector.deleteMany({ _id: { $in: ids } });
 
-    // await createConnections(userId);
-
     res.json({
       message: "Data deleted successfully",
       deletedSectorData,
@@ -1886,23 +1884,6 @@ const getDashboardData = async (req, res) => {
         // Initialize an array to store the result data
         const resultData = [];
 
-        const flightIDsInConnections = await Connections.distinct('flightID', { userId: req.user.id });
-        const beyondODsInConnections = await Connections.distinct('beyondOD', { userId: req.user.id });
-
-        function getFlightsWithBehindODs(flightsInPeriod) {
-
-          const flightsWithBehindODs = flightsInPeriod.filter(flight => beyondODsInConnections.includes(flight._id.toString()));
-
-          return flightsWithBehindODs; // Return the filtered array
-        }
-
-        function getFlightsWithBeyondODs(flightsInPeriod) {
-          const flightsWithBeyondODs = flightsInPeriod.filter(flight => flightIDsInConnections.includes(flight._id.toString()));
-
-          return flightsWithBeyondODs; // Return the filtered array
-
-        }
-
         for (const periodEndDate of periods) {
           let periodStartDate;
           if (periodicity === 'monthly') {
@@ -2052,6 +2033,233 @@ const getDashboardData = async (req, res) => {
 
           const validRotationFlights = flightsInPeriod.filter(flight => typeof flight.rotationNumber === 'string' && flight.rotationNumber.trim() !== '');
 
+
+          //we have to deliver bh, computed using hh+(mm/60) from bt in format 
+
+          function convertTimeStringToDecimal(timeString) {
+            const [hours, minutes] = timeString.split(':').map(Number);
+            const decimalTime = hours + minutes / 60;
+            return decimalTime;
+          }
+
+          const bh = flightsInPeriod.reduce((totalbh, flight) => totalbh + convertTimeStringToDecimal(flight.bt), 0);
+
+          resultData.push({
+            endDate: periodEndDate.toString(),
+            destinations: parseInt(uniqueStations.size).toLocaleString(),
+            departures: parseInt(flightsInPeriod.length).toLocaleString(),
+            seats: sumOfSeats.toLocaleString(),
+            pax: Math.round(sumOfPax).toLocaleString(),
+            paxSF: Math.round((sumOfPax / sumOfSeats) * 100),
+            paxLF: Math.round((sumOfrsk / sumOfask) * 100),
+            cargoCapT: parseFloat(sumOfCargoCapT).toLocaleString('en-US', {
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            }),
+            cargoT: parseFloat(sumOfCargoT).toLocaleString('en-US', {
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            }),
+            ct2ctc: Math.round((sumOfCargoT / sumOfCargoCapT) * 100),
+            cftk2atk: Math.round((sumOfcargoRtk / sumOfcargoAtk) * 100),
+            bh: bh,
+            sumOfGcd: Math.round(sumOfGcd),
+            adu: validRotationFlights.length > 0 ? (Math.round(bh / validRotationFlights.length * 100) / 100).toFixed(2) : '0',
+            sumOfask: sumOfask,
+            sumOfrsk: sumOfrsk,
+            sumOfcargoAtk: sumOfcargoAtk,
+            sumOfcargoRtk: sumOfcargoRtk
+          });
+        }
+
+        res.status(200).json(resultData);
+      }
+      catch (error) {
+        console.log(error);
+        res.send({ status: 500, success: false, msg: error.message });
+      }
+
+    }
+    catch (error) {
+      console.error(error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  }
+};
+
+const getConnectionsData = async (req, res) => {
+  
+  let { from, to, variant, sector, userTag1, userTag2, label, periodicity } = req.query;
+
+  console.log("from" + from + " to" + to + " variant" + variant + " sector" + sector + " periodicity" + periodicity + " label" + label);
+
+  if (periodicity && label) {
+    periodicity = periodicity.value.toLowerCase();
+    label = label.value.toLowerCase()
+    id = req.user.id;
+
+    //building mongo query
+    let datequery = {
+      userId: id
+    };
+
+    let flightsQuery = {
+      userId: id
+    };
+
+    if (label === "both") {
+      flightsQuery.domIntl = { $in: ["dom", "intl"] };
+    } else {
+      datequery.domINTL = label
+      flightsQuery.domIntl = label
+    }
+
+    if (variant && Array.isArray(variant) && variant.length > 0) {
+      flightsQuery.variant = { $in: variant.map(item => item.value) };
+    }
+
+    if (sector && Array.isArray(sector) && sector.length > 0) {
+      flightsQuery.sector = { $in: sector.map(item => item.value) };
+    }
+
+    if (userTag1 && Array.isArray(userTag1) && userTag1.length > 0) {
+      flightsQuery.userTag1 = { $in: userTag1.map(item => item.value) };
+    }
+
+    if (userTag2 && Array.isArray(userTag2) && userTag2.length > 0) {
+      flightsQuery.userTag2 = { $in: userTag2.map(item => item.value) };
+    }
+
+    if (from && Array.isArray(from) && from.length > 0) {
+      flightsQuery.depStn = { $in: from.map(item => item.value) };
+    }
+
+    if (to && Array.isArray(to) && to.length > 0) {
+      flightsQuery.arrStn = { $in: to.map(item => item.value) };
+    }
+
+    try {
+
+      const datas = await Data.find(datequery);
+      // Calculate the start and end dates based on the periodicity
+      let startDate = new Date(Math.min(...datas.map((data) => data.effFromDt)));
+      let endDate = new Date(Math.max(...datas.map((data) => data.effToDt)));
+
+      let timeZone;
+      if (Array.isArray(datas) && datas.length > 0) {
+        timeZone = datas[0].timeZone;
+      }
+
+      // if (timeZone) {
+      //   startDate = timeZoneCorrectedDates(startDate, timeZone);
+      //   endDate = timeZoneCorrectedDates(endDate, timeZone);
+      // }
+
+      // startDate.setUTCHours(0, 0, 0, 0)
+      // endDate.setUTCHours(0, 0, 0, 0)
+
+
+      // Calculate the periods based on the periodicity
+      let periods = [];
+      let currentDate = new Date(startDate);
+
+      if (periodicity === 'monthly') {
+        periods = generateLastDayOfMonths(startDate, endDate);
+
+      } else if (periodicity === 'quarterly') {
+        periods = generateQuarterlyDates(startDate, endDate);
+
+      } else if (periodicity === 'annually') {
+        periods = generateAnnualDates(startDate, endDate);
+      } else if (periodicity === 'weekly') {
+        periods = generateWeeklyDates(startDate, endDate);
+      } else if (periodicity === 'daily') {
+        periods = generateDailyDates(startDate, endDate);
+      }
+
+      try {
+        // Initialize an array to store the result data
+        const resultData = [];
+
+        await createConnections(req, res);
+
+        const flightIDsInConnections = await Connections.distinct('flightID', { userId: req.user.id });
+        const beyondODsInConnections = await Connections.distinct('beyondOD', { userId: req.user.id });
+
+        function getFlightsWithBehindODs(flightsInPeriod) {
+
+          const flightsWithBehindODs = flightsInPeriod.filter(flight => beyondODsInConnections.includes(flight._id.toString()));
+
+          return flightsWithBehindODs; // Return the filtered array
+        }
+
+        function getFlightsWithBeyondODs(flightsInPeriod) {
+          const flightsWithBeyondODs = flightsInPeriod.filter(flight => flightIDsInConnections.includes(flight._id.toString()));
+
+          return flightsWithBeyondODs; // Return the filtered array
+
+        }
+
+        for (const periodEndDate of periods) {
+          let periodStartDate;
+          if (periodicity === 'monthly') {
+
+            periodStartDate = new Date(periodEndDate.getFullYear(), periodEndDate.getMonth(), 1);
+
+          } else if (periodicity === 'quarterly') {
+
+            const quarterStartMonth = Math.floor(periodEndDate.getMonth() / 3) * 3;
+            periodStartDate = new Date(periodEndDate.getFullYear(), quarterStartMonth, 1);
+
+          } else if (periodicity === 'annually') {
+
+            periodStartDate = new Date(periodEndDate.getFullYear(), 0, 1);
+          } else if (periodicity === 'weekly') {
+
+            const dayOfWeek = periodEndDate.getDay();
+
+            // Calculate the difference in days to get to the previous Monday
+            const daysUntilMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+
+            // Clone the periodEndDate to avoid modifying the original date
+            const startDateis = new Date(periodEndDate);
+
+            // Subtract the days to get to the previous Monday
+            periodStartDate = startDateis.setDate(periodEndDate.getDate() - daysUntilMonday);
+          } else if (periodicity === 'daily') {
+
+            periodStartDate = new Date(periodEndDate);
+          }
+
+          flightsQuery.date = {
+            $gte: periodStartDate,
+            $lte: periodEndDate,
+          };
+          // const flightsInPeriod = await Flights.find({
+          //   userId: id,
+          //   date: {
+          //     $gte: periodStartDate,
+          //     $lte: periodEndDate
+          //   },
+          //   $or: [
+          //     { depStn: { $in: depStnArray } },
+          //     { arrStn: { $in: arrStnArray } },
+          //     { variant: { $in: variantArray } }
+          //     // Add more fields as needed
+          //   ]
+          // });
+
+          const flightsInPeriod = await Flights.find(flightsQuery);
+
+          const uniqueStations = new Set();
+          flightsInPeriod.forEach((flight) => {
+            uniqueStations.add(flight.arrStn);
+            uniqueStations.add(flight.depStn);
+          });
+
+
+          const validRotationFlights = flightsInPeriod.filter(flight => typeof flight.rotationNumber === 'string' && flight.rotationNumber.trim() !== '');
+
           const bhdODFlgts = await getFlightsWithBehindODs(flightsInPeriod)
           const beyODFlgts = await getFlightsWithBeyondODs(flightsInPeriod)
 
@@ -2112,34 +2320,11 @@ const getDashboardData = async (req, res) => {
 
           resultData.push({
             endDate: periodEndDate.toString(),
-            destinations: parseInt(uniqueStations.size).toLocaleString(),
-            departures: parseInt(flightsInPeriod.length).toLocaleString(),
-            seats: sumOfSeats.toLocaleString(),
-            pax: Math.round(sumOfPax).toLocaleString(),
-            paxSF: Math.round((sumOfPax / sumOfSeats) * 100),
-            paxLF: Math.round((sumOfrsk / sumOfask) * 100),
-            cargoCapT: parseFloat(sumOfCargoCapT).toLocaleString('en-US', {
-              minimumFractionDigits: 1,
-              maximumFractionDigits: 1,
-            }),
-            cargoT: parseFloat(sumOfCargoT).toLocaleString('en-US', {
-              minimumFractionDigits: 1,
-              maximumFractionDigits: 1,
-            }),
-            ct2ctc: Math.round((sumOfCargoT / sumOfCargoCapT) * 100),
-            cftk2atk: Math.round((sumOfcargoRtk / sumOfcargoAtk) * 100),
-            bh: Math.round(bh).toLocaleString(),
-            sumOfGcd: Math.round(sumOfGcd),
-            adu: validRotationFlights.length > 0 ? (Math.round(bh / validRotationFlights.length * 100) / 100).toFixed(2) : '0',
             connectingFlights: connectingFlgts.toLocaleString(),
             seatCapBeyondFlgts: seatCapBeyondFlgts.toLocaleString(),
             seatCapBehindFlgts: seatCapBehindFlgts.toLocaleString(),
             cargoCapBehindFlgts: cargoCapBehindFlgts.toLocaleString(),
             cargoCapBeyondFlgts: cargoCapBeyondFlgts.toLocaleString(),
-            sumOfask: sumOfask,
-            sumOfrsk: sumOfrsk,
-            sumOfcargoAtk: sumOfcargoAtk,
-            sumOfcargoRtk: sumOfcargoRtk
           });
         }
 
@@ -3164,6 +3349,7 @@ module.exports = {
   searchFlights,
   getFlightsWoRotations,
   getDashboardData,
+  getConnectionsData,
   // createConnections,
   populateDashboardDropDowns,
   getVariants,

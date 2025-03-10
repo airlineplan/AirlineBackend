@@ -64,6 +64,7 @@ user.post("/flightsWoRotations", verifyToken, jsonParser, userController.getFlig
 user.get("/listVariants", verifyToken, userController.getVariants);
 user.get("/listRotations", verifyToken, userController.getRotations);
 user.get("/dashboard", verifyToken, userController.getDashboardData);
+user.get("/fetchConnectionsData", verifyToken, userController.getConnectionsData);
 user.get("/createConnections", verifyToken, createConnections);
 user.get("/dashboard/populateDropDowns", verifyToken, userController.populateDashboardDropDowns);
 user.get("/get-stationData", verifyToken, userController.getStationsTableData);
