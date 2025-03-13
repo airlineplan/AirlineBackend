@@ -1699,47 +1699,75 @@ const binarySearchByStd = (arr, targetTime, findStart) => {
 
 const populateDashboardDropDowns = async (req, res) => {
   try {
-
     const userId = req.user.id;
 
-    // Fetch distinct values for the "sector" field from the Flight model
+    // Fetch distinct sectors from the Flights model
     const distinctSectors = await Flights.aggregate([
-      { $match: { userId: userId } }, // Filter by user ID
+      { $match: { userId: userId } },
       { $group: { _id: null, sector: { $addToSet: '$sector' } } },
       { $project: { _id: 0, sector: 1 } },
     ]);
 
-    const distinctValues = await Data.aggregate([
+    // Fetch distinct values from the Data model
+    const distinctValuesResult = await Data.aggregate([
       { $match: { userId: userId } },
-      { $group: { _id: null, from: { $addToSet: '$depStn' }, to: { $addToSet: '$arrStn' }, variant: { $addToSet: '$variant' }, userTag1: { $addToSet: '$userTag1' }, userTag2: { $addToSet: '$userTag2' } } },
+      {
+        $group: {
+          _id: null,
+          from: { $addToSet: '$depStn' },
+          to: { $addToSet: '$arrStn' },
+          variant: { $addToSet: '$variant' },
+          userTag1: { $addToSet: '$userTag1' },
+          userTag2: { $addToSet: '$userTag2' }
+        }
+      },
       { $project: { _id: 0, from: 1, to: 1, variant: 1, userTag1: 1, userTag2: 1 } },
     ]);
 
+    // Helper function: format values into { value, label } pairs,
+    // filtering out undefined or null values.
     const formatOptions = (values) =>
-      values.map((value) => ({ value: value, label: value }));
+      (values || [])
+        .filter(value => value !== undefined && value !== null)
+        .map((value) => ({ value: value, label: value }));
 
-    // Filter out undefined-undefined values from sector
-    const filteredSectors = distinctSectors?.[0]?.sector?.filter(sector => sector !== 'undefined-undefined') ?? [];
+    // Filter out the unwanted 'undefined-undefined' from sectors
+    const filteredSectors =
+      distinctSectors && distinctSectors.length > 0 && distinctSectors[0].sector
+        ? distinctSectors[0].sector.filter(sector => sector !== 'undefined-undefined')
+        : [];
     const formattedSectors = formatOptions(filteredSectors);
 
-    let data={};
-    if (!distinctValues) {
+    // Prepare the response data, using empty arrays as defaults.
+    let data = {
+      from: [],
+      to: [],
+      variant: [],
+      sector: formattedSectors,
+      userTag1: [],
+      userTag2: []
+    };
+
+    // If we have valid distinct values, format them accordingly.
+    if (distinctValuesResult && distinctValuesResult.length > 0) {
+      const result = distinctValuesResult[0];
       data = {
-        from: formatOptions(distinctValues[0].from),
-        to: formatOptions(distinctValues[0].to),
-        variant: formatOptions(distinctValues[0].variant),
+        from: formatOptions(result.from),
+        to: formatOptions(result.to),
+        variant: formatOptions(result.variant),
         sector: formattedSectors,
-        userTag1: formatOptions(distinctValues[0].userTag1),
-        userTag2: formatOptions(distinctValues[0].userTag2)
-      };  
+        userTag1: formatOptions(result.userTag1),
+        userTag2: formatOptions(result.userTag2)
+      };
     }
-    
+
     res.json(data);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Internal Server Error' });
   }
-}
+};
+
 
 const getVariants = async (req, res) => {
   try {
