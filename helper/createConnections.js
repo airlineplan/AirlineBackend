@@ -1101,7 +1101,14 @@ const Connections = require("../model/connectionSchema")
 
 //---------------------------------
 
-const flightQueue = new Bull('flight-processing', 'redis://127.0.0.1:6379');
+const flightQueue = new Bull('flight-processing', {
+  redis: {
+    host: 'redis-12693.c264.ap-south-1-1.ec2.redns.redis-cloud.com',
+    port: 12693,
+    username: 'default',
+    password: '5NJA5j0k3sDz6lKVJlsm0GoCA4DWecHU'
+  }
+});
 
 const concurrency = 10;
 
