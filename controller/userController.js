@@ -1280,7 +1280,7 @@ const getFlightsWoRotations = async (req, res) => {
     const datesArray = [];
     // Iterate through each date between fromDate and toDate
     for (let date = fromDate; date <= toDate; date.setDate(date.getDate() + 1)) {
-      const dayOfWeek = date.getDay()+1; // 0 for Sunday, 1 for Monday, ..., 6 for Saturday
+      const dayOfWeek = (date.getDay() !== 0 ) ? date.getDay() : 7; // 0 for Sunday, 1 for Monday, ..., 6 for Saturday
 
       // Check if the dayOfWeek matches any selectedDow
       if (dow.includes(String(dayOfWeek))) {
