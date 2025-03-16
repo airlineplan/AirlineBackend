@@ -1168,6 +1168,8 @@ module.exports = async function createConnections(req, res) {
       stationsMap[station.stationName] = station;
     });
 
+    await Connections.deleteMany({ userId: userId });
+
     // Fetch flight data in batches to avoid memory issues
     const batchSize = 10000;
     let skip = 0;
