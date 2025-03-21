@@ -1086,10 +1086,10 @@ const updateSector = async (req, res) => {
 const singleRotationDetail = async (req, res) => {
   try {
     // Fetch data from RotationDetails collection
-    const rotationDetails = await RotationDetails.find({ rotationNumber: req.params.id });
+    const rotationDetails = await RotationDetails.find({ rotationNumber: req.params.id, userId: req.user.id });
 
     // Fetch data from RotationSummary collection based on rotationNumber
-    const rotationSummary = await RotationSummary.findOne({ rotationNumber: req.params.id });
+    const rotationSummary = await RotationSummary.findOne({ rotationNumber: req.params.id, userId: req.user.id });
 
     // Combine rotationDetails and rotationSummary and send as response
     res.status(200).json({ rotationDetails, rotationSummary });
@@ -1804,7 +1804,7 @@ const getRotations = async (req, res) => {
       { $group: { _id: null, rotationNumbers: { $addToSet: '$rotationNumber' } } },
       { $project: { _id: 0, rotationNumbers: 1 } },
     ]);
-
+    
     // Format the options
     const formatOptions = (values) =>
       values.map((value) => ({ value: value, label: value }));
