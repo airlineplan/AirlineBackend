@@ -69,7 +69,7 @@ user.get("/createConnections", verifyToken, createConnections);
 user.get("/dashboard/populateDropDowns", verifyToken, userController.populateDashboardDropDowns);
 user.get("/get-stationData", verifyToken, userController.getStationsTableData);
 user.get("/getNextRotationNumber", verifyToken, userController.getNextRotationNumber);
-user.get("/rotationbyid/:id", userController.singleRotationDetail);
+user.get("/rotationbyid/:id", verifyToken, userController.singleRotationDetail);
 user.post("/updateRotationSummary", verifyToken, jsonParser, userController.updateRotationSummary);
 user.post("/addRotationDetailsFlgtChange", verifyToken, jsonParser, userController.addRotationDetailsFlgtChange);
 user.post("/saveStation", verifyToken, jsonParser, userController.saveStation);
