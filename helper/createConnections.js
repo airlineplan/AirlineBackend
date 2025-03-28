@@ -1107,10 +1107,18 @@ const flightQueue = new Bull('flight-processing', {
     port: 12693,
     username: 'default',
     password: '5NJA5j0k3sDz6lKVJlsm0GoCA4DWecHU'
+  },
+  settings: {
+    // Prevent storing too much job history
+    maxStalledCount: 2,
+    lockDuration: 300000, // 5 minutes
+    // Remove completed jobs after 1 hour
+    removeOnComplete: { age: 300 },  // 5 Minute
+    removeOnFail: { age: 300 }  // 5 Minute
   }
 });
 
-const concurrency = 10;
+const concurrency = 5;
 
 // Define the job processor once outside of any route or function
 flightQueue.process(concurrency, async (job) => {
@@ -1197,7 +1205,10 @@ module.exports = async function createConnections(req, res) {
         flightsBatch,
         stationsMap,
         hometimeZone
-      });
+      },
+        {
+          ttl: 3600 // Set TTL for 1 hour (or appropriate value)
+        });
 
       jobs.push(job);
 
@@ -1305,106 +1316,119 @@ function buildIntlQuery(flight, stationDep, stationArr, stdHTZ, hometimeZone) {
 
 
 function calculateTimeDifference(time1, time2) {
-    const [hour1, minute1] = time1.split(":").map(Number);
-    const [hour2, minute2] = time2.split(":").map(Number);
+  const [hour1, minute1] = time1.split(":").map(Number);
+  const [hour2, minute2] = time2.split(":").map(Number);
 
-    let differenceInMinutes = (hour2 * 60 + minute2) - (hour1 * 60 + minute1);
+  let differenceInMinutes = (hour2 * 60 + minute2) - (hour1 * 60 + minute1);
 
-    // Handling negative difference (i.e., crossing over to the previous day)
-    if (differenceInMinutes < 0) {
-        differenceInMinutes += 24 * 60; // Add a day's worth of minutes
-    }
+  // Handling negative difference (i.e., crossing over to the previous day)
+  if (differenceInMinutes < 0) {
+    differenceInMinutes += 24 * 60; // Add a day's worth of minutes
+  }
 
-    const differenceHours = Math.floor(differenceInMinutes / 60);
-    const paddedHours = differenceHours.toString().padStart(2, '0'); // Ensure hours are 2 digits with leading zero if needed
-    const differenceMinutes = differenceInMinutes % 60;
-    const paddedMinutes = differenceMinutes.toString().padStart(2, '0'); // Ensure minutes are 2 digits with leading zero if needed
+  const differenceHours = Math.floor(differenceInMinutes / 60);
+  const paddedHours = differenceHours.toString().padStart(2, '0'); // Ensure hours are 2 digits with leading zero if needed
+  const differenceMinutes = differenceInMinutes % 60;
+  const paddedMinutes = differenceMinutes.toString().padStart(2, '0'); // Ensure minutes are 2 digits with leading zero if needed
 
-    return `${paddedHours}:${paddedMinutes}`;
+  return `${paddedHours}:${paddedMinutes}`;
 }
 
 function convertTimeToTZ(originalTime, originalUTCOffset, targetUTCOffset) {
-    // Extract hours and minutes from original time
-    const [originalHours, originalMinutes] = originalTime.split(':').map(Number);
+  // Extract hours and minutes from original time
+  const [originalHours, originalMinutes] = originalTime.split(':').map(Number);
 
-    // Extract hours and minutes from UTC offsets
-    const originalOffsetSign = originalUTCOffset.startsWith('UTC-') ? -1 : 1;
-    const targetOffsetSign = targetUTCOffset.startsWith('UTC-') ? -1 : 1;
-    const originalOffsetHours = Number(originalUTCOffset.split(':')[0].slice(4)) * originalOffsetSign;
-    const originalOffsetMinutes = Number(originalUTCOffset.split(':')[1]) * originalOffsetSign;
-    const targetOffsetHours = Number(targetUTCOffset.split(':')[0].slice(4)) * targetOffsetSign;
-    const targetOffsetMinutes = Number(targetUTCOffset.split(':')[1]) * targetOffsetSign;
+  // Extract hours and minutes from UTC offsets
+  const originalOffsetSign = originalUTCOffset.startsWith('UTC-') ? -1 : 1;
+  const targetOffsetSign = targetUTCOffset.startsWith('UTC-') ? -1 : 1;
+  const originalOffsetHours = Number(originalUTCOffset.split(':')[0].slice(4)) * originalOffsetSign;
+  const originalOffsetMinutes = Number(originalUTCOffset.split(':')[1]) * originalOffsetSign;
+  const targetOffsetHours = Number(targetUTCOffset.split(':')[0].slice(4)) * targetOffsetSign;
+  const targetOffsetMinutes = Number(targetUTCOffset.split(':')[1]) * targetOffsetSign;
 
-    // Convert time from original timezone to UTC
-    let utcHours = originalHours - originalOffsetHours;
-    let utcMinutes = originalMinutes - originalOffsetMinutes;
+  // Convert time from original timezone to UTC
+  let utcHours = originalHours - originalOffsetHours;
+  let utcMinutes = originalMinutes - originalOffsetMinutes;
 
-    // Convert time from UTC to target timezone
-    let targetHours = utcHours + targetOffsetHours;
-    let targetMinutes = utcMinutes + targetOffsetMinutes;
+  // Convert time from UTC to target timezone
+  let targetHours = utcHours + targetOffsetHours;
+  let targetMinutes = utcMinutes + targetOffsetMinutes;
 
-    // Handle overflow and underflow of minutes
-    if (targetMinutes >= 60) {
-        targetHours += 1;
-        targetMinutes -= 60;
-    } else if (targetMinutes < 0) {
-        targetHours -= 1;
-        targetMinutes += 60;
-    }
+  // Handle overflow and underflow of minutes
+  if (targetMinutes >= 60) {
+    targetHours += 1;
+    targetMinutes -= 60;
+  } else if (targetMinutes < 0) {
+    targetHours -= 1;
+    targetMinutes += 60;
+  }
 
-    // Handle overflow and underflow of hours
-    targetHours = (targetHours + 24) % 24;
+  // Handle overflow and underflow of hours
+  targetHours = (targetHours + 24) % 24;
 
-    // Format the result
-    const convertedTime = `${targetHours < 10 ? '0' : ''}${targetHours}:${targetMinutes < 10 ? '0' : ''}${targetMinutes}`;
+  // Format the result
+  const convertedTime = `${targetHours < 10 ? '0' : ''}${targetHours}:${targetMinutes < 10 ? '0' : ''}${targetMinutes}`;
 
-    return convertedTime;
+  return convertedTime;
 }
 
 function parseTimeString(timeString) {
-    const [hours, minutes] = timeString.split(':').map(Number);
-    return new Date(0, 0, 0, hours, minutes); // Month and year are set to 0, day to 0 is equivalent to the previous day
+  const [hours, minutes] = timeString.split(':').map(Number);
+  return new Date(0, 0, 0, hours, minutes); // Month and year are set to 0, day to 0 is equivalent to the previous day
 }
 
 function compareTimes(time1, time2) {
-    const date1 = parseTimeString(time1);
-    const date2 = parseTimeString(time2);
-    return date1.getTime() - date2.getTime();
+  const date1 = parseTimeString(time1);
+  const date2 = parseTimeString(time2);
+  return date1.getTime() - date2.getTime();
 }
 
 function timeToMinutes(timeString) {
-    const [hours, minutes] = timeString.split(':').map(Number);
-    return hours * 60 + minutes;
+  const [hours, minutes] = timeString.split(':').map(Number);
+  return hours * 60 + minutes;
 }
 
 
 function addTimeStrings(time1, time2, time3 = '00:00') {
-    // Function to convert time string to minutes
-    function timeToMinutes(timeString) {
-        const [hours, minutes] = timeString.split(':').map(Number);
-        return hours * 60 + minutes;
-    }
+  // Function to convert time string to minutes
+  function timeToMinutes(timeString) {
+    const [hours, minutes] = timeString.split(':').map(Number);
+    return hours * 60 + minutes;
+  }
 
-    // Function to convert minutes to time string
-    function minutesToTime(totalMinutes) {
-        const hours = Math.floor(totalMinutes / 60);
-        const paddedHours = hours.toString().padStart(2, '0'); // Ensure hours are 2 digits with leading zero if needed
-        const minutes = totalMinutes % 60;
-        const paddedMinutes = minutes.toString().padStart(2, '0'); // Ensure minutes are 2 digits with leading zero if needed
-        return `${paddedHours}:${paddedMinutes}`;
-    }
+  // Function to convert minutes to time string
+  function minutesToTime(totalMinutes) {
+    const hours = Math.floor(totalMinutes / 60);
+    const paddedHours = hours.toString().padStart(2, '0'); // Ensure hours are 2 digits with leading zero if needed
+    const minutes = totalMinutes % 60;
+    const paddedMinutes = minutes.toString().padStart(2, '0'); // Ensure minutes are 2 digits with leading zero if needed
+    return `${paddedHours}:${paddedMinutes}`;
+  }
 
-    // Convert time strings to total minutes
-    const totalMinutes = timeToMinutes(time1) + timeToMinutes(time2) + timeToMinutes(time3);
+  // Convert time strings to total minutes
+  const totalMinutes = timeToMinutes(time1) + timeToMinutes(time2) + timeToMinutes(time3);
 
-    // Convert total minutes back to time string
-    const resultTime = minutesToTime(totalMinutes);
+  // Convert total minutes back to time string
+  const resultTime = minutesToTime(totalMinutes);
 
-    return resultTime;
+  return resultTime;
 }
 
 function addDays(date, days) {
-    const result = new Date(date); // Create a new Date object to avoid modifying the original date
-    result.setDate(result.getDate() + days); // Set the date to be days days ahead
-    return result; // Return the new date object
+  const result = new Date(date); // Create a new Date object to avoid modifying the original date
+  result.setDate(result.getDate() + days); // Set the date to be days days ahead
+  return result; // Return the new date object
 }
+
+async function cleanupQueue() {
+  const completedJobs = await flightQueue.getJobs(['completed']);
+  const failedJobs = await flightQueue.getJobs(['failed']);
+  
+  await Promise.all([
+    flightQueue.clean(300 * 1000, 'completed'),
+    flightQueue.clean(300 * 1000, 'failed')
+  ]);
+}
+
+// Run daily
+setInterval(cleanupQueue, 900 * 1000);
