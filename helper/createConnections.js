@@ -1110,8 +1110,8 @@ const flightQueue = new Bull('flight-processing', {
   },
   settings: {
     // Prevent storing too much job history
-    maxStalledCount: 2,
-    lockDuration: 300000, // 5 minutes
+    maxStalledCount: 3,
+    lockDuration: 3000000, // 5 minutes
     // Remove completed jobs after 1 hour
     removeOnComplete: { age: 300 },  // 5 Minute
     removeOnFail: { age: 300 }  // 5 Minute
@@ -1423,12 +1423,18 @@ function addDays(date, days) {
 async function cleanupQueue() {
   const completedJobs = await flightQueue.getJobs(['completed']);
   const failedJobs = await flightQueue.getJobs(['failed']);
-  
+  const stalledJobs = await flightQueue.getJobs(['stalled']);
+  if (stalledJobs.length > 0) {
+    console.log(`Found ${stalledJobs.length} stalled jobs. Cleaning up...`);
+  }
+
   await Promise.all([
     flightQueue.clean(300 * 1000, 'completed'),
-    flightQueue.clean(300 * 1000, 'failed')
+    flightQueue.clean(300 * 1000, 'failed'),
+    flightQueue.clean(1800 * 1000, 'stalled')
   ]);
 }
 
 // Run daily
 setInterval(cleanupQueue, 900 * 1000);
+cleanupQueue();
