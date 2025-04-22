@@ -255,6 +255,7 @@ const NetworkTable = () => {
           headers: { "x-access-token": accessToken }
         }
       );
+      
       setDeletedData(response.data.data);
       toast.success("Delete Successfull");
       setTimeout(() => {
