@@ -470,74 +470,77 @@ const deleteConnections = async (ids) => {
 
 }
 
-const deleteFlightsAndUpdateSectors = async (req, res) => {
+// controllers/userController.ts (or .js)
+
+export const deleteFlightsAndUpdateSectors = async (req, res) => {
   try {
-    const ids = req.params.ids.split(","); // Split the comma-separated IDs
+    // ---------- 1. read & validate ids from body ----------
+    const { ids } = req.body;             // expect: { ids: ["id1","id2", ...] }
 
-    // Fetch the documents being deleted
-    const documentsToDelete = await Data.find({ _id: { $in: ids } });
-
-    // Construct an array of unique station names to delete
-    const stationNamesToDelete = [...documentsToDelete.flatMap(doc => [doc.arrStn, doc.depStn])];
-
-    const userId = req.user.id;
-    // Delete stations only if they are not present in other documents for the same user
-    for (const stationName of stationNamesToDelete) {
-      const station = await Stations.findOne({ stationName, userId });
-
-      if (station) {
-        if (station.freq === 1) {
-          // If freq is 1, delete the entry 
-          await Stations.deleteOne({ stationName, userId });
-        } else {
-          // If freq is greater than 1, decrement by 1
-          await Stations.updateOne(
-            { stationName, userId },
-            { $inc: { freq: -1 } }
-          );
-        }
-      }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: "ids must be a non‑empty array" });
     }
 
-    const result = await Data.deleteMany({ _id: { $in: ids } });
+    // ---------- 2. fetch docs being deleted ----------
+    const documentsToDelete = await Data.find({ _id: { $in: ids } });
 
-    const flightsToDelete = await Flights.find({ networkId: { $in: ids } });
-
-    const rotationNumbersToDelete = [...new Set(flightsToDelete
-      .filter(flight => flight.rotationNumber !== undefined) // Exclude undefined values
-      .map(flight => flight.rotationNumber)
-    )];
-
-    const flgtDelCount = await Flights.deleteMany({ networkId: { $in: ids } });
-
-    // Delete entries from RotationDetails model
-    await RotationDetails.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
-
-    // Delete entries from RotationSummary model
-    await RotationSummary.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
-
-    if (result.n === 0) {
+    if (documentsToDelete.length === 0) {
       return res.status(404).json({ error: "Data not found" });
     }
 
+    // ---------- 3. stations cleanup ----------
+    const stationNamesToDelete = [
+      ...new Set(documentsToDelete.flatMap((d) => [d.arrStn, d.depStn]))
+    ];
+
+    const userId = req.user.id;
+
+    for (const stationName of stationNamesToDelete) {
+      const station = await Stations.findOne({ stationName, userId });
+
+      if (!station) continue;
+
+      if (station.freq === 1) {
+        await Stations.deleteOne({ stationName, userId });
+      } else {
+        await Stations.updateOne({ stationName, userId }, { $inc: { freq: -1 } });
+      }
+    }
+
+    // ---------- 4. delete Data & Flights ----------
+    const deletedData = await Data.deleteMany({ _id: { $in: ids } });
+
+    const flightsToDelete = await Flights.find({ networkId: { $in: ids } });
+
+    const rotationNumbersToDelete = [
+      ...new Set(
+        flightsToDelete
+          .filter((f) => f.rotationNumber !== undefined)
+          .map((f) => f.rotationNumber)
+      )
+    ];
+
+    await Flights.deleteMany({ networkId: { $in: ids } });
+    await RotationDetails.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
+    await RotationSummary.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
+
+    // ---------- 5. update Sector ----------
     await Sector.updateMany(
       { networkId: { $in: ids } },
       { $set: { toDt: null, fromDt: null } }
     );
 
-
-    // await createConnections(userId);
-
-    res.json({
+    // ---------- 6. success ----------
+    return res.json({
       message: "Data deleted successfully",
-      deletedData: result,
+      deletedData,
     });
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Internal server error" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 };
+
 
 const downloadExpenses = async (req, res) => {
   try {
@@ -917,17 +920,18 @@ const AddSectors = async (req, res) => {
 
 const deleteSectors = async (req, res) => {
   try {
-    const ids = req.params.ids.split(",");
+    const { ids } = req.body; // Get ids from body
 
-    // Use find() to retrieve sectors by their IDs
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: "IDs must be a non-empty array" });
+    }
+
     const sectors = await Sector.find({ _id: { $in: ids } });
-
 
     if (sectors.length === 0) {
       return res.status(404).json({ error: "Data not found" });
     }
 
-    //userId should be same for all
     const userId = sectors[0].userId;
 
     for (const sector of sectors) {
@@ -949,12 +953,10 @@ const deleteSectors = async (req, res) => {
       }
     }
 
-    // Delete associated Flights records
     const deletedFlightData = await Flights.deleteMany({
       sectorId: { $in: ids },
     });
 
-    // Delete sectors
     const deletedSectorData = await Sector.deleteMany({ _id: { $in: ids } });
 
     res.json({
@@ -967,6 +969,7 @@ const deleteSectors = async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 };
+
 
 //***************Update Sector***************************/
 // const updateSector = async (req, res) => {
