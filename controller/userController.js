@@ -921,7 +921,7 @@ const AddSectors = async (req, res) => {
 const deleteSectors = async (req, res) => {
   try {
     const { ids } = req.body; // Get ids from body
-
+    
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: "IDs must be a non-empty array" });
     }
