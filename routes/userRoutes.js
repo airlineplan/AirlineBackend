@@ -40,8 +40,6 @@ user.delete(
   userController.deleteFlightsAndUpdateSectors
 );
 user.delete("/delete-sector", verifyToken, userController.deleteSectors);
-user.delete("/delete", verifyToken, userController.deleteFlightsAndUpdateSectors);
-user.delete("/delete-sector", verifyToken, userController.deleteSectors);
 user.put(
   "/update-data/:id",
   jsonParser,

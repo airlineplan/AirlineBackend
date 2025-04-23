@@ -472,7 +472,7 @@ const deleteConnections = async (ids) => {
 
 // controllers/userController.ts (or .js)
 
-export const deleteFlightsAndUpdateSectors = async (req, res) => {
+const deleteFlightsAndUpdateSectors = async (req, res) => {
   try {
     // ---------- 1. read & validate ids from body ----------
     const { ids } = req.body;             // expect: { ids: ["id1","id2", ...] }
