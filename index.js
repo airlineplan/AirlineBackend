@@ -4,7 +4,7 @@ const cors = require("cors");
 const userRoutes = require("./routes/userRoutes");
 const exceljs = require("exceljs");
 const path = require("path");
-const PORT = 3000;
+const PORT = 5001;
 app.use(cors());
 
 require("./config/db");
