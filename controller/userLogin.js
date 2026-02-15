@@ -150,7 +150,7 @@ const sendEmail = async (email, otp) => {
     const mailOptions = {
       from: "admin@airlineplan.com",
       to: email,
-      subject: "AirlinePlan OTP ",
+      subject: "Airlineplan OTP ",
       text: `Your OTP code is: ${otp}`,
     };
 

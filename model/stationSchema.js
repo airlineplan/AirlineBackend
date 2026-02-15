@@ -6,6 +6,16 @@ const stationSchema = new mongoose.Schema({
         required: true,
         unique: false
     },
+    // ADDED TAXI TIMES
+    avgTaxiOutTime: {
+        type: String,
+        default: "00:00" 
+    },
+    avgTaxiInTime: {
+        type: String,
+        default: "00:00"
+    },
+    // ----------------
     stdtz: {
         type: String,
         required: true,
