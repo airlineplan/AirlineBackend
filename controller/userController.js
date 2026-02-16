@@ -471,7 +471,13 @@ const deleteConnections = async (ids) => {
 
 const deleteFlightsAndUpdateSectors = async (req, res) => {
   try {
-    const ids = req.params.ids.split(","); // Split the comma-separated IDs
+    // Read ids from the request body instead of URL parameters
+    const { ids } = req.body;
+
+    // Safety check to ensure ids array is present
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: "No valid IDs provided for deletion" });
+    }
 
     // Fetch the documents being deleted
     const documentsToDelete = await Data.find({ _id: { $in: ids } });
@@ -515,15 +521,13 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     // Delete entries from RotationSummary model
     await RotationSummary.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
 
-    if (result.n === 0) {
+    if (result.deletedCount === 0) {
       return res.status(404).json({ error: "Data not found" });
     }
 
-    await Sector.updateMany(
-      { networkId: { $in: ids } },
-      { $set: { toDt: null, fromDt: null } }
-    );
-
+    await Sector.deleteMany({
+      networkId: { $in: ids }
+    });
 
     // await createConnections(userId);
 
@@ -2276,44 +2280,73 @@ const createConnections = async (req, res) => {
 
 const populateDashboardDropDowns = async (req, res) => {
   try {
+    const userId = req.user?.id;
 
-    const userId = req.user.id;
+    if (!userId) {
+      return res.status(400).json({ message: "User ID missing" });
+    }
 
-    // Fetch distinct values for the "sector" field from the Flight model
     const distinctSectors = await Flights.aggregate([
-      { $match: { userId: userId } }, // Filter by user ID
-      { $group: { _id: null, sector: { $addToSet: '$sector' } } },
+      { $match: { userId: userId } },
+      { $group: { _id: null, sector: { $addToSet: "$sector" } } },
       { $project: { _id: 0, sector: 1 } },
     ]);
 
     const distinctValues = await Data.aggregate([
       { $match: { userId: userId } },
-      { $group: { _id: null, from: { $addToSet: '$depStn' }, to: { $addToSet: '$arrStn' }, variant: { $addToSet: '$variant' }, userTag1: { $addToSet: '$userTag1' }, userTag2: { $addToSet: '$userTag2' } } },
-      { $project: { _id: 0, from: 1, to: 1, variant: 1, userTag1: 1, userTag2: 1 } },
+      {
+        $group: {
+          _id: null,
+          from: { $addToSet: "$depStn" },
+          to: { $addToSet: "$arrStn" },
+          variant: { $addToSet: "$variant" },
+          userTag1: { $addToSet: "$userTag1" },
+          userTag2: { $addToSet: "$userTag2" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          from: 1,
+          to: 1,
+          variant: 1,
+          userTag1: 1,
+          userTag2: 1,
+        },
+      },
     ]);
 
-    const formatOptions = (values) =>
-      values.map((value) => ({ value: value, label: value }));
+    const formatOptions = (values = []) =>
+      values
+        .filter((v) => v !== null && v !== undefined && v !== "")
+        .map((value) => ({
+          value,
+          label: value,
+        }));
 
-    // Filter out undefined-undefined values from sector
-    const filteredSectors = distinctSectors?.[0]?.sector?.filter(sector => sector !== 'undefined-undefined') ?? [];
-    const formattedSectors = formatOptions(filteredSectors);
+    // Safe extraction
+    const sectorList = distinctSectors?.[0]?.sector ?? [];
+    const dataValues = distinctValues?.[0] ?? {};
+
+    const filteredSectors = sectorList.filter(
+      (sector) => sector !== "undefined-undefined"
+    );
 
     const data = {
-      from: formatOptions(distinctValues[0].from),
-      to: formatOptions(distinctValues[0].to),
-      variant: formatOptions(distinctValues[0].variant),
-      sector: formattedSectors,
-      userTag1: formatOptions(distinctValues[0].userTag1),
-      userTag2: formatOptions(distinctValues[0].userTag2)
+      from: formatOptions(dataValues.from ?? []),
+      to: formatOptions(dataValues.to ?? []),
+      variant: formatOptions(dataValues.variant ?? []),
+      sector: formatOptions(filteredSectors),
+      userTag1: formatOptions(dataValues.userTag1 ?? []),
+      userTag2: formatOptions(dataValues.userTag2 ?? []),
     };
 
-    res.json(data);
+    return res.json(data);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Internal Server Error' });
+    console.error("populateDashboardDropDowns error:", error);
+    return res.status(500).json({ message: "Internal Server Error" });
   }
-}
+};
 
 const getVariants = async (req, res) => {
   try {

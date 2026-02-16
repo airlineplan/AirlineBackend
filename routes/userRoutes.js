@@ -34,7 +34,7 @@ user.post("/add-Data", jsonParser, verifyToken, userController.AddData);
 user.get("/get-data", verifyToken, userController.getData);
 user.get("/downloadFLGTs", verifyToken, userController.downloadExpenses);
 user.get("/products/:id", userController.singleData);
-user.delete("/delete/:ids", verifyToken, userController.deleteFlightsAndUpdateSectors);
+user.delete("/delete", jsonParser, verifyToken, userController.deleteFlightsAndUpdateSectors);
 user.delete("/delete-sector/:ids", userController.deleteSectors);
 user.put(
   "/update-data/:id",

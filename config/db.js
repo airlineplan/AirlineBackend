@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 // new developer - Himanshu link 
 // const DB = "mongodb+srv://crazyphoton150hs:C00!buddy@cluster0.4mq6pjf.mongodb.net/?retryWrites=true&w=majority";
 // const DB = "mongodb+srv://hhimanshu030:C00!buddy@cluster0.qondpde.mongodb.net/?retryWrites=true&w=majority";
-// const DB = "mongodb://https://airlineplan.com/airlines"
+// const DB = "mongodb://https://airlinebackend-zfsg.onrender.com/airlines"
 
 // const DB = "mongodb://127.0.0.1/airlines";
 
