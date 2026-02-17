@@ -3790,6 +3790,217 @@ const deletePrevInRotation = async (req, res) => {
   }
 };
 
+const getListPageData = async (req, res) => {
+  try {
+    const {
+      label, // e.g., { value: 'both', label: 'Both' }
+      periodicity, // e.g., { value: 'monthly', label: 'Monthly' }
+      metric, // e.g., { value: 'fuel_cost', label: 'Fuel Cost' }
+      from, to, sector, variant, userTag1, userTag2, rotation, aircraft,
+      depTimeFrom, depTimeTo, arrTimeFrom, arrTimeTo
+    } = req.body;
+
+    const userId = req.userId; // Assuming verifyToken middleware sets this
+
+    // ==========================================
+    // 1. BUILD MONGODB MATCH QUERY FROM FILTERS
+    // ==========================================
+    const matchQuery = { userId: userId };
+
+    // Label Filter (Dom/Intl)
+    if (label && label.value !== "both") {
+      matchQuery.domIntl = label.value.toLowerCase();
+    }
+
+    // Array Filters (Multi-Select Dropdowns)
+    const applyArrayFilter = (field, filterArray) => {
+      if (filterArray && filterArray.length > 0) {
+        matchQuery[field] = { $in: filterArray.map((item) => item.value) };
+      }
+    };
+
+    applyArrayFilter("depStn", from);
+    applyArrayFilter("arrStn", to);
+    applyArrayFilter("sector", sector);
+    applyArrayFilter("variant", variant);
+    applyArrayFilter("userTag1", userTag1);
+    applyArrayFilter("userTag2", userTag2);
+    applyArrayFilter("rotationNumber", rotation);
+    // Note: Aircraft Regn is not explicitly in your schema, but if added later, map it here:
+    // applyArrayFilter("aircraftRegn", aircraft); 
+
+    // Time range filters (STD and STA)
+    // Note: std and sta in your schema are strings like "10:30"
+    if (depTimeFrom || depTimeTo) {
+      matchQuery.std = {};
+      if (depTimeFrom) matchQuery.std.$gte = depTimeFrom;
+      if (depTimeTo) matchQuery.std.$lte = depTimeTo;
+    }
+    if (arrTimeFrom || arrTimeTo) {
+      matchQuery.sta = {};
+      if (arrTimeFrom) matchQuery.sta.$gte = arrTimeFrom;
+      if (arrTimeTo) matchQuery.sta.$lte = arrTimeTo;
+    }
+
+    // Fetch the filtered raw flights from DB
+    const flights = await Flights.find(matchQuery).lean();
+
+    if (!flights || flights.length === 0) {
+      return res.status(200).json({ columns: [], flights: [] });
+    }
+
+    // ==========================================
+    // 2. GENERATE TIME BUCKETS (COLUMNS)
+    // ==========================================
+    // Find min and max dates from the returned flights to set the bounds
+    let minDate = moment(flights[0].date);
+    let maxDate = moment(flights[0].date);
+
+    flights.forEach((f) => {
+      const d = moment(f.date);
+      if (d.isBefore(minDate)) minDate = d;
+      if (d.isAfter(maxDate)) maxDate = d;
+    });
+
+    const columns = [];
+    const dateBuckets = []; // Used internally to map flights to columns
+
+    const periodValue = periodicity ? periodicity.value : "daily";
+
+    let current = minDate.clone().startOf(periodValue === "weekly" ? "isoWeek" : periodValue);
+    const end = maxDate.clone().endOf(periodValue === "weekly" ? "isoWeek" : periodValue);
+
+    while (current.isSameOrBefore(end)) {
+      let colName = "";
+      let bucketStart = current.clone();
+      let bucketEnd = current.clone();
+
+      switch (periodValue) {
+        case "annually":
+          colName = current.format("YYYY");
+          bucketEnd.endOf("year");
+          current.add(1, "year");
+          break;
+        case "quarterly":
+          colName = `Q${current.format("Q YYYY")}`;
+          bucketEnd.endOf("quarter");
+          current.add(1, "quarter");
+          break;
+        case "monthly":
+          colName = current.format("MMM YY");
+          bucketEnd.endOf("month");
+          current.add(1, "month");
+          break;
+        case "weekly":
+          colName = `Wk ${current.isoWeek()} '${current.format("YY")}`;
+          bucketEnd.endOf("isoWeek");
+          current.add(1, "week");
+          break;
+        case "daily":
+        default:
+          colName = current.format("DD MMM YY");
+          bucketEnd.endOf("day");
+          current.add(1, "day");
+          break;
+      }
+
+      columns.push(colName);
+      dateBuckets.push({ start: bucketStart, end: bucketEnd, colName: colName });
+    }
+
+
+    // ==========================================
+    // 3. GROUP FLIGHTS AND CALCULATE METRICS
+    // ==========================================
+
+    // Helper to calculate specific metric for a single flight
+    // Add logic here to match the 11 Dropdown Metrics based on your Schema variables
+    const calculateMetricValue = (f, metricValue) => {
+      const ask = parseFloat(f.ask) || 0;
+      const rsk = parseFloat(f.rsk) || 0;
+      const pax = parseFloat(f.pax) || 0;
+      const cargoT = parseFloat(f.CargoT) || 0;
+      // You may need to define specific calculations here based on your business logic.
+      // E.g., if Fuel Cost is a fixed rate * distance * cargo, write that here.
+      // For demonstration, I will use some standard formulas based on your schema.
+
+      switch (metricValue) {
+        case "rask":
+          return rsk > 0 ? rsk / ask : 0; // Example: RSK / ASK
+        case "rrpk":
+          return rsk;
+        case "crpk":
+          return parseFloat(f.cargoRtk) || 0;
+        case "prev_pax":
+          return pax; // Placeholder for Passenger Revenue calculations
+        case "crev_t":
+          return cargoT; // Placeholder for Cargo Revenue calculations
+        // Default to returning Block Time (bt) or Distance (dist) if Cost metrics aren't explicitly saved
+        case "fuel_cost":
+        case "maintenance_cost":
+        case "crew_cost":
+        case "nav_opt_cost":
+        case "doc":
+        case "cask":
+        default:
+          return parseFloat(f.dist) || parseFloat(f.bt) || 1; // Placeholder fallback
+      }
+    };
+
+    // We need to compress the raw flights to unique [Flight No + CityPair] 
+    // and map their calculated values into the `data` array corresponding to the `columns` index.
+
+    const groupedFlightsMap = new Map();
+
+    flights.forEach((f) => {
+      // Create a unique key for the row (Flight Number + DepStn + ArrStn)
+      // This ensures we have one row per flight route
+      const uniqueKey = `${f.flight}_${f.depStn}_${f.arrStn}_${f.variant}`;
+
+      if (!groupedFlightsMap.has(uniqueKey)) {
+        groupedFlightsMap.set(uniqueKey, {
+          depStn: f.depStn,
+          cityPair: f.sector,
+          flightNo: f.flight,
+          aircraft: f.variant, // Using variant as aircraft if aircraft reg is missing
+          rotation: f.rotationNumber || "N/A",
+          // Initialize an array of 0s equal to the number of columns
+          data: new Array(columns.length).fill(0),
+        });
+      }
+
+      const row = groupedFlightsMap.get(uniqueKey);
+      const flightDate = moment(f.date);
+
+      // Find which column index this flight belongs to based on its date
+      const bucketIndex = dateBuckets.findIndex(
+        (b) => flightDate.isSameOrAfter(b.start) && flightDate.isSameOrBefore(b.end)
+      );
+
+      if (bucketIndex !== -1) {
+        // Calculate the metric value and ADD it to the specific bucket
+        const val = calculateMetricValue(f, metric ? metric.value : "default");
+        row.data[bucketIndex] += val;
+      }
+    });
+
+    // Convert Map back to array format expected by frontend
+    const finalFlightsArray = Array.from(groupedFlightsMap.values());
+
+    // ==========================================
+    // 4. SEND RESPONSE
+    // ==========================================
+    res.status(200).json({
+      columns: columns,
+      flights: finalFlightsArray
+    });
+
+  } catch (error) {
+    console.error("Error generating List Page Data:", error);
+    res.status(500).json({ message: "Internal Server Error while fetching list data." });
+  }
+};
+
 module.exports = {
   // importUser,
   getData,
@@ -3819,5 +4030,6 @@ module.exports = {
   addRotationDetailsFlgtChange,
   saveStation,
   deleteCompleteRotation,
-  deletePrevInRotation
+  deletePrevInRotation,
+  getListPageData
 };

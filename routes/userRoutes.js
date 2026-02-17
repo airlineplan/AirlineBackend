@@ -75,6 +75,6 @@ user.post("/addRotationDetailsFlgtChange", verifyToken, jsonParser, userControll
 user.post("/saveStation", verifyToken, jsonParser, userController.saveStation);
 user.post("/deleteCompleteRotation/", verifyToken, jsonParser, userController.deleteCompleteRotation);
 user.post("/deletePrevInRotation/", verifyToken, jsonParser, userController.deletePrevInRotation);
-
+user.post("/list-page-data", jsonParser, verifyToken, userController.getListPageData);
 
 module.exports = user;
