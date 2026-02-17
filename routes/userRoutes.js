@@ -6,6 +6,7 @@ const verifyToken = require("../middlware/auth.js");
 const userLogin = require("../controller/userLogin");
 var bodyParser = require("body-parser");
 const { verify } = require("crypto");
+const { importUser } = require("../controller/upload.controller");
 
 user.use(bodyParser.urlencoded({ extended: true }));
 
@@ -28,7 +29,7 @@ user.post(
   "/importUser",
   upload.single("file"),
   verifyToken,
-  userController.importUser
+  importUser
 );
 user.post("/add-Data", jsonParser, verifyToken, userController.AddData);
 user.get("/get-data", verifyToken, userController.getData);
