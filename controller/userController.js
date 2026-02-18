@@ -3793,10 +3793,7 @@ const deletePrevInRotation = async (req, res) => {
 const getListPageData = async (req, res) => {
   try {
     const {
-      label,
-      periodicity,
-      metric,
-      from, to, sector, variant, userTag1, userTag2, rotation,
+      label, periodicity, metric, from, to, sector, variant, userTag1, userTag2, rotation,
       depTimeFrom, depTimeTo, arrTimeFrom, arrTimeTo
     } = req.body;
 
@@ -3837,137 +3834,16 @@ const getListPageData = async (req, res) => {
       if (arrTimeTo) matchQuery.sta.$lte = arrTimeTo;
     }
 
+    // =====================================
+    // 2️⃣ FETCH RAW DATA
+    // =====================================
+    // We fetch the raw data directly. The React frontend contains a 
+    // sophisticated Pivot algorithm that handles Date bucketing, 
+    // hierarchical grouping, and metric aggregation dynamically.
     const flights = await Flights.find(matchQuery).lean();
 
-    if (!flights.length) {
-      return res.json({ columns: [], flights: [] });
-    }
-
-    // =====================================
-    // 2️⃣ BUILD TIME BUCKETS
-    // =====================================
-    const period = periodicity?.value || "monthly";
-
-    let minDate = moment.min(flights.map(f => moment(f.date)));
-    let maxDate = moment.max(flights.map(f => moment(f.date)));
-
-    const columns = [];
-    const buckets = [];
-
-    let cursor = minDate.clone().startOf(period === "weekly" ? "isoWeek" : period);
-    const end = maxDate.clone().endOf(period === "weekly" ? "isoWeek" : period);
-
-    while (cursor.isSameOrBefore(end)) {
-      const start = cursor.clone();
-      const bucketEnd = cursor.clone().endOf(period === "weekly" ? "isoWeek" : period);
-
-      let colName;
-
-      switch (period) {
-        case "monthly":
-          colName = cursor.format("YYYY-M");
-          cursor.add(1, "month");
-          break;
-        case "weekly":
-          colName = `W${cursor.isoWeek()}-${cursor.format("YY")}`;
-          cursor.add(1, "week");
-          break;
-        case "daily":
-        default:
-          colName = cursor.format("DD-MMM-YY");
-          cursor.add(1, "day");
-          break;
-      }
-
-      columns.push(colName);
-      buckets.push({ start, end: bucketEnd });
-    }
-
-    columns.push("Grand Total");
-
-    // =====================================
-    // 3️⃣ METRIC LOGIC (CORRECT PIVOT STYLE)
-    // =====================================
-
-    const metricValue = metric?.value || "departures";
-
-    const convertBT = (bt) => {
-      if (!bt) return 0;
-      const [h, m] = bt.split(":").map(Number);
-      return (h || 0) + (m || 0) / 60;
-    };
-
-    const groupedMap = new Map();
-
-    flights.forEach(f => {
-
-      const key = `${f.flight}_${f.rotationNumber || ""}_${f.sector || ""}`;
-
-      if (!groupedMap.has(key)) {
-        groupedMap.set(key, {
-          flightNo: f.flight,
-          aircraft: f.rotationNumber || "",
-          sector: f.sector || "",
-          data: new Array(columns.length).fill(0),
-          askSum: new Array(columns.length).fill(0),
-          rskSum: new Array(columns.length).fill(0)
-        });
-      }
-
-      const row = groupedMap.get(key);
-
-      const flightDate = moment(f.date);
-      const bucketIndex = buckets.findIndex(b =>
-        flightDate.isSameOrAfter(b.start) &&
-        flightDate.isSameOrBefore(b.end)
-      );
-
-      if (bucketIndex === -1) return;
-
-      let value = 0;
-
-      switch (metricValue) {
-        case "departures":
-          value = 1;
-          break;
-
-        case "fh":
-          value = convertBT(f.bt);
-          break;
-
-        case "ask":
-          value = parseFloat(f.ask) || 0;
-          break;
-
-        case "rask":
-          row.askSum[bucketIndex] += parseFloat(f.ask) || 0;
-          row.rskSum[bucketIndex] += parseFloat(f.rsk) || 0;
-          return;
-
-        default:
-          value = 1;
-      }
-
-      row.data[bucketIndex] += value;
-      row.data[columns.length - 1] += value;
-    });
-
-    // HANDLE RASK AFTER SUM
-    if (metricValue === "rask") {
-      groupedMap.forEach(row => {
-        row.askSum.forEach((_, i) => {
-          const val = row.askSum[i] > 0 ? row.rskSum[i] / row.askSum[i] : 0;
-          row.data[i] = val;
-          row.data[columns.length - 1] += val;
-        });
-      });
-    }
-
-    const result = Array.from(groupedMap.values());
-
     return res.json({
-      columns,
-      flights: result
+      flights: flights || []
     });
 
   } catch (error) {
