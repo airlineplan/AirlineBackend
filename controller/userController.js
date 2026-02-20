@@ -562,9 +562,13 @@ const downloadExpenses = async (req, res) => {
       { header: "Dep Stn", key: "depStn" },
       { header: "STD(LT).", key: "std" },
       { header: "BT", key: "bt" },
+      { header: "FT", key: "ft" },             // NEW: FT inserted between BT and STA
       { header: "STA(LT)", key: "sta" },
       { header: "Arr Stn.", key: "arrStn" },
       { header: "Sector.", key: "sector" },
+      { header: "ACFT", key: "acftType" },     
+      { header: "BH", key: "bh" },             // NEW: BH inserted between ACFT and FH
+      { header: "FH", key: "fh" },            
       { header: "Variant.", key: "variant" },
       { header: "Seats.", key: "seats" },
       { header: "Cargo Cap", key: "CargoCapT" },
@@ -600,23 +604,27 @@ const downloadExpenses = async (req, res) => {
         s_no: count,
         ...product.toObject(),
         date: product.date ? new Date(product.date).toISOString().split("T")[0] : "",
-        seats: parseFloat(product.seats),
-        CargoCapT: parseFloat(product.CargoCapT),
-        dist: parseFloat(product.dist),
-        pax: parseInt(product.pax, 10),
-        CargoT: parseFloat(product.CargoT),
-        ask: parseInt(product.ask, 10),
-        rsk: parseInt(product.rsk, 10),
-        cargoAtk: parseInt(product.cargoAtk, 10),
-        cargoRtk: parseInt(product.cargoRtk, 10),
+        ft: product.ft ? parseFloat(product.ft) : 0,       // NEW: Parse FT as float
+        acftType: product.acftType || "",                  
+        bh: product.bh ? parseFloat(product.bh) : 0,       // NEW: Parse BH as float
+        fh: product.fh ? parseFloat(product.fh) : 0,       
+        seats: parseFloat(product.seats) || 0,
+        CargoCapT: parseFloat(product.CargoCapT) || 0,
+        dist: parseFloat(product.dist) || 0,
+        pax: parseInt(product.pax, 10) || 0,
+        CargoT: parseFloat(product.CargoT) || 0,
+        ask: parseInt(product.ask, 10) || 0,
+        rsk: parseInt(product.rsk, 10) || 0,
+        cargoAtk: parseInt(product.cargoAtk, 10) || 0,
+        cargoRtk: parseInt(product.cargoRtk, 10) || 0,
       };
 
       worksheet.addRow(excelProduct).commit();
       count++;
     }
 
-    worksheet.commit(); // Finalize the worksheet
-    await workbook.commit(); // Finalize the workbook
+    worksheet.commit(); 
+    await workbook.commit();
   } catch (error) {
     console.error(error);
     res.status(500).send("An error occurred while generating the file.");

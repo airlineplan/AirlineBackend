@@ -50,30 +50,49 @@ const timeStrToDecimal = (timeStr) => {
   return hours + (minutes / 60);
 };
 
-// --- CORE UPDATE LOGIC FOR FLIGHTS ---
+const timeStrToMinutes = (timeStr) => {
+  if (!timeStr) return 0;
+  
+  const parts = String(timeStr).split(':');
+  if (parts.length === 2) {
+    const hours = parseInt(parts[0], 10) || 0;
+    const minutes = parseInt(parts[1], 10) || 0;
+    return (hours * 60) + minutes;
+  }
+  
+  // Fallback just in case the value is already a decimal or float
+  return parseFloat(timeStr) * 60 || 0; 
+};
+
 const syncFlightsForSector = async (doc) => {
   try {
-    // 1. Calculate Block Hours
-    const bh = timeStrToDecimal(doc.bt);
-
-    // 2. Fetch Taxi times from Station model
+    // 1. Fetch Taxi times from Station model
     const depStation = await Station.findOne({ stationName: doc.sector1, userId: doc.userId });
     const arrStation = await Station.findOne({ stationName: doc.sector2, userId: doc.userId });
 
-    const taxiOutDec = depStation && depStation.avgTaxiOutTime ? timeStrToDecimal(depStation.avgTaxiOutTime) : 0;
-    const taxiInDec = arrStation && arrStation.avgTaxiInTime ? timeStrToDecimal(arrStation.avgTaxiInTime) : 0;
+    // 2. Convert everything to total minutes for accurate math
+    const bhMins = timeStrToMinutes(doc.bt);
+    const taxiOutMins = depStation && depStation.avgTaxiOutTime ? timeStrToMinutes(depStation.avgTaxiOutTime) : 0;
+    const taxiInMins = arrStation && arrStation.avgTaxiInTime ? timeStrToMinutes(arrStation.avgTaxiInTime) : 0;
 
-    // 3. Calculate FH (ensure it doesn't go below 0)
-    let fh = bh - taxiOutDec - taxiInDec;
-    if (fh < 0) fh = 0; 
+    // 3. Calculate FH in minutes (ensure it doesn't drop below 0)
+    let fhMins = bhMins - taxiOutMins - taxiInMins;
+    if (fhMins < 0) fhMins = 0; 
 
-    // Update the Sector itself with the calculated decimals
+    // 4. Convert back to decimal hours for the database
+    // (e.g., 145 mins / 60 = 2.4166...)
+    // (e.g., 115 mins / 60 = 1.9166...)
+    const bh = bhMins / 60;
+    const fh = fhMins / 60;
+
+    // 5. Update the Sector itself with the calculated decimals
+    // NOTE: MongoDB will save these as precise floats. You can format them to 2 decimals in your UI.
     await mongoose.model("Sector").updateOne(
       { _id: doc._id }, 
       { $set: { fh: fh, bh: bh } }
     );
 
-    // 4. Fields to push to FLGTs master table
+    // 6. Fields to push to FLGTs master table
     const updatedFields = {
       seats: doc.paxCapacity,
       pax: doc.paxCapacity * (doc.paxLF / 100),
@@ -84,9 +103,9 @@ const syncFlightsForSector = async (doc) => {
       rsk: doc.paxCapacity * (doc.paxLF / 100) * doc.gcd,
       cargoAtk: doc.CargoCapT * doc.gcd,
       cargoRtk: doc.CargoCapT * (doc.cargoLF / 100) * doc.gcd,
-      acftType: doc.acftType, // Passed directly to master table
-      fh: fh,                 // Passed directly to master table
-      bh: bh                  // Passing BH as well to keep DB clean
+      acftType: doc.acftType, 
+      fh: fh,                 
+      bh: bh                  
     };
 
     const allFieldsValid = Object.entries(updatedFields).every(([key, value]) => (
@@ -95,10 +114,10 @@ const syncFlightsForSector = async (doc) => {
 
     updatedFields.isComplete = allFieldsValid;
 
-    // 5. Update flights associated with this sector
+    // 7. Update flights associated with this sector
     await FLIGHT.updateMany({ networkId: doc.networkId }, { $set: updatedFields });
 
-    console.log(`Flights updated successfully. Calculated FH: ${fh.toFixed(2)}`);
+    console.log(`Flights updated successfully. Calculated FH: ${fh.toFixed(2)} | Calculated BH: ${bh.toFixed(2)}`);
   } catch (error) {
     console.error("Error updating flights:", error);
   }
