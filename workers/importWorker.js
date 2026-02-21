@@ -12,8 +12,6 @@ const ImportJob = require("../model/ImportJob");
 const CHUNK_SIZE = 1000;
 
 (async () => {
-    let session;
-
     try {
         console.log("🚀 Worker Started");
         console.log("Worker Data:", workerData);
@@ -29,6 +27,8 @@ const CHUNK_SIZE = 1000;
 
         const workbook = xlsx.readFile(filePath);
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        
+        // Reading the rows from Excel
         const rows = xlsx.utils.sheet_to_json(sheet);
 
         console.log("📊 Total rows found:", rows.length);
@@ -45,7 +45,6 @@ const CHUNK_SIZE = 1000;
             try {
                 const dataBulk = [];
                 const sectorBulk = [];
-
                 const dataDocsForFlights = [];
 
                 for (const row of chunk) {
@@ -132,7 +131,19 @@ const CHUNK_SIZE = 1000;
     }
 })();
 
-//--- helper -----------
+//--- helpers -----------
+
+// 🔥 NEW: Helper to format values to exactly 2 decimal places
+function formatDecimal(value) {
+    if (typeof value === "number") {
+        return parseFloat(value.toFixed(2));
+    }
+    // Handle cases where the number was parsed as a string
+    if (typeof value === "string" && !isNaN(value) && value.trim() !== "") {
+        return parseFloat(parseFloat(value).toFixed(2));
+    }
+    return value;
+}
 
 function validateRow(row) {
     return (
@@ -147,9 +158,10 @@ function processExcelRow(row) {
     return {
         flight: row["Flight #"],
         depStn: row["Dep Stn"],
-        std: row["STD (LT)"],
-        bt: row["BT"],
-        sta: row["STA(LT)"],
+        // Wrap the decimal fields in our format helper
+        std: formatDecimal(row["STD (LT)"]),
+        bt: formatDecimal(row["BT"]),
+        sta: formatDecimal(row["STA(LT)"]),
         arrStn: row["Arr Stn"],
         variant: row["Variant"],
         effFromDt: row["Eff from Dt"],
@@ -159,7 +171,7 @@ function processExcelRow(row) {
     };
 }
 
-//---------- helper ----------------------
+//---------- flight generation helper ----------------------
 
 async function generateFlightsBulk(dataDocs) {
     const flightBulk = [];
