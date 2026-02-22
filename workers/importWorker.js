@@ -133,37 +133,48 @@ const CHUNK_SIZE = 1000;
 
 //--- helpers -----------
 
-// 🔥 NEW: Helper to convert Excel Serial Dates to JavaScript Dates
+// 🔥 NEW: Helper to convert Excel time decimals to "HH:MM" strings
+function parseExcelTime(excelTime) {
+    if (excelTime === undefined || excelTime === null) return "";
+
+    // If Excel already parsed it as a string (e.g., "06:10")
+    if (typeof excelTime === "string") {
+        return excelTime.trim();
+    }
+
+    // If Excel gave us the decimal fraction of a day (e.g., 0.2569 for 06:10)
+    if (typeof excelTime === "number") {
+        // Convert fraction of day into total seconds (24 hours * 60 mins * 60 secs)
+        const totalSeconds = Math.round(excelTime * 86400); 
+        
+        const hours = Math.floor(totalSeconds / 3600) % 24;
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+        // Pad with leading zeros: 6 -> "06"
+        const formattedHours = String(hours).padStart(2, "0");
+        const formattedMinutes = String(minutes).padStart(2, "0");
+
+        return `${formattedHours}:${formattedMinutes}`;
+    }
+
+    return String(excelTime);
+}
+
+// Helper to convert Excel Serial Dates to JavaScript Dates
 function parseExcelDate(excelValue) {
     if (!excelValue) return null;
     
-    // If Excel already provided it as a string (e.g., "1 Feb 26")
     if (typeof excelValue === "string") {
         return new Date(excelValue);
     }
     
-    // If Excel provided a serial number (days since Jan 1, 1900)
     if (typeof excelValue === "number") {
-        // 25569 is the difference in days between 1/1/1900 and 1/1/1970
         const date = new Date(Math.round((excelValue - 25569) * 86400 * 1000));
-        
-        // Adjust for local timezone offset so dates don't shift a day backwards
         date.setMinutes(date.getMinutes() + date.getTimezoneOffset());
         return date;
     }
 
     return new Date(excelValue);
-}
-
-// 🔥 EXISTING: Helper to format values to exactly 2 decimal places
-function formatDecimal(value) {
-    if (typeof value === "number") {
-        return parseFloat(value.toFixed(2));
-    }
-    if (typeof value === "string" && !isNaN(value) && value.trim() !== "") {
-        return parseFloat(parseFloat(value).toFixed(2));
-    }
-    return value;
 }
 
 function validateRow(row) {
@@ -179,12 +190,12 @@ function processExcelRow(row) {
     return {
         flight: row["Flight #"],
         depStn: row["Dep Stn"],
-        std: formatDecimal(row["STD (LT)"]),
-        bt: formatDecimal(row["BT"]),
-        sta: formatDecimal(row["STA(LT)"]),
+        // 🔥 Apply the new time parser here
+        std: parseExcelTime(row["STD (LT)"]),
+        bt: parseExcelTime(row["BT"]),
+        sta: parseExcelTime(row["STA(LT)"]),
         arrStn: row["Arr Stn"],
         variant: row["Variant"],
-        // Apply the new date parser here 👇
         effFromDt: parseExcelDate(row["Eff from Dt"]),
         effToDt: parseExcelDate(row["Eff to Dt"]),
         dow: row["DoW"],
