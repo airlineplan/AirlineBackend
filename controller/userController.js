@@ -2762,6 +2762,10 @@ const getDashboardData = async (req, res) => {
 
           const bh = flightsInPeriod.reduce((totalbh, flight) => totalbh + convertTimeStringToDecimal(flight.bt), 0);
 
+          const fh = flightsInPeriod.reduce((totalfh, flight) => {
+            return totalfh + (Number(flight.fh) || 0);
+          }, 0);
+
           resultData.push({
             endDate: periodEndDate.toString(),
             destinations: parseInt(uniqueStations.size).toLocaleString(),
@@ -2781,6 +2785,7 @@ const getDashboardData = async (req, res) => {
             ct2ctc: Math.round((sumOfCargoT / sumOfCargoCapT) * 100),
             cftk2atk: Math.round((sumOfcargoRtk / sumOfcargoAtk) * 100),
             bh: Math.round(bh).toLocaleString(),
+            fh: fh,
             sumOfGcd: Math.round(sumOfGcd),
             adu: validRotationFlights.length > 0 ? (Math.round(bh / validRotationFlights.length * 100) / 100).toFixed(2) : '0',
             connectingFlights: connectingFlgts.toLocaleString(),
