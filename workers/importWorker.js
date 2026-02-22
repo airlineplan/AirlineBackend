@@ -27,7 +27,7 @@ const CHUNK_SIZE = 1000;
 
         const workbook = xlsx.readFile(filePath);
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        
+
         // Reading the rows from Excel
         const rows = xlsx.utils.sheet_to_json(sheet);
 
@@ -105,7 +105,9 @@ const CHUNK_SIZE = 1000;
                     await Data.bulkWrite(dataBulk, { ordered: false });
                     await Sector.bulkWrite(sectorBulk, { ordered: false });
 
-                    // 🔥 GENERATE FLIGHTS MANUALLY
+                    await updateStationsBulk(dataDocsForFlights, userId);
+
+                    // 🔥 Generate flights
                     await generateFlightsBulk(dataDocsForFlights);
                 }
 
@@ -156,7 +158,7 @@ function parseExcelTime(excelTime) {
     }
 
     if (typeof excelTime === "number") {
-        const totalSeconds = Math.round(excelTime * 86400); 
+        const totalSeconds = Math.round(excelTime * 86400);
         const hours = Math.floor(totalSeconds / 3600) % 24;
         const minutes = Math.floor((totalSeconds % 3600) / 60);
 
@@ -172,7 +174,7 @@ function parseExcelTime(excelTime) {
 function parseExcelDate(excelValue) {
     if (!excelValue) return null;
     if (typeof excelValue === "string") return new Date(excelValue);
-    
+
     if (typeof excelValue === "number") {
         const date = new Date(Math.round((excelValue - 25569) * 86400 * 1000));
         date.setMinutes(date.getMinutes() + date.getTimezoneOffset());
@@ -189,7 +191,7 @@ function formatDecimal(value) {
     if (typeof value === "string" && !isNaN(value) && value.trim() !== "") {
         return parseFloat(parseFloat(value).toFixed(2));
     }
-    return value || 0; 
+    return value || 0;
 }
 
 function validateRow(row) {
@@ -228,6 +230,86 @@ function processExcelRow(row) {
 }
 
 //---------- flight generation helper ----------------------
+
+async function updateStationsBulk(dataDocs, userId) {
+
+    const stationCountMap = {};
+
+    // 1️⃣ Count station occurrences inside this chunk
+    for (const doc of dataDocs) {
+
+        if (!doc.depStn || !doc.arrStn) continue;
+
+        stationCountMap[doc.depStn] = (stationCountMap[doc.depStn] || 0) + 1;
+        stationCountMap[doc.arrStn] = (stationCountMap[doc.arrStn] || 0) + 1;
+    }
+
+    const stationNames = Object.keys(stationCountMap);
+
+    if (!stationNames.length) return;
+
+    // 2️⃣ Fetch existing stations
+    const existingStations = await mongoose.model("Station").find({
+        stationName: { $in: stationNames },
+        userId
+    });
+
+    const existingMap = {};
+    existingStations.forEach(stn => {
+        existingMap[stn.stationName] = stn;
+    });
+
+    const bulkOps = [];
+
+    // 3️⃣ Prepare bulk operations
+    for (const stationName of stationNames) {
+
+        const incrementBy = stationCountMap[stationName];
+
+        if (existingMap[stationName]) {
+
+            // Update freq
+            bulkOps.push({
+                updateOne: {
+                    filter: { stationName, userId },
+                    update: { $inc: { freq: incrementBy } }
+                }
+            });
+
+        } else {
+
+            // Insert new station
+            bulkOps.push({
+                insertOne: {
+                    document: {
+                        stationName,
+                        userId,
+                        freq: incrementBy,
+                        avgTaxiOutTime: "00:00",
+                        avgTaxiInTime: "00:00",
+                        stdtz: "UTC+0:00",
+                        dsttz: "UTC+0:00",
+                        ddMinCT: "1:30",
+                        ddMaxCT: "7:00",
+                        dInMinCT: "2:00",
+                        dInMaxCT: "7:00",
+                        inDMinCT: "2:00",
+                        inDMaxCT: "7:00",
+                        inInMinDT: "2:00",
+                        inInMaxDT: "7:00"
+                    }
+                }
+            });
+        }
+    }
+
+    if (bulkOps.length) {
+        await mongoose.model("Station").bulkWrite(bulkOps, { ordered: false });
+    }
+
+    console.log("🏢 Stations updated successfully");
+}
+
 
 async function generateFlightsBulk(dataDocs) {
     const flightBulk = [];
