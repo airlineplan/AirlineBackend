@@ -133,12 +133,33 @@ const CHUNK_SIZE = 1000;
 
 //--- helpers -----------
 
-// 🔥 NEW: Helper to format values to exactly 2 decimal places
+// 🔥 NEW: Helper to convert Excel Serial Dates to JavaScript Dates
+function parseExcelDate(excelValue) {
+    if (!excelValue) return null;
+    
+    // If Excel already provided it as a string (e.g., "1 Feb 26")
+    if (typeof excelValue === "string") {
+        return new Date(excelValue);
+    }
+    
+    // If Excel provided a serial number (days since Jan 1, 1900)
+    if (typeof excelValue === "number") {
+        // 25569 is the difference in days between 1/1/1900 and 1/1/1970
+        const date = new Date(Math.round((excelValue - 25569) * 86400 * 1000));
+        
+        // Adjust for local timezone offset so dates don't shift a day backwards
+        date.setMinutes(date.getMinutes() + date.getTimezoneOffset());
+        return date;
+    }
+
+    return new Date(excelValue);
+}
+
+// 🔥 EXISTING: Helper to format values to exactly 2 decimal places
 function formatDecimal(value) {
     if (typeof value === "number") {
         return parseFloat(value.toFixed(2));
     }
-    // Handle cases where the number was parsed as a string
     if (typeof value === "string" && !isNaN(value) && value.trim() !== "") {
         return parseFloat(parseFloat(value).toFixed(2));
     }
@@ -158,14 +179,14 @@ function processExcelRow(row) {
     return {
         flight: row["Flight #"],
         depStn: row["Dep Stn"],
-        // Wrap the decimal fields in our format helper
         std: formatDecimal(row["STD (LT)"]),
         bt: formatDecimal(row["BT"]),
         sta: formatDecimal(row["STA(LT)"]),
         arrStn: row["Arr Stn"],
         variant: row["Variant"],
-        effFromDt: row["Eff from Dt"],
-        effToDt: row["Eff to Dt"],
+        // Apply the new date parser here 👇
+        effFromDt: parseExcelDate(row["Eff from Dt"]),
+        effToDt: parseExcelDate(row["Eff to Dt"]),
         dow: row["DoW"],
         domINTL: row["Dom / INTL"],
     };
