@@ -53,6 +53,7 @@ const CHUNK_SIZE = 1000;
 
                     if (!validateRow(processed)) continue;
 
+                    // 1. Prepare Data Document
                     const dataDoc = {
                         _id: dataId,
                         ...processed,
@@ -65,6 +66,7 @@ const CHUNK_SIZE = 1000;
                         insertOne: { document: dataDoc }
                     });
 
+                    // 2. Prepare Sector Document (Now including all metrics)
                     sectorBulk.push({
                         insertOne: {
                             document: {
@@ -78,7 +80,20 @@ const CHUNK_SIZE = 1000;
                                 std: processed.std,
                                 networkId: dataId,
                                 userId,
-                                isScheduled: true
+                                isScheduled: true,
+                                // 🔥 NEW: Added metrics and tags to Sector
+                                gcd: processed.gcd,
+                                paxCapacity: processed.paxCapacity,
+                                CargoCapT: processed.CargoCapT,
+                                paxLF: processed.paxLF,
+                                cargoLF: processed.cargoLF,
+                                fromDt: processed.effFromDt,
+                                toDt: processed.effToDt,
+                                domINTL: processed.domINTL?.toLowerCase() || "",
+                                userTag1: processed.userTag1,
+                                userTag2: processed.userTag2,
+                                remarks1: processed.remarks1,
+                                remarks2: processed.remarks2,
                             }
                         }
                     });
@@ -133,24 +148,18 @@ const CHUNK_SIZE = 1000;
 
 //--- helpers -----------
 
-// 🔥 NEW: Helper to convert Excel time decimals to "HH:MM" strings
 function parseExcelTime(excelTime) {
     if (excelTime === undefined || excelTime === null) return "";
 
-    // If Excel already parsed it as a string (e.g., "06:10")
     if (typeof excelTime === "string") {
         return excelTime.trim();
     }
 
-    // If Excel gave us the decimal fraction of a day (e.g., 0.2569 for 06:10)
     if (typeof excelTime === "number") {
-        // Convert fraction of day into total seconds (24 hours * 60 mins * 60 secs)
         const totalSeconds = Math.round(excelTime * 86400); 
-        
         const hours = Math.floor(totalSeconds / 3600) % 24;
         const minutes = Math.floor((totalSeconds % 3600) / 60);
 
-        // Pad with leading zeros: 6 -> "06"
         const formattedHours = String(hours).padStart(2, "0");
         const formattedMinutes = String(minutes).padStart(2, "0");
 
@@ -160,21 +169,27 @@ function parseExcelTime(excelTime) {
     return String(excelTime);
 }
 
-// Helper to convert Excel Serial Dates to JavaScript Dates
 function parseExcelDate(excelValue) {
     if (!excelValue) return null;
-    
-    if (typeof excelValue === "string") {
-        return new Date(excelValue);
-    }
+    if (typeof excelValue === "string") return new Date(excelValue);
     
     if (typeof excelValue === "number") {
         const date = new Date(Math.round((excelValue - 25569) * 86400 * 1000));
         date.setMinutes(date.getMinutes() + date.getTimezoneOffset());
         return date;
     }
-
     return new Date(excelValue);
+}
+
+// Fixed formatDecimal to return 0 instead of undefined for empty cells
+function formatDecimal(value) {
+    if (typeof value === "number") {
+        return parseFloat(value.toFixed(2));
+    }
+    if (typeof value === "string" && !isNaN(value) && value.trim() !== "") {
+        return parseFloat(parseFloat(value).toFixed(2));
+    }
+    return value || 0; 
 }
 
 function validateRow(row) {
@@ -190,7 +205,6 @@ function processExcelRow(row) {
     return {
         flight: row["Flight #"],
         depStn: row["Dep Stn"],
-        // 🔥 Apply the new time parser here
         std: parseExcelTime(row["STD (LT)"]),
         bt: parseExcelTime(row["BT"]),
         sta: parseExcelTime(row["STA(LT)"]),
@@ -198,8 +212,18 @@ function processExcelRow(row) {
         variant: row["Variant"],
         effFromDt: parseExcelDate(row["Eff from Dt"]),
         effToDt: parseExcelDate(row["Eff to Dt"]),
-        dow: row["DoW"],
+        dow: String(row["DoW"] || ""),
         domINTL: row["Dom / INTL"],
+        // 🔥 NEW: Extracting all the missing columns
+        userTag1: row["User Tag 1"] || "",
+        userTag2: row["User Tag 2"] || "",
+        remarks1: row["Remarks 1"] || "",
+        remarks2: row["Remarks 2"] || "",
+        gcd: formatDecimal(row["GCD"]),
+        paxCapacity: formatDecimal(row["Pax Capacity"]),
+        CargoCapT: formatDecimal(row["Cargo Cap T"]),
+        paxLF: formatDecimal(row["Pax SF%"]),
+        cargoLF: formatDecimal(row["Cargo LF%"])
     };
 }
 
@@ -209,20 +233,23 @@ async function generateFlightsBulk(dataDocs) {
     const flightBulk = [];
 
     for (const doc of dataDocs) {
-
         const startDate = new Date(doc.effFromDt);
         const endDate = new Date(doc.effToDt);
-
         const allowedDays = String(doc.dow).split("").map(Number);
 
         let currentDate = new Date(startDate);
 
-        while (currentDate <= endDate) {
+        // Map values for math calculations to prevent NaNs
+        const paxCapacity = doc.paxCapacity || 0;
+        const CargoCapT = doc.CargoCapT || 0;
+        const gcd = doc.gcd || 0;
+        const paxLF = doc.paxLF || 0;
+        const cargoLF = doc.cargoLF || 0;
 
+        while (currentDate <= endDate) {
             const currentDay = currentDate.getDay() !== 0 ? currentDate.getDay() : 7;
 
             if (allowedDays.includes(currentDay)) {
-
                 flightBulk.push({
                     insertOne: {
                         document: {
@@ -241,13 +268,25 @@ async function generateFlightsBulk(dataDocs) {
                             effFromDt: doc.effFromDt,
                             effToDt: doc.effToDt,
                             dow: doc.dow,
+                            // 🔥 NEW: Push the metrics and tags all the way to FLIGHT DB
+                            userTag1: doc.userTag1,
+                            userTag2: doc.userTag2,
+                            remarks1: doc.remarks1,
+                            remarks2: doc.remarks2,
+                            seats: paxCapacity,
+                            CargoCapT: CargoCapT,
+                            dist: gcd,
+                            pax: paxCapacity * (paxLF / 100),
+                            CargoT: CargoCapT * (cargoLF / 100),
+                            ask: paxCapacity * gcd,
+                            rsk: paxCapacity * (paxLF / 100) * gcd,
+                            cargoAtk: CargoCapT * gcd,
+                            cargoRtk: CargoCapT * (cargoLF / 100) * gcd,
                             isComplete: true
                         }
                     }
                 });
-
             }
-
             currentDate.setDate(currentDate.getDate() + 1);
         }
     }
