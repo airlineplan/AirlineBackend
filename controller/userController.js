@@ -3441,46 +3441,69 @@ const addRotationDetailsFlgtChange = async (req, res) => {
 const saveStation = async (req, res) => {
   try {
     const { stations, homeTimeZone } = req.body;
+    const userId = req.user.id;
 
     // Update the home timezone of the user
-    const user = await User.findById(req.user.id);
-    user.hometimeZone = homeTimeZone; // Corrected property name
-    await user.save();
+    const user = await User.findById(userId);
+    if (user) {
+      user.hometimeZone = homeTimeZone; 
+      await user.save();
+    }
 
-    // Array to store updated stations
     const updatedStations = [];
 
     // Iterate over stations array and update each station sequentially
     for (const stationData of stations) {
       const { _id, ...updateFields } = stationData;
 
-      // Find the document based on _id (assuming _id is the identifier)
       const existingStation = await Stations.findById(_id);
 
       if (!existingStation) {
-        // Handle the case where the station doesn't exist
         updatedStations.push(null);
-        continue; // Move to the next iteration
+        continue; 
       }
 
-      // Update the existing document with the new data
-      await existingStation.updateOne(updateFields);
+      // 🔍 1. CHECK IF TAXI TIMES ACTUALLY CHANGED
+      const taxiTimesChanged = 
+        (updateFields.avgTaxiOutTime !== undefined && updateFields.avgTaxiOutTime !== existingStation.avgTaxiOutTime) ||
+        (updateFields.avgTaxiInTime !== undefined && updateFields.avgTaxiInTime !== existingStation.avgTaxiInTime);
 
-      // Push the updated station to the array
-      updatedStations.push(await Stations.findById(existingStation._id));
+      // Update the existing document
+      await existingStation.updateOne(updateFields);
+      
+      const updatedStation = await Stations.findById(_id);
+      updatedStations.push(updatedStation);
+
+      // 🚀 2. CASCADE THE UPDATE IF TAXI TIMES CHANGED
+      if (taxiTimesChanged) {
+        console.log(`🚕 Taxi times changed for ${updatedStation.stationName}. Recalculating Flight Hours...`);
+
+        // Find all sectors where this station is either the Departure or Arrival
+        const affectedSectors = await Sector.find({
+            $or: [{ sector1: updatedStation.stationName }, { sector2: updatedStation.stationName }],
+            userId: userId
+        });
+
+        // Loop through and save them. 
+        // This automatically triggers your `sectorSchema.post("save")` hook, 
+        // which fetches the fresh taxi times, does the math, and updates the FLIGHTs!
+        for (const sector of affectedSectors) {
+            // We use .save() so your Mongoose middleware fires
+            await sector.save(); 
+        }
+        
+        console.log(`✅ Updated FH for ${affectedSectors.length} sectors and their associated flights.`);
+      }
     }
 
-
-    // Call createConnections after all stations are updated
     res.status(200).json(updatedStations);
-
-    // await createConnections(req.user.id);
 
   } catch (error) {
     console.error('Error updating stations:', error);
     res.status(500).send('Internal Server Error');
   }
 };
+
 
 const deleteRotation = async (userId, rotationNumber, totalDepNumber) => {
 
