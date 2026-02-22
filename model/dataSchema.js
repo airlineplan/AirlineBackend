@@ -154,6 +154,75 @@ async function updateBeyondODsAndBehindODs(updatedDoc, originalDoc, domFlights, 
   }
 }
 
+function getTzMinutes(tzString) {
+  if (!tzString || !tzString.startsWith("UTC")) return 0;
+
+  const sign = tzString.includes("-") ? -1 : 1;
+  const timePart = tzString.replace(/UTC[+-]/, "");
+  if (!timePart) return 0;
+
+  const [hours, minutes] = timePart.split(":").map(Number);
+  return sign * ((hours * 60) + (minutes || 0));
+}
+
+async function calculateSTA(doc) {
+  if (!doc.std || !doc.bt || !doc.depStn || !doc.arrStn) return;
+
+  const depStation = await Stations.findOne({
+    stationName: doc.depStn,
+    userId: doc.userId
+  });
+
+  const arrStation = await Stations.findOne({
+    stationName: doc.arrStn,
+    userId: doc.userId
+  });
+
+  let depTzMins = 0;
+  let arrTzMins = 0;
+
+  const selectTz = (station) => {
+    if (!station) return 0;
+
+    let tz = station.stdtz;
+
+    if (doc.effFromDt && station.nextDSTStart && station.nextDSTEnd) {
+      const fDate = new Date(doc.effFromDt);
+      const dStart = new Date(station.nextDSTStart);
+      const dEnd = new Date(station.nextDSTEnd);
+
+      if (fDate >= dStart && fDate <= dEnd) {
+        tz = station.dsttz || station.stdtz;
+      }
+    }
+
+    return getTzMinutes(tz);
+  };
+
+  depTzMins = selectTz(depStation);
+  arrTzMins = selectTz(arrStation);
+
+  const [stdH, stdM] = doc.std.split(":").map(Number);
+  const [btH, btM] = doc.bt.split(":").map(Number);
+
+  if (isNaN(stdH) || isNaN(btH)) return;
+
+  const diffInTzMins = arrTzMins - depTzMins;
+
+  let totalMins =
+    (stdH * 60 + (stdM || 0)) +
+    (btH * 60 + (btM || 0)) +
+    diffInTzMins;
+
+  totalMins = ((totalMins % 1440) + 1440) % 1440;
+
+  const staH = Math.floor(totalMins / 60);
+  const staM = totalMins % 60;
+
+  doc.sta = `${String(staH).padStart(2, "0")}:${String(staM).padStart(2, "0")}`;
+}
+
+
 
 async function createStations(doc) {
   const { arrStn, depStn } = doc;
@@ -358,6 +427,37 @@ async function createFlgts(doc) {
 }
 
 
+dataSchema.pre("save", async function (next) {
+  try {
+    await calculateSTA(this);
+    next();
+  } catch (err) {
+    console.error("Error calculating STA:", err);
+    next(err);
+  }
+});
+
+dataSchema.pre("findOneAndUpdate", async function (next) {
+  try {
+    const update = this.getUpdate();
+
+    if (!update) return next();
+
+    const doc = await this.model.findOne(this.getQuery());
+    if (!doc) return next();
+
+    Object.assign(doc, update);
+
+    await calculateSTA(doc);
+
+    this.setUpdate(doc);
+
+    next();
+  } catch (err) {
+    console.error("Error calculating STA on update:", err);
+    next(err);
+  }
+});
 
 dataSchema.post('save', async function (doc) {
 
