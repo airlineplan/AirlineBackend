@@ -303,7 +303,7 @@ async function cleanupQueue() {
   await Promise.all([
     flightQueue.clean(300 * 1000, 'completed'),
     flightQueue.clean(300 * 1000, 'failed'),
-    flightQueue.clean(1800 * 1000, 'stalled')
+    // flightQueue.clean(1800 * 1000, 'stalled')
   ]);
 }
 

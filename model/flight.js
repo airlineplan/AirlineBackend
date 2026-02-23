@@ -13,7 +13,7 @@ const flightSchema = new mongoose.Schema(
     sector: { type: String },
     variant: { type: String },
     
-    // CRITICAL FIX: These must all be Numbers, not Strings
+    // Numbers
     seats: { type: Number },
     CargoCapT: { type: Number },
     dist: { type: Number },
@@ -23,7 +23,7 @@ const flightSchema = new mongoose.Schema(
     rsk: { type: Number },
     cargoAtk: { type: Number },
     cargoRtk: { type: Number },
-    fh: { type: Number }, // Computed Flight Hours
+    fh: { type: Number }, // Computed Flight Hours (e.g. 1.5)
     bh: { type: Number }, // Computed Block Hours
     
     domIntl: { type: String },
