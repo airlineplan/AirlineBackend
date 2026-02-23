@@ -9,7 +9,6 @@ const { verify } = require("crypto");
 const { importUser } = require("../controller/upload.controller");
 
 user.use(bodyParser.urlencoded({ extended: true }));
-
 var jsonParser = bodyParser.json();
 
 var storage = multer.diskStorage({
@@ -23,7 +22,9 @@ var storage = multer.diskStorage({
 var upload = multer({ storage: storage });
 
 const userController = require("../controller/userController");
-// const createConnections = require('../helper/createConnections');
+
+// 🔥 UNCOMMENT AND IMPORT THE HELPER
+const createConnections = require('../helper/createConnections');
 
 user.post(
   "/importUser",
@@ -57,7 +58,6 @@ user.post("/user-signup", jsonParser, userLogin.createUser);
 user.post("/user-login", jsonParser, userLogin.loginUser);
 user.post("/send-email", jsonParser, userLogin.sendEmail);
 user.post("/send-contactEmail", jsonParser, userLogin.sendContactEmail);
-
 user.post("/change-passowrd", jsonParser, userLogin.changePassword);
 user.get("/flight", verifyToken, userController.getFlights);
 user.post("/searchflights", verifyToken, userController.searchFlights);
@@ -65,7 +65,10 @@ user.post("/flightsWoRotations", verifyToken, jsonParser, userController.getFlig
 user.get("/listVariants", verifyToken, userController.getVariants);
 user.get("/listRotations", verifyToken, userController.getRotations);
 user.get("/dashboard", verifyToken, userController.getDashboardData);
-user.get("/createConnections", verifyToken, userController.createConnections);
+
+// 🔥 USE THE IMPORTED HELPER DIRECTLY FOR THIS ROUTE
+user.get("/createConnections", verifyToken, createConnections);
+
 user.get("/dashboard/populateDropDowns", verifyToken, userController.populateDashboardDropDowns);
 user.get("/get-stationData", verifyToken, userController.getStationsTableData);
 user.get("/getNextRotationNumber", verifyToken, userController.getNextRotationNumber);
