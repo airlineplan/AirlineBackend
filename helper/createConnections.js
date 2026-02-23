@@ -1,5 +1,3 @@
-// file: helper/createConnections.js
-
 const Bull = require('bull');
 const User = require("../model/userSchema");
 const Stations = require("../model/stationSchema");
@@ -25,7 +23,9 @@ const concurrency = 5;
 
 flightQueue.process(concurrency, async (job) => {
   const { flightsBatch, stationsMap, hometimeZone } = job.data;
+  
   const connectionEntriesBatch = [];
+  const bulkOps = []; // 🔥 NEW: Array to batch update the Flights collection
 
   for (const flight of flightsBatch) {
     const stationArr = stationsMap[flight.arrStn];
@@ -48,6 +48,27 @@ flightQueue.process(concurrency, async (job) => {
 
     const beyondODs = [...domFlights.map(f => f._id), ...intlFlights.map(f => f._id)];
 
+    // 🔥 NEW: If connections exist, mark the Flags on the Flights table for the Dashboard
+    if (beyondODs.length > 0) {
+      // 1. Mark the origin flight as having a "Beyond" connection
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: flight._id },
+          update: { $set: { beyondODs: true } }
+        }
+      });
+
+      // 2. Mark all the destination flights as having a "Behind" connection
+      beyondODs.forEach(targetId => {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: targetId },
+            update: { $set: { behindODs: true } }
+          }
+        });
+      });
+    }
+
     const connectionEntries = beyondODs.map(beyondOD => ({
       flightID: flight._id,
       beyondOD,
@@ -57,10 +78,17 @@ flightQueue.process(concurrency, async (job) => {
     connectionEntriesBatch.push(...connectionEntries);
   }
 
+  // Execute inserts for Connections table
   if (connectionEntriesBatch.length > 0) {
     await Connections.insertMany(connectionEntriesBatch);
-    console.log('Connections added');
   }
+
+  // 🔥 NEW: Execute bulk updates for the Flights table so Dashboard can see them
+  if (bulkOps.length > 0) {
+    await Flights.bulkWrite(bulkOps, { ordered: false });
+  }
+  
+  console.log(`Job completed: Added ${connectionEntriesBatch.length} connections & updated ${bulkOps.length} flights.`);
 });
 
 module.exports = async function createConnections(req, res) {
@@ -77,7 +105,15 @@ module.exports = async function createConnections(req, res) {
       stationsMap[station.stationName] = station;
     });
 
+    // Reset Connections table
     await Connections.deleteMany({ userId: userId });
+
+    // 🔥 NEW: Reset the boolean flags on ALL flights before we recalculate
+    await Flights.updateMany(
+      { userId },
+      { $set: { beyondODs: false, behindODs: false } }
+    );
+    console.log("Reset beyondODs and behindODs for all flights.");
 
     const batchSize = 10000;
     let skip = 0;
@@ -110,13 +146,14 @@ module.exports = async function createConnections(req, res) {
     await Promise.all(jobs.map(job => job.finished()));
     console.log('All jobs completed');
     
-    // Send a response back to the client!
-    res.status(200).json({ message: "Connections processing started successfully" });
+    res.status(200).json({ message: "Connections processing completed successfully!" });
   } catch (error) {
     console.error('Error processing flight connections:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+// ... [Keep buildDomQuery, buildIntlQuery, and all your other time helpers exactly as they were] ...
 
 function buildDomQuery(flight, stationDep, stationArr, stdHTZ, hometimeZone) {
   const ddMinStdLT = addTimeStrings(flight.sta, stationArr.ddMinCT);
