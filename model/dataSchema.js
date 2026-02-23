@@ -4,6 +4,7 @@ const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const userData = require("../model/userSchema");
+const { calculateBH_FH } = require('../utils/calculateFlightHours');
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
@@ -372,6 +373,8 @@ async function createFlgts(doc) {
 
   let currentDate = new Date(startDate);
 
+  const { bh, fh, ft } = await calculateBH_FH(doc.depStn, doc.arrStn, doc.bt, doc.userId);
+
   while (currentDate <= endDate) {
     // Stop if the overall flight limit is reached
     if (currentFlightCount >= FLIGHT_LIMIT) {
@@ -407,6 +410,10 @@ async function createFlgts(doc) {
         effFromDt: doc.effFromDt,
         effToDt: doc.effToDt,
         dow: doc.dow,
+        bh: bh,
+        fh: fh,
+        ft: ft, 
+        acftType: doc.variant,
       });
 
       try {

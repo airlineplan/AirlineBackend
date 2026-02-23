@@ -3,6 +3,7 @@ const FLIGHT = require("../model/flight");
 const FLIGHTHISTORY = require("../model/flightHistory");
 // Ensure Station is imported so we can fetch taxi times
 const Station = require("../model/stationSchema"); // Update path if necessary
+const { calculateBH_FH } = require("../utils/calculateFlightHours");
 
 const sectorSchema = new mongoose.Schema({
   sector1: { type: String },
@@ -82,8 +83,10 @@ const syncFlightsForSector = async (doc) => {
     // 4. Convert back to decimal hours for the database
     // (e.g., 145 mins / 60 = 2.4166...)
     // (e.g., 115 mins / 60 = 1.9166...)
-    const bh = bhMins / 60;
-    const fh = fhMins / 60;
+    // const bh = bhMins / 60;
+    // const fh = fhMins / 60;
+
+    const { bh, fh, ft } = await calculateBH_FH(doc.sector1, doc.sector2, doc.bt, doc.userId);
 
     // 5. Update the Sector itself with the calculated decimals
     // NOTE: MongoDB will save these as precise floats. You can format them to 2 decimals in your UI.
@@ -103,9 +106,10 @@ const syncFlightsForSector = async (doc) => {
       rsk: doc.paxCapacity * (doc.paxLF / 100) * doc.gcd,
       cargoAtk: doc.CargoCapT * doc.gcd,
       cargoRtk: doc.CargoCapT * (doc.cargoLF / 100) * doc.gcd,
-      acftType: doc.acftType, 
+      acftType: doc.acftType || doc.variant, 
       fh: fh,                 
-      bh: bh                  
+      bh: bh,
+      ft: ft               
     };
 
     const allFieldsValid = Object.entries(updatedFields).every(([key, value]) => (
