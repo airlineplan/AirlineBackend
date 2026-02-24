@@ -39,7 +39,7 @@ const CHUNK_SIZE = 1000;
                 // 🛫 1. OPTIMIZED: Fetch all taxi times for this chunk in ONE query
                 const uniqueStations = [...new Set(chunk.flatMap(row => [row["Dep Stn"], row["Arr Stn"]]).filter(Boolean))];
                 const stationsDB = await Station.find({ stationName: { $in: uniqueStations }, userId });
-                
+
                 const taxiTimes = {};
                 stationsDB.forEach(stn => {
                     taxiTimes[stn.stationName] = {
@@ -60,7 +60,7 @@ const CHUNK_SIZE = 1000;
                     const taxiInMins = taxiTimes[processed.arrStn] ? taxiTimes[processed.arrStn].in : 0;
 
                     let fhMins = btMins - taxiOutMins - taxiInMins;
-                    if (fhMins < 0) fhMins = 0; 
+                    if (fhMins < 0) fhMins = 0;
 
                     const bhDecimal = btMins / 60;
                     const fhDecimal = fhMins / 60;
@@ -117,10 +117,10 @@ const CHUNK_SIZE = 1000;
                 if (dataBulk.length) {
                     await Data.bulkWrite(dataBulk, { ordered: false });
                     await Sector.bulkWrite(sectorBulk, { ordered: false });
-                    
+
                     // 3. Update Station Frequencies 
                     await updateStationsBulk(dataDocsForFlights, userId);
-                    
+
                     // 4. Generate Flights
                     await generateFlightsBulk(dataDocsForFlights);
                 }
@@ -161,7 +161,7 @@ function parseExcelTime(excelTime) {
     if (excelTime === undefined || excelTime === null) return "";
     if (typeof excelTime === "string") return excelTime.trim();
     if (typeof excelTime === "number") {
-        const totalSeconds = Math.round(excelTime * 86400); 
+        const totalSeconds = Math.round(excelTime * 86400);
         const hours = Math.floor(totalSeconds / 3600) % 24;
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
@@ -183,7 +183,7 @@ function parseExcelDate(excelValue) {
 function formatDecimal(value) {
     if (typeof value === "number") return parseFloat(value.toFixed(2));
     if (typeof value === "string" && !isNaN(value) && value.trim() !== "") return parseFloat(parseFloat(value).toFixed(2));
-    return value || 0; 
+    return value || 0;
 }
 
 function validateRow(row) {
@@ -259,6 +259,10 @@ async function updateStationsBulk(dataDocs, userId) {
 
 async function generateFlightsBulk(dataDocs) {
     const flightBulk = [];
+    
+    // Array to easily map JS getDay() to readable string if you prefer "Mon", "Tue", etc.
+    // If your airline users prefer numbers (1=Mon, 7=Sun), you can use String(currentDay) instead.
+    const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; 
 
     for (const doc of dataDocs) {
         const startDate = new Date(doc.effFromDt);
@@ -280,6 +284,7 @@ async function generateFlightsBulk(dataDocs) {
                     insertOne: {
                         document: {
                             date: new Date(currentDate),
+                            day: dayNames[currentDate.getDay()], // 👈 ADDED THIS LINE
                             flight: doc.flight,
                             depStn: doc.depStn,
                             std: doc.std,
@@ -307,12 +312,9 @@ async function generateFlightsBulk(dataDocs) {
                             rsk: paxCapacity * (paxLF / 100) * gcd,
                             cargoAtk: CargoCapT * gcd,
                             cargoRtk: CargoCapT * (cargoLF / 100) * gcd,
-                            
-                            // 🔥 Injecting computed values into the FLIGHT database
                             acftType: doc.acftType,
                             bh: doc.bh,
                             fh: doc.fh,
-                            
                             isComplete: true
                         }
                     }
