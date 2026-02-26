@@ -23,8 +23,8 @@ const flightSchema = new mongoose.Schema(
     rsk: { type: Number },
     cargoAtk: { type: Number },
     cargoRtk: { type: Number },
-    fh: { type: Number }, // Computed Flight Hours (e.g. 1.5)
-    bh: { type: Number }, // Computed Block Hours
+    fh: { type: Number },
+    bh: { type: Number }, 
     
     domIntl: { type: String },
     userTag1: { type: String },
