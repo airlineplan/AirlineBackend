@@ -566,9 +566,9 @@ const downloadExpenses = async (req, res) => {
       { header: "STA(LT)", key: "sta" },
       { header: "Arr Stn.", key: "arrStn" },
       { header: "Sector.", key: "sector" },
-      { header: "ACFT", key: "acftType" },     
+      { header: "ACFT", key: "acftType" },
       { header: "BH", key: "bh" },             // NEW: BH inserted between ACFT and FH
-      { header: "FH", key: "fh" },            
+      { header: "FH", key: "fh" },
       { header: "Variant.", key: "variant" },
       { header: "Seats.", key: "seats" },
       { header: "Cargo Cap", key: "CargoCapT" },
@@ -605,9 +605,9 @@ const downloadExpenses = async (req, res) => {
         ...product.toObject(),
         date: product.date ? new Date(product.date).toISOString().split("T")[0] : "",
         ft: product.ft ? parseFloat(product.ft) : 0,       // NEW: Parse FT as float
-        acftType: product.acftType || "",                  
+        acftType: product.acftType || "",
         bh: product.bh ? parseFloat(product.bh) : 0,       // NEW: Parse BH as float
-        fh: product.fh ? parseFloat(product.fh) : 0,       
+        fh: product.fh ? parseFloat(product.fh) : 0,
         seats: parseFloat(product.seats) || 0,
         CargoCapT: parseFloat(product.CargoCapT) || 0,
         dist: parseFloat(product.dist) || 0,
@@ -623,7 +623,7 @@ const downloadExpenses = async (req, res) => {
       count++;
     }
 
-    worksheet.commit(); 
+    worksheet.commit();
     await workbook.commit();
   } catch (error) {
     console.error(error);
@@ -3110,7 +3110,7 @@ const saveStation = async (req, res) => {
     // Update the home timezone of the user
     const user = await User.findById(userId);
     if (user) {
-      user.hometimeZone = homeTimeZone; 
+      user.hometimeZone = homeTimeZone;
       await user.save();
     }
 
@@ -3124,17 +3124,17 @@ const saveStation = async (req, res) => {
 
       if (!existingStation) {
         updatedStations.push(null);
-        continue; 
+        continue;
       }
 
       // 🔍 1. CHECK IF TAXI TIMES ACTUALLY CHANGED
-      const taxiTimesChanged = 
+      const taxiTimesChanged =
         (updateFields.avgTaxiOutTime !== undefined && updateFields.avgTaxiOutTime !== existingStation.avgTaxiOutTime) ||
         (updateFields.avgTaxiInTime !== undefined && updateFields.avgTaxiInTime !== existingStation.avgTaxiInTime);
 
       // Update the existing document
       await existingStation.updateOne(updateFields);
-      
+
       const updatedStation = await Stations.findById(_id);
       updatedStations.push(updatedStation);
 
@@ -3144,18 +3144,18 @@ const saveStation = async (req, res) => {
 
         // Find all sectors where this station is either the Departure or Arrival
         const affectedSectors = await Sector.find({
-            $or: [{ sector1: updatedStation.stationName }, { sector2: updatedStation.stationName }],
-            userId: userId
+          $or: [{ sector1: updatedStation.stationName }, { sector2: updatedStation.stationName }],
+          userId: userId
         });
 
         // Loop through and save them. 
         // This automatically triggers your `sectorSchema.post("save")` hook, 
         // which fetches the fresh taxi times, does the math, and updates the FLIGHTs!
         for (const sector of affectedSectors) {
-            // We use .save() so your Mongoose middleware fires
-            await sector.save(); 
+          // We use .save() so your Mongoose middleware fires
+          await sector.save();
         }
-        
+
         console.log(`✅ Updated FH for ${affectedSectors.length} sectors and their associated flights.`);
       }
     }
@@ -3547,16 +3547,38 @@ const getListPageData = async (req, res) => {
   }
 };
 
+const parseUTCOffsetToMinutes = (tz) => {
+  const sign = tz.includes("+") ? 1 : -1;
+  const [h, m] = tz.replace("UTC", "").replace("+", "").replace("-", "").split(":").map(Number);
+  return sign * ((h || 0) * 60 + (m || 0));
+};
+
 const getViewData = async (req, res) => {
   try {
-    const { mode, weekStart, station } = req.query;
+    const { mode, weekStart, station, viewTimezone } = req.query;
+
+    const offsetMinutes = parseUTCOffsetToMinutes(viewTimezone || "UTC+0:00");
+
+    // 1️⃣ Build weekStart in VIEW timezone
+    const weekStartInViewTZ = new Date(`${weekStart}T00:00:00.000Z`);
+
+    // 2️⃣ Convert view timezone → UTC
+    const startDate = new Date(
+      weekStartInViewTZ.getTime() - offsetMinutes * 60000
+    );
+
+    // 3️⃣ End date
+    const endDate = new Date(startDate);
+    endDate.setUTCDate(startDate.getUTCDate() + 6);
+    endDate.setUTCHours(23, 59, 59, 999);
+
     const userId = req.user.id; // Ensure this perfectly matches the string "69992840639f470628d04aca"
 
     // 1. Parse the incoming date string strictly as UTC
-    const startDate = new Date(`${weekStart}T00:00:00.000Z`);
-    
-    // 2. Clone it and add 6 days, strictly in UTC
-    const endDate = new Date(startDate);
+    // const startDate = new Date(`${weekStart}T00:00:00.000Z`);
+
+    // // 2. Clone it and add 6 days, strictly in UTC
+    // const endDate = new Date(startDate);
     endDate.setUTCDate(startDate.getUTCDate() + 6);
     endDate.setUTCHours(23, 59, 59, 999);
 
@@ -3564,7 +3586,7 @@ const getViewData = async (req, res) => {
 
     // Base match for all flights in the week
     const weekMatch = {
-      userId: userId, 
+      userId: userId,
       date: { $gte: startDate, $lte: endDate }
     };
 
@@ -3579,11 +3601,11 @@ const getViewData = async (req, res) => {
     if (mode === "Rotations") {
       const groupedFlights = await Flights.aggregate([
         { $match: weekMatch }, // UNCOMMENTED
-        { 
+        {
           $group: {
             _id: "$rotationNumber",
             flights: { $push: "$$ROOT" },
-            variant: { $first: "$variant" } 
+            variant: { $first: "$variant" }
           }
         },
         { $sort: { _id: 1 } }
@@ -3593,7 +3615,7 @@ const getViewData = async (req, res) => {
         flights: group.flights
       }));
     }
-    
+
     // ------------------------------------
     // SECTORS MODE (Optimized)
     // ------------------------------------
@@ -3612,7 +3634,7 @@ const getViewData = async (req, res) => {
         flights: sec.flights
       }));
     }
-    
+
     // ------------------------------------
     // STATION MODE (Optimized)
     // ------------------------------------
@@ -3621,7 +3643,7 @@ const getViewData = async (req, res) => {
         ...weekMatch, // UNCOMMENTED
         $or: [{ depStn: station }, { arrStn: station }]
       }).lean();
-      
+
       const grouped = {};
       flights.forEach(f => {
         const isDep = f.depStn === station;
@@ -3636,7 +3658,7 @@ const getViewData = async (req, res) => {
         flights: group.flights
       }));
     }
-    
+
     // ------------------------------------
     // AIRCRAFT MODE (Optimized)
     // ------------------------------------
@@ -3645,7 +3667,7 @@ const getViewData = async (req, res) => {
         { $match: weekMatch },
         {
           $group: {
-            _id: "$userTag1", 
+            _id: "$userTag1",
             flights: { $push: "$$ROOT" },
             variant: { $first: "$variant" }
           }
@@ -3656,7 +3678,7 @@ const getViewData = async (req, res) => {
         flights: ac.flights
       }));
     }
-    
+
     res.json({
       success: true,
       timeline: { from: startDate, to: endDate },
