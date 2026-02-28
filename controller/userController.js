@@ -3692,11 +3692,16 @@ const getViewData = async (req, res) => {
 
 const getMasterWeeks = async (req, res) => {
   try {
-    const MasterFlight = require("../models/masterFlight.model"); 
-    // adjust path based on your structure
+    const userId = req.user.id;
 
-    // 1️⃣ Get min and max date from master table
-    const result = await MasterFlight.aggregate([
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const result = await Flights.aggregate([
+      {
+        $match: { userId: userId }
+      },
       {
         $group: {
           _id: null,
@@ -3706,24 +3711,33 @@ const getMasterWeeks = async (req, res) => {
       }
     ]);
 
-    if (!result.length) {
+    if (!result.length || !result[0].minDate || !result[0].maxDate) {
       return res.json({ weeks: [] });
     }
 
     const { minDate, maxDate } = result[0];
 
-    // 2️⃣ Find first Sunday >= minDate
-    let start = new Date(minDate);
-    const day = start.getDay(); // 0 = Sunday
+    // 2️⃣ Convert to Date objects
+    const startDate = new Date(minDate);
+    const endDate = new Date(maxDate);
+
+    // Normalize time
+    startDate.setHours(0, 0, 0, 0);
+    endDate.setHours(0, 0, 0, 0);
+
+    // 3️⃣ Find first Sunday >= startDate
+    const firstSunday = new Date(startDate);
+    const day = firstSunday.getDay(); // 0 = Sunday
+
     if (day !== 0) {
-      start.setDate(start.getDate() + (7 - day));
+      firstSunday.setDate(firstSunday.getDate() + (7 - day));
     }
 
-    // 3️⃣ Generate all Sundays until maxDate
+    // 4️⃣ Generate all Sundays until endDate
     const weeks = [];
-    let current = new Date(start);
+    let current = new Date(firstSunday);
 
-    while (current <= new Date(maxDate)) {
+    while (current <= endDate) {
       weeks.push(current.toISOString().split("T")[0]);
       current.setDate(current.getDate() + 7);
     }
@@ -3735,6 +3749,7 @@ const getMasterWeeks = async (req, res) => {
     return res.status(500).json({ message: "Failed to fetch master weeks" });
   }
 };
+
 
 module.exports = {
   // importUser,
