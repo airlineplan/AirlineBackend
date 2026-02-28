@@ -3690,6 +3690,52 @@ const getViewData = async (req, res) => {
   }
 };
 
+const getMasterWeeks = async (req, res) => {
+  try {
+    const MasterFlight = require("../models/masterFlight.model"); 
+    // adjust path based on your structure
+
+    // 1️⃣ Get min and max date from master table
+    const result = await MasterFlight.aggregate([
+      {
+        $group: {
+          _id: null,
+          minDate: { $min: "$date" },
+          maxDate: { $max: "$date" }
+        }
+      }
+    ]);
+
+    if (!result.length) {
+      return res.json({ weeks: [] });
+    }
+
+    const { minDate, maxDate } = result[0];
+
+    // 2️⃣ Find first Sunday >= minDate
+    let start = new Date(minDate);
+    const day = start.getDay(); // 0 = Sunday
+    if (day !== 0) {
+      start.setDate(start.getDate() + (7 - day));
+    }
+
+    // 3️⃣ Generate all Sundays until maxDate
+    const weeks = [];
+    let current = new Date(start);
+
+    while (current <= new Date(maxDate)) {
+      weeks.push(current.toISOString().split("T")[0]);
+      current.setDate(current.getDate() + 7);
+    }
+
+    return res.json({ weeks });
+
+  } catch (error) {
+    console.error("Error fetching master weeks:", error);
+    return res.status(500).json({ message: "Failed to fetch master weeks" });
+  }
+};
+
 module.exports = {
   // importUser,
   getData,
@@ -3721,5 +3767,6 @@ module.exports = {
   deleteCompleteRotation,
   deletePrevInRotation,
   getListPageData,
-  getViewData
+  getViewData,
+  getMasterWeeks
 };

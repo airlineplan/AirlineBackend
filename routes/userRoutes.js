@@ -80,5 +80,6 @@ user.post("/deleteCompleteRotation/", verifyToken, jsonParser, userController.de
 user.post("/deletePrevInRotation/", verifyToken, jsonParser, userController.deletePrevInRotation);
 user.post("/list-page-data", verifyToken, userController.getListPageData);
 user.get("/view-page-data", verifyToken, userController.getViewData);
+user.get("/master-weeks", verifyToken, userController.getMasterWeeks);
 
 module.exports = user;
