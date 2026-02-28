@@ -710,40 +710,24 @@ const downloadExpenses = async (req, res) => {
 // };
 
 const updateData = async (req, res) => {
-  const { id } = req.params;
-  let {
-    flight,
-    depStn,
-    std,
-    bt,
-    sta,
-    arrStn,
-    variant,
-    effFromDt,
-    effToDt,
-    dow,
-    userTag1,
-    userTag2,
-    remarks1,
-    remarks2,
-    domINTL,
-    timezone
-  } = req.body;
-
-  // timezone = timezone ? timezone : "Asia/Kolkata";
-  // effFromDt = timeZoneCorrectedDates(effFromDt, timezone);
-  // effToDt = timeZoneCorrectedDates(effToDt, timezone);
-  domINTL = domINTL?.toLowerCase();
-
   try {
+    const { id } = req.params;
     const userId = req.user.id;
 
-    const idArray = id.split(',').map((id) => id.trim());
+    if (!id) {
+      return res.status(400).json({ message: "ID is required" });
+    }
+
+    // Convert comma separated IDs to array
+    const idArray = id.split(",").map((item) => item.trim());
 
     const updatedFlights = [];
 
     for (const dataId of idArray) {
 
+      // -------------------------------
+      // 1️⃣ Handle rotation deletion
+      // -------------------------------
       const flightsWithRotation = await Flights.find({
         networkId: dataId,
         rotationNumber: { $exists: true, $ne: null }
@@ -751,60 +735,76 @@ const updateData = async (req, res) => {
 
       if (flightsWithRotation.length > 0) {
 
-        RotationDetails.aggregate([
-          { $match: { rotationNumber: flightsWithRotation[0].rotationNumber } },
+        const rotationNumber = flightsWithRotation[0].rotationNumber;
+
+        const result = await RotationDetails.aggregate([
+          { $match: { rotationNumber: rotationNumber } },
           { $sort: { depNumber: -1 } },
           { $limit: 1 },
           { $project: { depNumber: 1 } }
-        ])
-          .then(result => {
-            if (result.length > 0) {
-              const depNumber = result[0].depNumber;
+        ]);
 
-              deleteRotation(userId, flightsWithRotation[0].rotationNumber, depNumber)
-            } else {
-              console.log("No entries found for the given rotation number");
-            }
-          })
+        if (result.length > 0) {
+          const depNumber = result[0].depNumber;
 
+          await deleteRotation(userId, rotationNumber, depNumber);
+        }
       }
 
+      // -------------------------------
+      // 2️⃣ Build Safe Update Payload
+      // -------------------------------
+      const updatePayload = {};
+
+      Object.entries(req.body).forEach(([key, value]) => {
+        if (
+          value !== undefined &&
+          value !== null &&
+          value !== "" &&
+          typeof value !== "function"
+        ) {
+          updatePayload[key] = value;
+        }
+      });
+
+      // Normalize domINTL
+      if (updatePayload.domINTL) {
+        updatePayload.domINTL = updatePayload.domINTL.toLowerCase();
+      }
+
+      // Remove timezone from DB update (if not required in schema)
+      delete updatePayload.timeZone;
+      delete updatePayload.timezone;
+
+      // If nothing to update
+      if (Object.keys(updatePayload).length === 0) {
+        continue;
+      }
+
+      // -------------------------------
+      // 3️⃣ Atomic Safe Update
+      // -------------------------------
       const updatedData = await Data.findByIdAndUpdate(
         dataId,
-        {
-          flight,
-          depStn,
-          std,
-          bt,
-          sta,
-          arrStn,
-          variant,
-          effFromDt,
-          effToDt,
-          dow,
-          domINTL,
-          userTag1,
-          userTag2,
-          remarks1,
-          remarks2
-        },
-        { new: true }
+        { $set: updatePayload },
+        { new: true, runValidators: true }
       );
 
       if (!updatedData) {
-        return res.status(404).json({ message: "customer not found" });
+        return res.status(404).json({ message: "Data not found" });
       }
 
       updatedFlights.push(updatedData);
-
     }
 
-    // await createConnections(req.user.id);
+    return res.json({
+      updatedFlights,
+      message: "Data Updated successfully"
+    });
 
-    res.json({ updatedFlights, message: "Data Updated successfully" });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to update data." });
+    console.error("Update Error:", error);
+    return res.status(500).json({ message: "Failed to update data." });
   }
 };
 

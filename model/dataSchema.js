@@ -447,17 +447,29 @@ dataSchema.pre("save", async function (next) {
 dataSchema.pre("findOneAndUpdate", async function (next) {
   try {
     const update = this.getUpdate();
-
     if (!update) return next();
 
-    const doc = await this.model.findOne(this.getQuery());
-    if (!doc) return next();
+    const existingDoc = await this.model.findOne(this.getQuery());
+    if (!existingDoc) return next();
 
-    Object.assign(doc, update);
+    // Merge existing doc with incoming update
+    const mergedDoc = {
+      ...existingDoc.toObject(),
+      ...update.$set,
+      ...update
+    };
 
-    await calculateSTA(doc);
+    // Calculate new STA
+    await calculateSTA(mergedDoc);
 
-    this.setUpdate(doc);
+    // Inject only STA into update
+    this.setUpdate({
+      ...update,
+      $set: {
+        ...update.$set,
+        sta: mergedDoc.sta
+      }
+    });
 
     next();
   } catch (err) {
