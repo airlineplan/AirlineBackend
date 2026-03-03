@@ -2015,6 +2015,7 @@ const populateDashboardDropDowns = async (req, res) => {
   }
 };
 
+
 const getVariants = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -2693,6 +2694,120 @@ function timeToMinutes(timeString) {
   const [hours, minutes] = timeString.split(':').map(Number);
   return hours * 60 + minutes;
 }
+
+const getConnections = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    let { label, periodicity, from, to } = req.query;
+
+    if (!periodicity || !label) {
+      return res.status(400).json({ error: "Missing label or periodicity" });
+    }
+
+    periodicity = periodicity.toLowerCase();
+    label = label.toLowerCase();
+
+    const flightsQuery = { userId };
+
+    // Label filter
+    if (label === "both") {
+      flightsQuery.domIntl = { $in: ["dom", "intl"] };
+    } else {
+      flightsQuery.domIntl = label;
+    }
+
+    if (from && Array.isArray(from) && from.length > 0) {
+      flightsQuery.depStn = { $in: from };
+    }
+
+    if (to && Array.isArray(to) && to.length > 0) {
+      flightsQuery.arrStn = { $in: to };
+    }
+
+    const allFlights = await Flights.find(flightsQuery).lean();
+
+    if (!allFlights.length) return res.json([]);
+
+    const minDate = new Date(Math.min(...allFlights.map(f => new Date(f.date))));
+    const maxDate = new Date(Math.max(...allFlights.map(f => new Date(f.date))));
+
+    minDate.setUTCHours(0,0,0,0);
+    maxDate.setUTCHours(0,0,0,0);
+
+    let periods = [];
+
+    if (periodicity === "daily") {
+      periods = generateDailyDates(minDate, maxDate);
+    } else if (periodicity === "weekly") {
+      periods = generateWeeklyDates(minDate, maxDate);
+    } else if (periodicity === "monthly") {
+      periods = generateLastDayOfMonths(minDate, maxDate);
+    } else if (periodicity === "quarterly") {
+      periods = generateQuarterlyDates(minDate, maxDate);
+    } else if (periodicity === "annually") {
+      periods = generateAnnualDates(minDate, maxDate);
+    }
+
+    const result = [];
+
+    for (const periodEndDate of periods) {
+
+      let periodStartDate;
+
+      if (periodicity === "monthly") {
+        periodStartDate = new Date(periodEndDate.getFullYear(), periodEndDate.getMonth(), 1);
+      } 
+      else if (periodicity === "quarterly") {
+        const qMonth = Math.floor(periodEndDate.getMonth() / 3) * 3;
+        periodStartDate = new Date(periodEndDate.getFullYear(), qMonth, 1);
+      }
+      else if (periodicity === "annually") {
+        periodStartDate = new Date(periodEndDate.getFullYear(), 0, 1);
+      }
+      else if (periodicity === "weekly") {
+        const day = periodEndDate.getDay();
+        const diff = day === 0 ? 6 : day - 1;
+        periodStartDate = new Date(periodEndDate);
+        periodStartDate.setDate(periodEndDate.getDate() - diff);
+      }
+      else {
+        periodStartDate = new Date(periodEndDate);
+      }
+
+      const flightsInPeriod = allFlights.filter(f => {
+        const d = new Date(f.date);
+        return d >= periodStartDate && d <= periodEndDate;
+      });
+
+      const beyond = flightsInPeriod.filter(f => f.beyondODs);
+      const behind = flightsInPeriod.filter(f => f.behindODs);
+
+      const connectingFlights = behind.length;
+
+      const seatCapBeyondFlgts = beyond.reduce((t, f) => t + (Number(f.seats) || 0), 0);
+      const seatCapBehindFlgts = behind.reduce((t, f) => t + (Number(f.seats) || 0), 0);
+
+      const cargoCapBeyondFlgts = beyond.reduce((t, f) => t + (Number(f.CargoCapT) || 0), 0);
+      const cargoCapBehindFlgts = behind.reduce((t, f) => t + (Number(f.CargoCapT) || 0), 0);
+
+      result.push({
+        endDate: periodEndDate,
+        connectingFlights,
+        seatCapBeyondFlgts,
+        seatCapBehindFlgts,
+        cargoCapBeyondFlgts,
+        cargoCapBehindFlgts
+      });
+    }
+
+    res.json(result);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch connections" });
+  }
+};
 
 const getStationsTableData = async (req, res) => {
   try {
@@ -3770,6 +3885,7 @@ module.exports = {
   getFlightsWoRotations,
   getDashboardData,
   createConnections,
+  getConnections,
   populateDashboardDropDowns,
   getVariants,
   getRotations,

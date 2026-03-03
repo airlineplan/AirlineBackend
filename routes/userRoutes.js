@@ -68,7 +68,7 @@ user.get("/dashboard", verifyToken, userController.getDashboardData);
 
 // 🔥 USE THE IMPORTED HELPER DIRECTLY FOR THIS ROUTE
 user.get("/createConnections", verifyToken, createConnections);
-
+user.get("/getConnections", verifyToken, userController.getConnections);
 user.get("/dashboard/populateDropDowns", verifyToken, userController.populateDashboardDropDowns);
 user.get("/get-stationData", verifyToken, userController.getStationsTableData);
 user.get("/getNextRotationNumber", verifyToken, userController.getNextRotationNumber);
