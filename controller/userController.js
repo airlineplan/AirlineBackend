@@ -22,6 +22,7 @@ const moment = require("moment-timezone");
 require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
+const Connections = require("../model/connectionSchema");
 
 const createConnections = require('../helper/createConnections');
 
@@ -2732,8 +2733,8 @@ const getConnections = async (req, res) => {
     const minDate = new Date(Math.min(...allFlights.map(f => new Date(f.date))));
     const maxDate = new Date(Math.max(...allFlights.map(f => new Date(f.date))));
 
-    minDate.setUTCHours(0,0,0,0);
-    maxDate.setUTCHours(0,0,0,0);
+    minDate.setUTCHours(0, 0, 0, 0);
+    maxDate.setUTCHours(0, 0, 0, 0);
 
     let periods = [];
 
@@ -2757,7 +2758,7 @@ const getConnections = async (req, res) => {
 
       if (periodicity === "monthly") {
         periodStartDate = new Date(periodEndDate.getFullYear(), periodEndDate.getMonth(), 1);
-      } 
+      }
       else if (periodicity === "quarterly") {
         const qMonth = Math.floor(periodEndDate.getMonth() / 3) * 3;
         periodStartDate = new Date(periodEndDate.getFullYear(), qMonth, 1);
@@ -3672,133 +3673,193 @@ const getViewData = async (req, res) => {
   try {
     const { mode, weekStart, station, viewTimezone } = req.query;
 
+    if (!weekStart || !mode) {
+      return res.status(400).json({ success: false, message: "Missing parameters" });
+    }
+
+    const userId = req.user.id;
+
+    /* ---------------------------------------------------------
+       1️⃣  TIMEZONE + WEEK RANGE CALCULATION
+    ---------------------------------------------------------- */
+
+    const parseUTCOffsetToMinutes = (tz) => {
+      const sign = tz.includes("+") ? 1 : -1;
+      const [hours, minutes] = tz
+        .replace("UTC", "")
+        .replace("+", "")
+        .replace("-", "")
+        .split(":")
+        .map(Number);
+
+      return sign * ((hours || 0) * 60 + (minutes || 0));
+    };
+
     const offsetMinutes = parseUTCOffsetToMinutes(viewTimezone || "UTC+0:00");
 
-    // 1️⃣ Build weekStart in VIEW timezone
     const weekStartInViewTZ = new Date(`${weekStart}T00:00:00.000Z`);
 
-    // 2️⃣ Convert view timezone → UTC
     const startDate = new Date(
       weekStartInViewTZ.getTime() - offsetMinutes * 60000
     );
 
-    // 3️⃣ End date
     const endDate = new Date(startDate);
     endDate.setUTCDate(startDate.getUTCDate() + 6);
     endDate.setUTCHours(23, 59, 59, 999);
 
-    const userId = req.user.id; // Ensure this perfectly matches the string "69992840639f470628d04aca"
+    /* ---------------------------------------------------------
+       2️⃣  FETCH ALL FLIGHTS IN WEEK
+    ---------------------------------------------------------- */
 
-    // 1. Parse the incoming date string strictly as UTC
-    // const startDate = new Date(`${weekStart}T00:00:00.000Z`);
+    const weekFlights = await Flights.find({
+      userId,
+      date: { $gte: startDate, $lte: endDate }
+    }).lean();
 
-    // // 2. Clone it and add 6 days, strictly in UTC
-    // const endDate = new Date(startDate);
-    endDate.setUTCDate(startDate.getUTCDate() + 6);
-    endDate.setUTCHours(23, 59, 59, 999);
+    if (!weekFlights.length) {
+      return res.json({
+        success: true,
+        timeline: { from: startDate, to: endDate },
+        rows: []
+      });
+    }
+
+    /* ---------------------------------------------------------
+       3️⃣  FETCH CONNECTIONS FOR THESE FLIGHTS
+    ---------------------------------------------------------- */
+
+    const flightIds = weekFlights.map(f => f._id.toString());
+
+    const connections = await Connections.find({
+      userId,
+      $or: [
+        { flightID: { $in: flightIds } },
+        { beyondOD: { $in: flightIds } }
+      ]
+    }).lean();
+
+    const connectionRightSet = new Set();
+    const connectionLeftSet = new Set();
+
+    connections.forEach(conn => {
+      connectionRightSet.add(conn.flightID.toString());
+      connectionLeftSet.add(conn.beyondOD.toString());
+    });
+
+    weekFlights.forEach(flight => {
+      const id = flight._id.toString();
+      flight.connectionRight = connectionRightSet.has(id);
+      flight.connectionLeft = connectionLeftSet.has(id);
+    });
+
+    /* ---------------------------------------------------------
+       4️⃣  GROUP BY MODE
+    ---------------------------------------------------------- */
 
     let rows = [];
 
-    // Base match for all flights in the week
-    const weekMatch = {
-      userId: userId,
-      date: { $gte: startDate, $lte: endDate }
-    };
-
-    // Console log to debug and verify your boundaries before querying!
-    console.log("Searching Flights for User:", userId);
-    console.log("From:", startDate.toISOString());
-    console.log("To:", endDate.toISOString());
-
-    // ------------------------------------
-    // ROTATIONS MODE (Optimized)
-    // ------------------------------------
+    /* ------------------ ROTATIONS ------------------ */
     if (mode === "Rotations") {
-      const groupedFlights = await Flights.aggregate([
-        { $match: weekMatch }, // UNCOMMENTED
-        {
-          $group: {
-            _id: "$rotationNumber",
-            flights: { $push: "$$ROOT" },
-            variant: { $first: "$variant" }
-          }
-        },
-        { $sort: { _id: 1 } }
-      ]);
-      rows = groupedFlights.map(group => ({
-        leftColumn: { rot: group._id || "Unassigned", variant: group.variant },
-        flights: group.flights
-      }));
-    }
+      const grouped = {};
 
-    // ------------------------------------
-    // SECTORS MODE (Optimized)
-    // ------------------------------------
-    else if (mode === "Sectors") {
-      const sectors = await Flights.aggregate([
-        { $match: weekMatch }, // UNCOMMENTED
-        {
-          $group: {
-            _id: "$sector",
-            flights: { $push: "$$ROOT" }
-          }
+      weekFlights.forEach(f => {
+        const key = f.rotationNumber || "Unassigned";
+
+        if (!grouped[key]) {
+          grouped[key] = {
+            variant: f.variant,
+            flights: []
+          };
         }
-      ]);
-      rows = sectors.map(sec => ({
-        leftColumn: { sector: sec._id },
-        flights: sec.flights
+
+        grouped[key].flights.push(f);
+      });
+
+      rows = Object.entries(grouped)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([rot, group]) => ({
+          leftColumn: { rot, variant: group.variant },
+          flights: group.flights
+        }));
+    }
+
+    /* ------------------ SECTORS ------------------ */
+    else if (mode === "Sectors") {
+      const grouped = {};
+
+      weekFlights.forEach(f => {
+        const key = f.sector || "Unassigned";
+
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(f);
+      });
+
+      rows = Object.entries(grouped).map(([sector, flights]) => ({
+        leftColumn: { sector },
+        flights
       }));
     }
 
-    // ------------------------------------
-    // STATION MODE (Optimized)
-    // ------------------------------------
+    /* ------------------ STATION ------------------ */
     else if (mode === "Station" && station) {
-      const flights = await Flights.find({
-        ...weekMatch, // UNCOMMENTED
-        $or: [{ depStn: station }, { arrStn: station }]
-      }).lean();
+      const flights = weekFlights.filter(
+        f => f.depStn === station || f.arrStn === station
+      );
 
       const grouped = {};
+
       flights.forEach(f => {
         const isDep = f.depStn === station;
         const key = isDep ? `DEP-${f.arrStn}` : `ARR-${f.depStn}`;
         const type = isDep ? "Departures to" : "Arrivals from";
         const sectorLabel = isDep ? f.arrStn : f.depStn;
-        if (!grouped[key]) grouped[key] = { type, sector: sectorLabel, flights: [] };
+
+        if (!grouped[key]) {
+          grouped[key] = { type, sector: sectorLabel, flights: [] };
+        }
+
         grouped[key].flights.push(f);
       });
+
       rows = Object.values(grouped).map(group => ({
         leftColumn: { type: group.type, sector: group.sector },
         flights: group.flights
       }));
     }
 
-    // ------------------------------------
-    // AIRCRAFT MODE (Optimized)
-    // ------------------------------------
+    /* ------------------ AIRCRAFT ------------------ */
     else if (mode === "Aircraft") {
-      const aircrafts = await Flights.aggregate([
-        { $match: weekMatch },
-        {
-          $group: {
-            _id: "$userTag1",
-            flights: { $push: "$$ROOT" },
-            variant: { $first: "$variant" }
-          }
+      const grouped = {};
+
+      weekFlights.forEach(f => {
+        const key = f.userTag1 || "Unassigned";
+
+        if (!grouped[key]) {
+          grouped[key] = {
+            variant: f.variant,
+            flights: []
+          };
         }
-      ]);
-      rows = aircrafts.map(ac => ({
-        leftColumn: { ac: ac._id || "Unassigned", variant: ac.variant },
-        flights: ac.flights
+
+        grouped[key].flights.push(f);
+      });
+
+      rows = Object.entries(grouped).map(([ac, group]) => ({
+        leftColumn: { ac, variant: group.variant },
+        flights: group.flights
       }));
     }
+
+    /* ---------------------------------------------------------
+       5️⃣  RETURN RESPONSE
+    ---------------------------------------------------------- */
 
     res.json({
       success: true,
       timeline: { from: startDate, to: endDate },
       rows
     });
+
   } catch (error) {
     console.error("View data error:", error);
     res.status(500).json({ success: false, message: "Server Error" });
