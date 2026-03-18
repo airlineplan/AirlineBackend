@@ -29,6 +29,7 @@ const stationController = require("../controller/stationController");
 const dashboardController = require("../controller/dashboardController");
 const masterController = require("../controller/masterController");
 const authController = require("../controller/authController");
+const maintenanceController = require("../controller/maintenanceController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -88,5 +89,8 @@ user.post("/deletePrevInRotation/", verifyToken, jsonParser, rotationController.
 user.post("/list-page-data", verifyToken, dataController.getListPageData);
 user.get("/view-page-data", verifyToken, dataController.getViewData);
 user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
+
+// Add this alongside your existing routes
+user.get("/maintenance-dashboard", verifyToken, maintenanceController.getMaintenanceDashboard);
 
 module.exports = user;
