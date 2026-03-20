@@ -107,4 +107,25 @@ user.get(
   assignmentController.getWeeklyAssignments
 );
 
+user.get(
+  "/fleet",
+  verifyToken,
+  fleetController.getAllFleet
+);
+
+// Bulk save/update the fleet table
+user.post(
+  "/fleet/bulk-save",
+  verifyToken,
+  jsonParser, // Parses the incoming JSON body from React
+  fleetController.bulkUpsertFleet
+);
+
+// Delete a single asset row
+user.delete(
+  "/fleet/:id",
+  verifyToken,
+  fleetController.deleteFleetAsset
+);
+
 module.exports = user;
