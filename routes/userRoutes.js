@@ -30,6 +30,7 @@ const dashboardController = require("../controller/dashboardController");
 const masterController = require("../controller/masterController");
 const authController = require("../controller/authController");
 const maintenanceController = require("../controller/maintenanceController");
+const assignmentController = require("../controller/assignmentController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -92,5 +93,18 @@ user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
 
 // Add this alongside your existing routes
 user.get("/maintenance-dashboard", verifyToken, maintenanceController.getMaintenanceDashboard);
+
+user.post(
+  "/uploadAssignments",
+  verifyToken,
+  upload.single("file"),
+  assignmentController.uploadAssignments
+);
+
+user.get(
+  "/getWeeklyAssignments",
+  verifyToken,
+  assignmentController.getWeeklyAssignments
+);
 
 module.exports = user;

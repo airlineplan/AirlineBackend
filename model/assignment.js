@@ -1,0 +1,81 @@
+const mongoose = require("mongoose");
+
+const assignmentSchema = new mongoose.Schema(
+    {
+        date: {
+            type: Date,
+            required: true,
+            index: true
+        },
+
+        rotationNumber: {
+            type: Number,
+            required: false
+        },
+
+        legNumber: {
+            type: Number,
+            required: false
+        },
+
+        flightNumber: {
+            type: String,
+            required: true
+        },
+
+        aircraft: {
+            msn: {
+                type: Number,
+                required: false,
+                index: true
+            },
+            registration: {
+                type: String,
+                required: false
+            }
+        },
+
+        metrics: {
+            blockHours: {   // BH
+                type: Number,
+                required: false
+            },
+            flightHours: {  // FH
+                type: Number,
+                required: false
+            },
+            cycles: {
+                type: Number,
+                default: 0
+            }
+        },
+
+        // Validation flags (important for your logic)
+        isValid: {
+            type: Boolean,
+            default: true
+        },
+
+        validationErrors: [
+            {
+                type: String
+            }
+        ],
+
+        // Optional references for business logic
+        removedReason: {
+            type: String,
+            enum: [
+                "OUTSIDE_FLEET_DATES",
+                "GROUND_DAY_CONFLICT",
+                "MANUAL_REMOVAL"
+            ],
+            default: null
+        }
+    },
+    {
+        timestamps: true
+    }
+);
+
+module.exports = mongoose.model("Assignment", assignmentSchema);
