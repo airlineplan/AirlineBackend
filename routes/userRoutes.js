@@ -31,6 +31,7 @@ const masterController = require("../controller/masterController");
 const authController = require("../controller/authController");
 const maintenanceController = require("../controller/maintenanceController");
 const assignmentController = require("../controller/assignmentController");
+const fleetController = require("../controller/fleetController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
