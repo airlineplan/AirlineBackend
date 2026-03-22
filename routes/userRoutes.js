@@ -129,4 +129,17 @@ user.delete(
   fleetController.deleteFleetAsset
 );
 
+// Add this alongside your other fleet routes
+user.get(
+  "/fleet/months",
+  verifyToken,
+  fleetController.getFleetMonths
+);
+
+user.get(
+  "/fleet/metrics",
+  verifyToken,
+  fleetController.getFleetScheduleMetrics
+);
+
 module.exports = user;
