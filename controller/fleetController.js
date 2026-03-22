@@ -2,25 +2,27 @@ const Fleet = require('../model/fleet');
 const Flight = require('../model/flight'); // Add this to query flight dates
 const Assignment = require('../model/assignment'); // Adjust path if needed
 const GroundDay = require('../model/groundDay');
+const AircraftOnwing = require('../model/aircraftOnwing');
 const moment = require('moment');
 
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
-        const { month } = req.query; // e.g., "October 2025"
+        const { month } = req.query;
         if (!month) return res.status(400).json({ message: "Month is required" });
 
         const startDt = moment(month, "MMMM YYYY").startOf('month').toDate();
+        // Look back further for Onwing records to get active configurations prior to the month start
         const endDt = moment(month, "MMMM YYYY").endOf('month').toDate();
 
-        // 1. Fetch data for the specified month
-        const [groundDays, assignments, flights] = await Promise.all([
+        // 1. Fetch data
+        const [groundDays, assignments, flights, onwings] = await Promise.all([
             GroundDay.find({ date: { $gte: startDt, $lte: endDt } }),
             Assignment.find({ date: { $gte: startDt, $lte: endDt }, isValid: true }),
-            Flight.find({ date: { $gte: startDt, $lte: endDt } })
+            Flight.find({ date: { $gte: startDt, $lte: endDt } }),
+            AircraftOnwing.find({ date: { $lte: endDt } }).sort({ date: 1 }) // Sorted chronologically
         ]);
 
-        // 2. Map FLIGHT master table by "YYYY-MM-DD_FlightNumber" for O(1) lookups
         const flightMap = {};
         flights.forEach(f => {
             if (!f.date || !f.flight) return;
@@ -30,9 +32,28 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             flightMap[key].push(f);
         });
 
-        const metricsMap = {}; // Format: { "msn123": { "14 Oct 25": { status, label, bh, fh, dep } } }
+        const metricsMap = {};
+        const groundMap = {}; // Helper to easily find grounded MSNs: groundMap['DD MMM YY']['4120'] = "C-check"
 
-        // 3. Process Assignments & Aggregate Metrics
+        // 2. Process Ground Days for AIRCRAFT
+        groundDays.forEach(gd => {
+            const msn = gd.msn;
+            if (!msn) return;
+            const dateStr = moment(gd.date).format("DD MMM YY");
+
+            // Populate helper map
+            if (!groundMap[dateStr]) groundMap[dateStr] = {};
+            groundMap[dateStr][msn] = gd.event || "Maintenance";
+
+            // Add to main metrics map for the Aircraft row
+            if (!metricsMap[msn]) metricsMap[msn] = {};
+            metricsMap[msn][dateStr] = {
+                status: "maintenance",
+                label: gd.event || "Maintenance"
+            };
+        });
+
+        // 3. Process Assignments for AIRCRAFT
         assignments.forEach(assign => {
             const msn = assign.aircraft?.msn;
             if (!msn) return;
@@ -43,20 +64,21 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
             if (!metricsMap[msn]) metricsMap[msn] = {};
 
-            if (!metricsMap[msn][dateStr]) {
-                metricsMap[msn][dateStr] = { status: "aircraft-assigned", label: "", bh: 0, fh: 0, dep: 0 };
-            }
+            // Only add assignment if there isn't already a maintenance event for this day
+            if (!metricsMap[msn][dateStr] || metricsMap[msn][dateStr].status !== "maintenance") {
+                if (!metricsMap[msn][dateStr]) {
+                    metricsMap[msn][dateStr] = { status: "aircraft-assigned", label: "", bh: 0, fh: 0, dep: 0 };
+                }
 
-            // Find matching flights in Master Table and sum BH, FH, Departures
-            const matchedFlights = flightMap[fKey] || [];
-            matchedFlights.forEach(f => {
-                metricsMap[msn][dateStr].bh += (f.bh || 0);
-                metricsMap[msn][dateStr].fh += (f.fh || 0);
-                metricsMap[msn][dateStr].dep += 1;
-            });
+                const matchedFlights = flightMap[fKey] || [];
+                matchedFlights.forEach(f => {
+                    metricsMap[msn][dateStr].bh += (f.bh || 0);
+                    metricsMap[msn][dateStr].fh += (f.fh || 0);
+                    metricsMap[msn][dateStr].dep += 1;
+                });
+            }
         });
 
-        // 4. Finalize Assignment Labels (Sum of Block Hours)
         Object.keys(metricsMap).forEach(msn => {
             Object.keys(metricsMap[msn]).forEach(dateStr => {
                 const data = metricsMap[msn][dateStr];
@@ -66,18 +88,44 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             });
         });
 
-        // 5. Add Ground Days (Overrides Assignments if there's a conflict)
-        groundDays.forEach(gd => {
-            const msn = gd.msn;
-            if (!msn) return;
-            const dateStr = moment(gd.date).format("DD MMM YY");
+        // 4. NEW: INHERIT GROUND DAYS FOR ENGINES & APUs
+        const daysInMonth = moment(month, "MMMM YYYY").daysInMonth();
+        const monthStart = moment(month, "MMMM YYYY").startOf('month');
 
-            if (!metricsMap[msn]) metricsMap[msn] = {};
-            metricsMap[msn][dateStr] = {
-                status: "maintenance",
-                label: gd.event || "C-check"
-            };
-        });
+        for (let i = 0; i < daysInMonth; i++) {
+            const currentDay = moment(monthStart).add(i, 'days');
+            const dDisp = currentDay.format("DD MMM YY");
+
+            // Find the active configuration for this specific day
+            const latestOnwingPerMsn = {};
+            onwings.forEach(ow => {
+                if (moment(ow.date).isSameOrBefore(currentDay)) {
+                    latestOnwingPerMsn[ow.msn] = ow; // Overwrites until we get the latest valid record for this day
+                }
+            });
+
+            // If an Aircraft (MSN) is grounded today, ground its attached Engines and APU
+            Object.keys(latestOnwingPerMsn).forEach(msn => {
+                if (groundMap[dDisp] && groundMap[dDisp][msn]) {
+                    const eventLabel = groundMap[dDisp][msn];
+                    const config = latestOnwingPerMsn[msn];
+
+                    // Gather all attached assets
+                    const attachedAssets = [config.pos1Esn, config.pos2Esn, config.apun].filter(Boolean);
+
+                    // Assign the maintenance event to the Engines/APU in the metrics map
+                    attachedAssets.forEach(assetSn => {
+                        const snKey = String(assetSn).trim();
+                        if (!metricsMap[snKey]) metricsMap[snKey] = {};
+
+                        metricsMap[snKey][dDisp] = {
+                            status: "maintenance",
+                            label: eventLabel
+                        };
+                    });
+                }
+            });
+        }
 
         res.status(200).json({ data: metricsMap });
     } catch (error) {
@@ -85,6 +133,8 @@ exports.getFleetScheduleMetrics = async (req, res) => {
         res.status(500).json({ message: "Failed to fetch metrics", error: error.message });
     }
 };
+
+
 
 exports.getFleetMonths = async (req, res) => {
     try {
