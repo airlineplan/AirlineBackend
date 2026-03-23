@@ -196,37 +196,109 @@ exports.bulkUpsertFleet = async (req, res) => {
             return res.status(400).json({ message: "Invalid fleet data payload. Expected an array." });
         }
 
-        const bulkOperations = fleetData.map((asset, index) => {
-            // Clean up data before saving
+        // --------------------------------------------------------
+        // STEP 1: Save data to the main Fleet table
+        // --------------------------------------------------------
+        const fleetBulkOps = fleetData.map((asset, index) => {
             const updateData = { ...asset };
 
             // Auto-uppercase registration
             if (updateData.regn) updateData.regn = updateData.regn.trim().toUpperCase();
 
-            // Ensure SN exists (required by schema)
+            // Ensure SN exists
             if (!updateData.sn) {
                 throw new Error(`Asset at row ${index + 1} is missing a Serial Number (SN)`);
             }
 
-            // Remove the temporary frontend 'id' (like Date.now()) so MongoDB can manage its own _id
             delete updateData.id;
             delete updateData._id;
 
             return {
                 updateOne: {
-                    // Match by unique Serial Number (SN)
                     filter: { sn: asset.sn.trim() },
                     update: { $set: updateData },
-                    upsert: true // If it doesn't exist, create it. If it does, update it.
+                    upsert: true
                 }
             };
         });
 
-        if (bulkOperations.length > 0) {
-            await Fleet.bulkWrite(bulkOperations, { ordered: false });
+        if (fleetBulkOps.length > 0) {
+            await Fleet.bulkWrite(fleetBulkOps, { ordered: false });
         }
 
-        res.status(200).json({ message: "Fleet data saved successfully!" });
+        // --------------------------------------------------------
+        // STEP 2: Auto-populate AircraftOnwing Table
+        // --------------------------------------------------------
+        const aircraftMap = {};
+
+        // First pass: Find all Aircraft and create base configurations mapped by their Registration
+        fleetData.forEach(asset => {
+            if (asset.category === 'Aircraft' && asset.regn && asset.sn) {
+                const regnKey = asset.regn.trim().toUpperCase();
+                aircraftMap[regnKey] = {
+                    msn: asset.sn.trim(),
+                    // Use the fleet entry date. If missing, default to current date.
+                    date: asset.entry ? new Date(asset.entry) : new Date(),
+                    pos1Esn: null,
+                    pos2Esn: null,
+                    apun: null
+                };
+            }
+        });
+
+        // Second pass: Find Engines and APUs, and attach them to the correct Aircraft configuration
+        fleetData.forEach(asset => {
+            if (!asset.titled || !asset.sn) return;
+
+            // e.g., "VT-DKU #1"
+            const titleStr = asset.titled.trim().toUpperCase();
+
+            if (asset.category === 'Engine') {
+                if (titleStr.endsWith('#1')) {
+                    // Extract "VT-DKU" from "VT-DKU #1"
+                    const regn = titleStr.replace('#1', '').trim();
+                    if (aircraftMap[regn]) aircraftMap[regn].pos1Esn = asset.sn.trim();
+                }
+                else if (titleStr.endsWith('#2')) {
+                    // Extract "VT-DKU" from "VT-DKU #2"
+                    const regn = titleStr.replace('#2', '').trim();
+                    if (aircraftMap[regn]) aircraftMap[regn].pos2Esn = asset.sn.trim();
+                }
+            }
+            else if (asset.category === 'APU') {
+                // For APU, the title usually directly matches the Aircraft Registration (e.g., "VT-DKU")
+                if (aircraftMap[titleStr]) aircraftMap[titleStr].apun = asset.sn.trim();
+            }
+        });
+
+        // Build Bulk Operations for AircraftOnwing
+        const onwingOps = [];
+        Object.values(aircraftMap).forEach(config => {
+            // Only create an Onwing record if at least one component (Engine or APU) is attached
+            if (config.pos1Esn || config.pos2Esn || config.apun) {
+                onwingOps.push({
+                    updateOne: {
+                        // Match by MSN and Date so we update existing configs for that specific date instead of duplicating
+                        filter: { msn: config.msn, date: config.date },
+                        update: {
+                            $set: {
+                                pos1Esn: config.pos1Esn,
+                                pos2Esn: config.pos2Esn,
+                                apun: config.apun
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+        });
+
+        // Execute Bulk Write for Onwing Data
+        if (onwingOps.length > 0) {
+            await AircraftOnwing.bulkWrite(onwingOps, { ordered: false });
+        }
+
+        res.status(200).json({ message: "Fleet data and Onwing configurations saved successfully!" });
     } catch (error) {
         console.error("🔥 Bulk Save Error:", error);
         res.status(500).json({ message: "Failed to save fleet data", error: error.message });

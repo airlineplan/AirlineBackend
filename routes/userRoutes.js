@@ -142,4 +142,33 @@ user.get(
   fleetController.getFleetScheduleMetrics
 );
 
+user.get(
+  "/maintenance/dashboard",
+  verifyToken,
+  maintenanceController.getMaintenanceDashboard
+);
+
+// 2. Get Reset Records for the Modal (with optional ?date= & ?msnEsn= filters)
+user.get(
+  "/maintenance/reset-records",
+  verifyToken,
+  maintenanceController.getResetRecords
+);
+
+// 3. Save/Update records from the Modal
+user.post(
+  "/maintenance/reset-records",
+  verifyToken,
+  jsonParser,
+  maintenanceController.bulkSaveResetRecords
+);
+
+// 4. Trigger Compute Button
+user.post(
+  "/maintenance/compute",
+  verifyToken,
+  jsonParser,
+  maintenanceController.computeMaintenanceLogic
+);
+
 module.exports = user;
