@@ -5,6 +5,7 @@ const RotableMovement = require("../model/rotableMovementSchema.js");
 const MaintenanceReset = require('../model/maintenanceReset');
 const Fleet = require("../model/fleet.js");
 const Assignment = require("../model/assignment.js");
+const Flight = require("../model/flight.js");
 const moment = require('moment'); // <-- Added missing moment import
 
 /**
@@ -141,11 +142,11 @@ exports.bulkSaveResetRecords = async (req, res) => {
                         msnEsn: updateFields.msnEsn,
                         snBn: updateFields.snBn
                     },
-                    update: { 
+                    update: {
                         $set: {
                             ...updateFields,
                             timeMetric: record.metric || "BH"
-                        } 
+                        }
                     },
                     upsert: true
                 }
@@ -159,23 +160,28 @@ exports.bulkSaveResetRecords = async (req, res) => {
                         msnEsn: updateFields.msnEsn,
                         snBn: updateFields.snBn
                     },
-                    update: { 
+                    update: {
                         $set: {
                             ...updateFields,
                             setFlag: "Y",
                             remarks: "(end of day)"
-                        } 
+                        }
                     },
                     upsert: true
                 }
             });
 
-            // 3. Backfill Utilisation history to Fleet Entry Date
+            // 3. Backfill Utilisation history to Master Table Start Date
+            // First, find the starting date of the master table (Flight table)
+            const firstFlight = await Flight.findOne().sort({ date: 1 }).lean();
+            const masterStartDate = firstFlight && firstFlight.date ? moment(firstFlight.date).startOf('day') : false;
+
+            // Optional: check Fleet for safety, but primary boundary is masterStartDate
             const fleet = await Fleet.findOne({ sn: record.msnEsn });
-            
-            if (fleet && fleet.entry) {
+
+            // Proceed to backfill ONLY if we have a valid boundary date
+            if (masterStartDate) {
                 let currDate = moment(record.date).startOf('day');
-                const fleetEntryDate = moment(fleet.entry).startOf('day');
 
                 // Keep running totals that we will decrement
                 let currentTsn = updateFields.tsn;
@@ -190,8 +196,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 let currentCsr = updateFields.csRplmt;
                 let currentDsr = updateFields.dsRplmt;
 
-                // Loop backward until we reach the fleet entry date
-                while (currDate.isAfter(fleetEntryDate)) {
+                // Loop backward until we reach the master start date
+                while (currDate.isAfter(masterStartDate)) {
                     // Fetch assignments that occurred ON currDate (the day we are subtracting usage FROM)
                     const assignments = await Assignment.find({
                         date: {
@@ -257,6 +263,101 @@ exports.bulkSaveResetRecords = async (req, res) => {
                             upsert: true
                         }
                     });
+                }
+            }
+
+            // 4. Forward Calculation to Fleet Exit Date or Master End Date
+            const lastFlight = await Flight.findOne().sort({ date: -1 }).lean();
+            const masterEndDate = lastFlight && lastFlight.date ? moment(lastFlight.date).endOf('day') : false;
+
+            // Determine the true end boundary (fleet exit or master table end)
+            let endBoundaryDate = masterEndDate;
+            if (fleet && fleet.exit && moment(fleet.exit).isBefore(masterEndDate)) {
+                endBoundaryDate = moment(fleet.exit).endOf('day');
+            }
+
+            if (endBoundaryDate) {
+                // Reset tracking variables to the explicitly entered reset record values
+                let currDate = moment(record.date).add(1, 'days').startOf('day');
+
+                let currentTsn = updateFields.tsn;
+                let currentCsn = updateFields.csn;
+                let currentDsn = updateFields.dsn;
+
+                let currentTso = updateFields.tsoTsr;
+                let currentCso = updateFields.csoCsr;
+                let currentDso = updateFields.dsoDsr;
+
+                let currentTsr = updateFields.tsRplmt;
+                let currentCsr = updateFields.csRplmt;
+                let currentDsr = updateFields.dsRplmt;
+
+                // Loop forward until the boundary
+                while (currDate.isSameOrBefore(endBoundaryDate)) {
+                    // Fetch assignments that occurred ON currDate (the day we are adding usage FOR)
+                    const assignments = await Assignment.find({
+                        date: {
+                            $gte: currDate.toDate(),
+                            $lt: moment(currDate).endOf('day').toDate()
+                        },
+                        "aircraft.msn": Number(record.msnEsn)
+                    });
+
+                    let timeUsage = 0;
+                    let cycleUsage = assignments.length;
+
+                    if (record.metric === "FH") {
+                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.flightHours || 0), 0);
+                    } else {
+                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.blockHours || 0), 0);
+                    }
+
+                    // Increment running totals based on usage
+                    // Add timeUsage to hours, cycleUsage to cycles, 1 to days
+                    if (currentTsn !== null) currentTsn = Number((currentTsn + timeUsage).toFixed(2));
+                    if (currentCsn !== null) currentCsn += cycleUsage;
+                    if (currentDsn !== null) currentDsn += 1;
+
+                    if (currentTso !== null) currentTso = Number((currentTso + timeUsage).toFixed(2));
+                    if (currentCso !== null) currentCso += cycleUsage;
+                    if (currentDso !== null) currentDso += 1;
+
+                    if (currentTsr !== null) currentTsr = Number((currentTsr + timeUsage).toFixed(2));
+                    if (currentCsr !== null) currentCsr += cycleUsage;
+                    if (currentDsr !== null) currentDsr += 1;
+
+                    // Push the forward record for the current day
+                    utilisationOps.push({
+                        updateOne: {
+                            filter: {
+                                date: currDate.toDate(),
+                                msnEsn: record.msnEsn,
+                                snBn: record.snBn
+                            },
+                            update: {
+                                $set: {
+                                    date: currDate.toDate(),
+                                    msnEsn: record.msnEsn,
+                                    pn: record.pn,
+                                    snBn: record.snBn,
+                                    tsn: currentTsn,
+                                    csn: currentCsn,
+                                    dsn: currentDsn,
+                                    tsoTsr: currentTso,
+                                    csoCsr: currentCso,
+                                    dsoDsr: currentDso,
+                                    tsRplmt: currentTsr,
+                                    csRplmt: currentCsr,
+                                    dsRplmt: currentDsr
+                                },
+                                $unset: { setFlag: "", remarks: "" }
+                            },
+                            upsert: true
+                        }
+                    });
+
+                    // Step forward to the next day
+                    currDate.add(1, 'days');
                 }
             }
         }
