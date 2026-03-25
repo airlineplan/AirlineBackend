@@ -3,6 +3,7 @@ const Utilisation = require("../model/utilisation.js");
 const MaintenanceStatus = require("../model/maintenanceStatusSchema.js");
 const RotableMovement = require("../model/rotableMovementSchema.js");
 const MaintenanceReset = require('../model/maintenanceReset');
+const AircraftOnwing = require("../model/aircraftOnwing.js");
 const Fleet = require("../model/fleet.js");
 const Assignment = require("../model/assignment.js");
 const Flight = require("../model/flight.js");
@@ -17,7 +18,8 @@ exports.getMaintenanceDashboard = async (req, res) => {
         const userId = req.user?.userId || req.user?._id;
 
         // 1. Fetch Aircraft Owning
-        const aircraft = await Aircraft.find({ userId }).lean();
+        // const aircraft = await Aircraft.find({ userId }).lean();
+        const aircraft = [];
 
         // 2. Fetch recent Utilisation
         const utilisation = await Utilisation.find({ userId })
@@ -34,9 +36,51 @@ exports.getMaintenanceDashboard = async (req, res) => {
             .limit(10)
             .lean();
 
+        // 5. Build dynamically mapped Dashboard Status table Data
+        let maintenanceData = [];
+        const { date } = req.query;
+
+        if (date) {
+            const startOfDay = moment(date).startOf('day').toDate();
+            const endOfDay = moment(date).endOf('day').toDate();
+
+            const fleetAssets = await Fleet.find({}).lean();
+            const utils = await Utilisation.find({
+                date: { $gte: startOfDay, $lte: endOfDay }
+            }).lean();
+
+            // Fetch the most recent resets to accurately pull PN and SN/BN assignments
+            const mResets = await MaintenanceReset.find({}).sort({ date: -1 }).lean();
+
+            maintenanceData = fleetAssets.map(f => {
+                const sn = f.sn; // MSN/ESN
+                const util = utils.find(u => String(u.msnEsn) === String(sn));
+                const latestReset = mResets.find(r => String(r.msnEsn) === String(sn));
+
+                return {
+                    id: f._id,
+                    msn: sn,
+                    pn: latestReset && latestReset.pn ? latestReset.pn : f.variant || "",
+                    sn: latestReset && latestReset.snBn ? latestReset.snBn : "",
+                    titled: f.titled || "",
+                    tsn: util ? util.tsn : "",
+                    csn: util ? util.csn : "",
+                    dsn: util ? util.dsn : "",
+                    tso: util ? util.tsoTsr : "",
+                    cso: util ? util.csoCsr : "",
+                    dso: util ? util.dsoDsr : "",
+                    tsr: util ? util.tsRplmt : "",
+                    csr: util ? util.csRplmt : "",
+                    dsr: util ? util.dsRplmt : "",
+                    allDisplay: ""
+                };
+            });
+        }
+
         res.status(200).json({
             success: true,
             data: {
+                maintenanceData, // The aggregated frontend status table
                 aircraft,
                 utilisation,
                 status,
@@ -388,5 +432,119 @@ exports.computeMaintenanceLogic = async (req, res) => {
         res.status(200).json({ success: true, message: "Maintenance logic computation started." });
     } catch (error) {
         res.status(500).json({ message: "Failed to start computation", error: error.message });
+    }
+};
+
+/**
+ * 5. GET: Fetch Major Rotable Movements for Modal
+ */
+exports.getRotables = async (req, res) => {
+    try {
+        const records = await RotableMovement.find({}).sort({ date: -1 }).lean();
+        const formattedRecords = records.map(record => ({
+            id: record._id,
+            label: record.label || "",
+            date: moment(record.date).format("YYYY-MM-DD"),
+            pn: record.pn || "",
+            msn: record.msn || "",
+            acftRegn: record.acftReg || "",
+            position: record.position || "",
+            removedSN: record.removedSN || "",
+            installedSN: record.installedSN || ""
+        }));
+        res.status(200).json({ success: true, data: formattedRecords });
+    } catch (error) {
+        console.error("Error fetching rotable movements:", error);
+        res.status(500).json({ message: "Failed to fetch rotable movements", error: error.message });
+    }
+};
+
+/**
+ * 6. POST: Bulk Save/Update Major Rotable Movements
+ */
+exports.bulkSaveRotables = async (req, res) => {
+    try {
+        const { rotablesData } = req.body;
+        const userId = req.user?.userId || req.user?._id;
+
+        if (!rotablesData || !Array.isArray(rotablesData)) {
+            return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
+        }
+
+        const bulkOperations = [];
+        const onwingOps = [];
+
+        for (const record of rotablesData) {
+            bulkOperations.push({
+                updateOne: {
+                    filter: {
+                        msn: record.msn,
+                        pn: record.pn,
+                        position: record.position,
+                        date: new Date(record.date)
+                    },
+                    update: {
+                        $set: {
+                            label: record.label,
+                            date: new Date(record.date),
+                            pn: record.pn,
+                            msn: record.msn,
+                            acftReg: record.acftRegn,
+                            position: record.position,
+                            removedSN: record.removedSN,
+                            installedSN: record.installedSN,
+                            userId: userId
+                        }
+                    },
+                    upsert: true
+                }
+            });
+
+            // Update AircraftOnwing if an Engine is assigned to Position #1 or #2
+            if (record.position === "#1" || record.position === "#2") {
+                const nextDay = new Date(record.date);
+                nextDay.setDate(nextDay.getDate() + 1);
+
+                const updateField = record.position === "#1" ? "pos1Esn" : "pos2Esn";
+
+                // 1. Update all future chronological configurations for this MSN
+                onwingOps.push({
+                    updateMany: {
+                        filter: { msn: record.msn, date: { $gte: nextDay } },
+                        update: {
+                            $set: {
+                                [updateField]: record.installedSN
+                            }
+                        }
+                    }
+                });
+
+                // 2. Explicitly log the new configuration timeline starting on nextDay
+                onwingOps.push({
+                    updateOne: {
+                        filter: { msn: record.msn, date: nextDay },
+                        update: {
+                            $set: {
+                                [updateField]: record.installedSN
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+        }
+
+        if (bulkOperations.length > 0) {
+            await RotableMovement.bulkWrite(bulkOperations);
+        }
+
+        if (onwingOps.length > 0) {
+            await AircraftOnwing.bulkWrite(onwingOps, { ordered: false });
+        }
+
+        res.status(200).json({ success: true, message: "Rotable movements and Aircraft configurations updated successfully." });
+    } catch (error) {
+        console.error("Error saving rotables data:", error);
+        res.status(500).json({ message: "Failed to update rotables data", error: error.message });
     }
 };

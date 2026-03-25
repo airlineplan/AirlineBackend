@@ -171,4 +171,19 @@ user.post(
   maintenanceController.computeMaintenanceLogic
 );
 
+// 5. Get Rotable Movements for the Modal
+user.get(
+  "/maintenance/rotables",
+  verifyToken,
+  maintenanceController.getRotables
+);
+
+// 6. Bulk Save/Update Rotable Movements
+user.post(
+  "/maintenance/rotables",
+  verifyToken,
+  jsonParser,
+  maintenanceController.bulkSaveRotables
+);
+
 module.exports = user;
