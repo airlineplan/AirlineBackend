@@ -2,6 +2,7 @@ const Aircraft = require("../model/aircraftSchema.js");
 const Utilisation = require("../model/utilisation.js");
 const MaintenanceStatus = require("../model/maintenanceStatusSchema.js");
 const RotableMovement = require("../model/rotableMovementSchema.js");
+const MaintenanceTarget = require("../model/maintenanceTargetSchema.js");
 const MaintenanceReset = require('../model/maintenanceReset');
 const AircraftOnwing = require("../model/aircraftOnwing.js");
 const Fleet = require("../model/fleet.js");
@@ -481,12 +482,12 @@ exports.bulkSaveRotables = async (req, res) => {
                         msn: record.msn,
                         pn: record.pn,
                         position: record.position,
-                        date: new Date(record.date)
+                        date: record.date ? new Date(record.date) : new Date()
                     },
                     update: {
                         $set: {
                             label: record.label,
-                            date: new Date(record.date),
+                            date: record.date ? new Date(record.date) : new Date(),
                             pn: record.pn,
                             msn: record.msn,
                             acftReg: record.acftRegn,
@@ -501,36 +502,38 @@ exports.bulkSaveRotables = async (req, res) => {
             });
 
             // Update AircraftOnwing if an Engine is assigned to Position #1 or #2
-            if (record.position === "#1" || record.position === "#2") {
+            if ((record.position === "#1" || record.position === "#2") && record.date) {
                 const nextDay = new Date(record.date);
-                nextDay.setDate(nextDay.getDate() + 1);
+                if (!isNaN(nextDay.getTime())) {
+                    nextDay.setDate(nextDay.getDate() + 1);
 
-                const updateField = record.position === "#1" ? "pos1Esn" : "pos2Esn";
+                    const updateField = record.position === "#1" ? "pos1Esn" : "pos2Esn";
 
-                // 1. Update all future chronological configurations for this MSN
-                onwingOps.push({
-                    updateMany: {
-                        filter: { msn: record.msn, date: { $gte: nextDay } },
-                        update: {
-                            $set: {
-                                [updateField]: record.installedSN
+                    // 1. Update all future chronological configurations for this MSN
+                    onwingOps.push({
+                        updateMany: {
+                            filter: { msn: record.msn, date: { $gte: nextDay } },
+                            update: {
+                                $set: {
+                                    [updateField]: record.installedSN
+                                }
                             }
                         }
-                    }
-                });
+                    });
 
-                // 2. Explicitly log the new configuration timeline starting on nextDay
-                onwingOps.push({
-                    updateOne: {
-                        filter: { msn: record.msn, date: nextDay },
-                        update: {
-                            $set: {
-                                [updateField]: record.installedSN
-                            }
-                        },
-                        upsert: true
-                    }
-                });
+                    // 2. Explicitly log the new configuration timeline starting on nextDay
+                    onwingOps.push({
+                        updateOne: {
+                            filter: { msn: record.msn, date: nextDay },
+                            update: {
+                                $set: {
+                                    [updateField]: record.installedSN
+                                }
+                            },
+                            upsert: true
+                        }
+                    });
+                }
             }
         }
 
@@ -546,5 +549,91 @@ exports.bulkSaveRotables = async (req, res) => {
     } catch (error) {
         console.error("Error saving rotables data:", error);
         res.status(500).json({ message: "Failed to update rotables data", error: error.message });
+    }
+};
+
+/**
+ * 7. GET: Fetch Target Maintenance Status Records
+ */
+exports.getTargets = async (req, res) => {
+    try {
+        const records = await MaintenanceTarget.find({}).sort({ date: -1 }).lean();
+        const formattedRecords = records.map(record => ({
+            id: record._id,
+            label: record.label || "",
+            msnEsn: record.msnEsn || "",
+            pn: record.pn || "",
+            snBn: record.snBn || "",
+            category: record.category || "",
+            date: moment(record.date).format("DD MMM YY"),
+            tsn: record.tsn || "",
+            csn: record.csn || "",
+            dsn: record.dsn || "",
+            tso: record.tso || "",
+            cso: record.cso || "",
+            dso: record.dso || "",
+            tsRplmt: record.tsRplmt || "",
+            csRplmt: record.csRplmt || "",
+            dsRplmt: record.dsRplmt || ""
+        }));
+        res.status(200).json({ success: true, data: formattedRecords });
+    } catch (error) {
+        console.error("Error fetching target maintenance data:", error);
+        res.status(500).json({ message: "Failed to fetch targets", error: error.message });
+    }
+};
+
+/**
+ * 8. POST: Bulk Save/Update Target Maintenance Status
+ */
+exports.bulkSaveTargets = async (req, res) => {
+    try {
+        const { targetData } = req.body;
+        const userId = req.user?.userId || req.user?._id;
+
+        if (!targetData || !Array.isArray(targetData)) {
+            return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
+        }
+
+        const bulkOperations = [];
+
+        for (const record of targetData) {
+            bulkOperations.push({
+                updateOne: {
+                    filter: {
+                        msnEsn: record.msnEsn,
+                        pn: record.pn,
+                        snBn: record.snBn
+                    },
+                    update: {
+                        $set: {
+                            label: record.label,
+                            category: record.category,
+                            date: record.date ? new Date(record.date) : new Date(),
+                            tsn: record.tsn,
+                            csn: record.csn,
+                            dsn: record.dsn,
+                            tso: record.tso,
+                            cso: record.cso,
+                            dso: record.dso,
+                            tsRplmt: record.tsRplmt,
+                            csRplmt: record.csRplmt,
+                            dsRplmt: record.dsRplmt,
+                            userId: userId
+                        }
+                    },
+                    upsert: true
+                }
+            });
+        }
+
+        if (bulkOperations.length > 0) {
+            await MaintenanceTarget.bulkWrite(bulkOperations);
+        }
+
+        res.status(200).json({ success: true, message: "Target maintenance status updated successfully." });
+    } catch (error) {
+        console.error("Error saving target maintenance data:", error);
+        res.status(500).json({ message: "Failed to update target maintenance status", error: error.message });
     }
 };

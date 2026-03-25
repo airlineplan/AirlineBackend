@@ -186,4 +186,19 @@ user.post(
   maintenanceController.bulkSaveRotables
 );
 
+// 7. Get Target Maintenance Status
+user.get(
+  "/maintenance/targets",
+  verifyToken,
+  maintenanceController.getTargets
+);
+
+// 8. Bulk Save Target Maintenance Status
+user.post(
+  "/maintenance/targets",
+  verifyToken,
+  jsonParser,
+  maintenanceController.bulkSaveTargets
+);
+
 module.exports = user;
