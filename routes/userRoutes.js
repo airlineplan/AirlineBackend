@@ -201,4 +201,19 @@ user.post(
   maintenanceController.bulkSaveTargets
 );
 
+// 9. Get Calendar Inputs
+user.get(
+  "/maintenance/calendar",
+  verifyToken,
+  maintenanceController.getCalendar
+);
+
+// 10. Bulk Save Calendar Inputs
+user.post(
+  "/maintenance/calendar",
+  verifyToken,
+  jsonParser,
+  maintenanceController.bulkSaveCalendar
+);
+
 module.exports = user;

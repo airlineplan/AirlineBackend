@@ -8,6 +8,7 @@ const AircraftOnwing = require("../model/aircraftOnwing.js");
 const Fleet = require("../model/fleet.js");
 const Assignment = require("../model/assignment.js");
 const Flight = require("../model/flight.js");
+const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
 
 /**
@@ -208,6 +209,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     update: {
                         $set: {
                             ...updateFields,
+                            timeMetric: record.metric || "BH",
                             setFlag: "Y",
                             remarks: "(end of day)"
                         }
@@ -300,7 +302,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
                                     dsoDsr: currentDso,
                                     tsRplmt: currentTsr,
                                     csRplmt: currentCsr,
-                                    dsRplmt: currentDsr
+                                    dsRplmt: currentDsr,
+                                    timeMetric: record.metric || "BH"
                                     // Notice: no setFlag or remarks for backfilled dates
                                 },
                                 $unset: { setFlag: "", remarks: "" }
@@ -393,7 +396,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
                                     dsoDsr: currentDso,
                                     tsRplmt: currentTsr,
                                     csRplmt: currentCsr,
-                                    dsRplmt: currentDsr
+                                    dsRplmt: currentDsr,
+                                    timeMetric: record.metric || "BH"
                                 },
                                 $unset: { setFlag: "", remarks: "" }
                             },
@@ -424,15 +428,329 @@ exports.bulkSaveResetRecords = async (req, res) => {
 /**
  * 4. POST: Trigger to compute maintenance logic (The green "Compute" button)
  */
+/**
+ * 4. POST: Trigger to compute maintenance logic (The green "Compute" button)
+ * This function performs a full recalculation for all assets that have Maintenance Reset records.
+ * It propagates metrics forwards and backwards from these reset points.
+ */
 exports.computeMaintenanceLogic = async (req, res) => {
     try {
-        const { date } = req.body;
-        // Logic to trigger background calculations based on Utilisation and Flights
-        // ...
+        // 1. Determine Global Boundaries
+        const firstFlight = await Flight.findOne().sort({ date: 1 }).lean();
+        const lastFlight = await Flight.findOne().sort({ date: -1 }).lean();
 
-        res.status(200).json({ success: true, message: "Maintenance logic computation started." });
+        if (!firstFlight || !lastFlight) {
+            return res.status(200).json({ success: true, message: "No flights found to compute." });
+        }
+
+        const masterStartDate = moment(firstFlight.date).startOf('day');
+        const masterEndDate = moment(lastFlight.date).endOf('day');
+
+        // Fetch calendar limits
+        const allCalendars = await MaintenanceCalendar.find({}).lean();
+
+        // 2. Identify all Assets and Parts needing recalculation
+        const resetGroups = await MaintenanceReset.aggregate([
+            { $group: { _id: { msnEsn: "$msnEsn", snBn: "$snBn" } } }
+        ]);
+
+        const totalOps = [];
+
+        for (const group of resetGroups) {
+            const { msnEsn, snBn } = group._id;
+            
+            // Get all resets for this specific part/asset, sorted chronologically
+            const resets = await MaintenanceReset.find({ msnEsn, snBn }).sort({ date: 1 }).lean();
+            if (resets.length === 0) continue;
+
+            const fleet = await Fleet.findOne({ sn: msnEsn });
+            
+            // Determine the true end boundary (fleet exit or master table end)
+            let endBoundaryDate = masterEndDate;
+            if (fleet && fleet.exit && moment(fleet.exit).isBefore(masterEndDate)) {
+                endBoundaryDate = moment(fleet.exit).endOf('day');
+            }
+
+            // --- RECALCULATION LOGIC ---
+            // We iterate through all resets and calculate their respective segments.
+            for (let i = 0; i < resets.length; i++) {
+                const currentReset = resets[i];
+                const nextReset = resets[i + 1];
+
+                // If this is the FIRST reset, backfill to masterStartDate
+                if (i === 0) {
+                    let currDate = moment(currentReset.date).startOf('day');
+                    let currentTsn = currentReset.tsn;
+                    let currentCsn = currentReset.csn;
+                    let currentDsn = currentReset.dsn;
+                    let currentTso = currentReset.tsoTsr;
+                    let currentCso = currentReset.csoCsr;
+                    let currentDso = currentReset.dsoDsr;
+                    let currentTsr = currentReset.tsRplmt;
+                    let currentCsr = currentReset.csRplmt;
+                    let currentDsr = currentReset.dsRplmt;
+
+                    while (currDate.isAfter(masterStartDate)) {
+                        const assignments = await Assignment.find({
+                            date: {
+                                $gte: currDate.toDate(),
+                                $lt: moment(currDate).endOf('day').toDate()
+                            },
+                            "aircraft.msn": Number(msnEsn)
+                        });
+
+                        const timeUsage = assignments.reduce((sum, a) => 
+                            sum + (currentReset.timeMetric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
+                        const cycleUsage = assignments.length;
+
+                        if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
+                        if (currentCsn !== null) currentCsn -= cycleUsage;
+                        if (currentDsn !== null) currentDsn -= 1;
+                        if (currentTso !== null) currentTso = Number((currentTso - timeUsage).toFixed(2));
+                        if (currentCso !== null) currentCso -= cycleUsage;
+                        if (currentDso !== null) currentDso -= 1;
+                        if (currentTsr !== null) currentTsr = Number((currentTsr - timeUsage).toFixed(2));
+                        if (currentCsr !== null) currentCsr -= cycleUsage;
+                        if (currentDsr !== null) currentDsr -= 1;
+
+                        currDate.subtract(1, 'days');
+
+                        totalOps.push({
+                            updateOne: {
+                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                update: {
+                                    $set: {
+                                        date: currDate.toDate(),
+                                        msnEsn, pn: currentReset.pn, snBn,
+                                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                                        tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                                        tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
+                                        timeMetric: currentReset.timeMetric
+                                    },
+                                    $unset: { setFlag: "", remarks: "" }
+                                },
+                                upsert: true
+                            }
+                        });
+                    }
+                }
+
+                // --- SAVE THE RESET POINT ITSELF ---
+                totalOps.push({
+                    updateOne: {
+                        filter: { date: new Date(currentReset.date), msnEsn, snBn },
+                        update: {
+                            $set: {
+                                date: new Date(currentReset.date),
+                                msnEsn, pn: currentReset.pn, snBn,
+                                tsn: currentReset.tsn, csn: currentReset.csn, dsn: currentReset.dsn,
+                                tsoTsr: currentReset.tsoTsr, csoCsr: currentReset.csoCsr, dsoDsr: currentReset.dsoDsr,
+                                tsRplmt: currentReset.tsRplmt, csRplmt: currentReset.csRplmt, dsRplmt: currentReset.dsRplmt,
+                                timeMetric: currentReset.timeMetric, setFlag: "Y", remarks: "(reset point)"
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+
+                // --- FORWARD CALCULATION ---
+                // Until the next reset date OR the global end boundary
+                const segmentEnd = nextReset ? moment(nextReset.date).subtract(1, 'day') : endBoundaryDate;
+                let currDate = moment(currentReset.date).add(1, 'days').startOf('day');
+
+                let currentTsn = currentReset.tsn;
+                let currentCsn = currentReset.csn;
+                let currentDsn = currentReset.dsn;
+                let currentTso = currentReset.tsoTsr;
+                let currentCso = currentReset.csoCsr;
+                let currentDso = currentReset.dsoDsr;
+                let currentTsr = currentReset.tsRplmt;
+                let currentCsr = currentReset.csRplmt;
+                let currentDsr = currentReset.dsRplmt;
+
+                const assetCalendars = allCalendars.filter(c => String(c.calMsn) === String(msnEsn) && String(c.snBn) === String(snBn));
+                let inMaintenanceUntil = null;
+
+                while (currDate.isSameOrBefore(segmentEnd)) {
+                    if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
+                        // Aircraft in maintenance down-time
+                        // Remove assignment for this day
+                        await Assignment.updateMany({
+                            date: {
+                                $gte: currDate.toDate(),
+                                $lt: moment(currDate).endOf('day').toDate()
+                            },
+                            "aircraft.msn": Number(msnEsn)
+                        }, {
+                            $unset: { "aircraft.msn": "", "aircraft.registration": "" },
+                            $set: { removedReason: "GROUND_DAY_CONFLICT" }
+                        });
+
+                        // NO time or cycle usage, but DSN/DSO/DSR increment
+                        if (currentDsn !== null) currentDsn += 1;
+                        if (currentDso !== null) currentDso += 1;
+                        if (currentDsr !== null) currentDsr += 1;
+
+                        totalOps.push({
+                            updateOne: {
+                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                update: {
+                                    $set: {
+                                        date: currDate.toDate(),
+                                        msnEsn, pn: currentReset.pn, snBn,
+                                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                                        tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                                        tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
+                                        timeMetric: currentReset.timeMetric,
+                                        remarks: "Maintenance Downtime"
+                                    },
+                                    $unset: { setFlag: "" }
+                                },
+                                upsert: true
+                            }
+                        });
+                        currDate.add(1, 'days');
+                        continue;
+                    }
+
+                    const assignments = await Assignment.find({
+                        date: {
+                            $gte: currDate.toDate(),
+                            $lt: moment(currDate).endOf('day').toDate()
+                        },
+                        "aircraft.msn": Number(msnEsn)
+                    });
+
+                    const timeUsage = assignments.reduce((sum, a) => 
+                        sum + (currentReset.timeMetric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
+                    const cycleUsage = assignments.length;
+
+                    const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
+                    const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
+                    const projectedDsn = currentDsn !== null ? currentDsn + 1 : null;
+
+                    const projectedTso = currentTso !== null ? Number((currentTso + timeUsage).toFixed(2)) : null;
+                    const projectedCso = currentCso !== null ? currentCso + cycleUsage : null;
+                    const projectedDso = currentDso !== null ? currentDso + 1 : null;
+
+                    const projectedTsr = currentTsr !== null ? Number((currentTsr + timeUsage).toFixed(2)) : null;
+                    const projectedCsr = currentCsr !== null ? currentCsr + cycleUsage : null;
+                    const projectedDsr = currentDsr !== null ? currentDsr + 1 : null;
+
+                    let triggerHit = false;
+                    let downDaysToApply = 0;
+
+                    for (const cal of assetCalendars) {
+                        if (
+                            (cal.eTsn && projectedTsn !== null && projectedTsn >= cal.eTsn) ||
+                            (cal.eCsn && projectedCsn !== null && projectedCsn >= cal.eCsn) ||
+                            (cal.eDsn && projectedDsn !== null && projectedDsn >= cal.eDsn) ||
+                            (cal.eTso && projectedTso !== null && projectedTso >= cal.eTso) ||
+                            (cal.eCso && projectedCso !== null && projectedCso >= cal.eCso) ||
+                            (cal.eDso && projectedDso !== null && projectedDso >= cal.eDso) ||
+                            (cal.eTsr && projectedTsr !== null && projectedTsr >= cal.eTsr) ||
+                            (cal.eCsr && projectedCsr !== null && projectedCsr >= cal.eCsr) ||
+                            (cal.eDsr && projectedDsr !== null && projectedDsr >= cal.eDsr)
+                        ) {
+                            triggerHit = true;
+                            downDaysToApply = Math.max(downDaysToApply, cal.downDays || 0);
+                        }
+                    }
+
+                    if (triggerHit) {
+                        // Assignment is removed
+                        await Assignment.updateMany({
+                            date: {
+                                $gte: currDate.toDate(),
+                                $lt: moment(currDate).endOf('day').toDate()
+                            },
+                            "aircraft.msn": Number(msnEsn)
+                        }, {
+                            $unset: { "aircraft.msn": "", "aircraft.registration": "" },
+                            $set: { removedReason: "GROUND_DAY_CONFLICT" }
+                        });
+
+                        if (downDaysToApply > 0) {
+                            inMaintenanceUntil = moment(currDate).add(downDaysToApply - 1, 'days');
+                        }
+
+                        // Apply the NO UTILISATION logic for today (only days increment)
+                        if (currentDsn !== null) currentDsn += 1;
+                        if (currentDso !== null) currentDso += 1;
+                        if (currentDsr !== null) currentDsr += 1;
+
+                        totalOps.push({
+                            updateOne: {
+                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                update: {
+                                    $set: {
+                                        date: currDate.toDate(),
+                                        msnEsn, pn: currentReset.pn, snBn,
+                                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                                        tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                                        tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
+                                        timeMetric: currentReset.timeMetric,
+                                        remarks: "Maintenance Check Triggered"
+                                    },
+                                    $unset: { setFlag: "" }
+                                },
+                                upsert: true
+                            }
+                        });
+
+                        currDate.add(1, 'days');
+                        continue;
+                    }
+
+                    // Not in maintenance, apply normal projected values
+                    currentTsn = projectedTsn;
+                    currentCsn = projectedCsn;
+                    currentDsn = projectedDsn;
+
+                    currentTso = projectedTso;
+                    currentCso = projectedCso;
+                    currentDso = projectedDso;
+
+                    currentTsr = projectedTsr;
+                    currentCsr = projectedCsr;
+                    currentDsr = projectedDsr;
+
+                    totalOps.push({
+                        updateOne: {
+                            filter: { date: currDate.toDate(), msnEsn, snBn },
+                            update: {
+                                $set: {
+                                    date: currDate.toDate(),
+                                    msnEsn, pn: currentReset.pn, snBn,
+                                    tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                                    tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                                    tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
+                                    timeMetric: currentReset.timeMetric
+                                },
+                                $unset: { setFlag: "", remarks: "" }
+                            },
+                            upsert: true
+                        }
+                    });
+
+                    currDate.add(1, 'days');
+                }
+            }
+        }
+
+        if (totalOps.length > 0) {
+            // Apply updates in chunks to avoid overwhelming the driver if there are many MSNs
+            const chunkSize = 1000;
+            for (let i = 0; i < totalOps.length; i += chunkSize) {
+                const chunk = totalOps.slice(i, i + chunkSize);
+                await Utilisation.bulkWrite(chunk, { ordered: false });
+            }
+        }
+
+        res.status(200).json({ success: true, message: `Maintenance logic computed for ${resetGroups.length} assets.` });
     } catch (error) {
-        res.status(500).json({ message: "Failed to start computation", error: error.message });
+        console.error("🔥 Error computing maintenance logic:", error);
+        res.status(500).json({ message: "Failed to recalculate maintenance logic", error: error.message });
     }
 };
 
@@ -635,5 +953,100 @@ exports.bulkSaveTargets = async (req, res) => {
     } catch (error) {
         console.error("Error saving target maintenance data:", error);
         res.status(500).json({ message: "Failed to update target maintenance status", error: error.message });
+    }
+};
+
+/**
+ * 9. GET: Fetch Calendar Inputs
+ */
+exports.getCalendar = async (req, res) => {
+    try {
+        const records = await MaintenanceCalendar.find({}).lean();
+        const formattedRecords = records.map(record => ({
+            id: record._id,
+            calLabel: record.calLabel || "",
+            lineBase: record.lineBase || "",
+            calMsn: record.calMsn || "",
+            schEvent: record.schEvent || "",
+            calPn: record.calPn || "",
+            snBn: record.snBn || "",
+            eTsn: record.eTsn || "",
+            eCsn: record.eCsn || "",
+            eDsn: record.eDsn || "",
+            eTso: record.eTso || "",
+            eCso: record.eCso || "",
+            eDso: record.eDso || "",
+            eTsr: record.eTsr || "",
+            eCsr: record.eCsr || "",
+            eDsr: record.eDsr || "",
+            downDays: record.downDays || 0,
+            avgDownda: record.avgDownda || 0
+        }));
+        res.status(200).json({ success: true, data: formattedRecords });
+    } catch (error) {
+        console.error("Error fetching calendar data:", error);
+        res.status(500).json({ message: "Failed to fetch calendar data", error: error.message });
+    }
+};
+
+/**
+ * 10. POST: Bulk Save/Update Calendar Inputs
+ */
+exports.bulkSaveCalendar = async (req, res) => {
+    try {
+        const { calendarData } = req.body;
+        const userId = req.user?.userId || req.user?._id;
+
+        if (!calendarData || !Array.isArray(calendarData)) {
+            return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
+        }
+
+        const bulkOperations = [];
+
+        for (const record of calendarData) {
+            const parseNum = (val) => (val === "" || val === undefined) ? null : Number(val);
+
+            bulkOperations.push({
+                updateOne: {
+                    filter: {
+                        calMsn: record.calMsn,
+                        calPn: record.calPn,
+                        snBn: record.snBn
+                    },
+                    update: {
+                        $set: {
+                            calLabel: record.calLabel,
+                            lineBase: record.lineBase,
+                            schEvent: record.schEvent,
+                            calMsn: record.calMsn,
+                            calPn: record.calPn,
+                            snBn: record.snBn,
+                            eTsn: parseNum(record.eTsn),
+                            eCsn: parseNum(record.eCsn),
+                            eDsn: parseNum(record.eDsn),
+                            eTso: parseNum(record.eTso),
+                            eCso: parseNum(record.eCso),
+                            eDso: parseNum(record.eDso),
+                            eTsr: parseNum(record.eTsr),
+                            eCsr: parseNum(record.eCsr),
+                            eDsr: parseNum(record.eDsr),
+                            downDays: parseNum(record.downDays),
+                            avgDownda: parseNum(record.avgDownda),
+                            userId: userId
+                        }
+                    },
+                    upsert: true
+                }
+            });
+        }
+
+        if (bulkOperations.length > 0) {
+            await MaintenanceCalendar.bulkWrite(bulkOperations);
+        }
+
+        res.status(200).json({ success: true, message: "Calendar inputs updated successfully." });
+    } catch (error) {
+        console.error("Error saving calendar data:", error);
+        res.status(500).json({ message: "Failed to update calendar inputs", error: error.message });
     }
 };

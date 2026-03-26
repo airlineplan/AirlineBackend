@@ -63,6 +63,12 @@ const utilisationSchema = new mongoose.Schema(
             default: null
         },
 
+        timeMetric: {
+            type: String,
+            default: "BH",
+            enum: ["BH", "FH"]
+        },
+
         remarks: {
             type: String,
             trim: true // Captures the "After populating data (end of day)" notes
