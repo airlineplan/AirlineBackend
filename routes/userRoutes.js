@@ -216,4 +216,13 @@ user.post(
   maintenanceController.bulkSaveCalendar
 );
 
+// ─── POO & Revenue ─────────────────────────────────────────────────
+const pooController = require("../controller/pooController");
+
+user.get("/poo", verifyToken, pooController.getPooData);
+user.post("/poo/populate", verifyToken, jsonParser, pooController.populatePoo);
+user.post("/poo/update", verifyToken, jsonParser, pooController.updatePooRecords);
+user.delete("/poo", verifyToken, jsonParser, pooController.deletePooRecords);
+user.get("/revenue", verifyToken, pooController.getRevenueData);
+
 module.exports = user;
