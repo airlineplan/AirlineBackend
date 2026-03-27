@@ -7,6 +7,7 @@ const Flights = require("../model/flight");
 const FlightHistory = require("../model/flightHistory")
 const RotationSummary = require("../model/rotationSummary");
 const RotationDetails = require("../model/rotationDetails");
+const RotationOccurrence = require("../model/rotationOccurence");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const csv = require("csvtojson");
@@ -121,7 +122,7 @@ const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNu
       arrStn,
       bt,
       depStn,
-      day: { $in: datesInRange },
+      date: { $in: datesInRange },
       flight: flightNumber,
       std,
       sta,
@@ -423,8 +424,11 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     console.log("effFromDate " + effFromDate)
     console.log("effToDate " + effToDate)
     // Find dates between effFromDate and effToDate with the given dow
-    let startEffDate = new Date(effFromDate);
-    let endEffDate = new Date(effToDate);
+    const startEffDate = new Date(effFromDate);
+    const endEffDate = new Date(effToDate);
+    // Create separate copies for adjusted date range queries (avoid mutating originals)
+    const queryStartDate = new Date(effFromDate);
+    const queryEndDate = new Date(effToDate);
 
     console.log("startEffDate " + startEffDate)
     console.log("endEffDate " + endEffDate)
@@ -467,9 +471,9 @@ const addRotationDetailsFlgtChange = async (req, res) => {
       currentDate.setDate(currentDate.getDate() + 1);
     }
 
-    //correction for end Dates
-    endEffDate.setDate(endEffDate.getDate() + 1);
-    endEffDate.setHours(0, 0, 0, 0);
+    //correction for end Dates - use query copies to avoid mutating originals
+    queryEndDate.setDate(queryEndDate.getDate() + 1);
+    queryEndDate.setHours(0, 0, 0, 0);
 
     console.log("After correct startEffDate " + startEffDate)
     console.log("After correct endEffDate " + endEffDate)
@@ -481,7 +485,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
       bt,
       depStn,
       day: { $in: daysOfWeekStrings },
-      date: { $gte: startEffDate, $lte: endEffDate },
+      date: { $gte: queryStartDate, $lte: queryEndDate },
       flight: flightNumber,
       std,
       sta,
@@ -500,8 +504,8 @@ const addRotationDetailsFlgtChange = async (req, res) => {
       networkId: networkIdToCheck
     });
 
-    startEffDate.setDate(startEffDate.getDate() + 1);
-    startEffDate.setHours(0, 0, 0, 0);
+    // Use query copies for range comparisons (don't mutate originals)
+    queryStartDate.setHours(0, 0, 0, 0);
 
     const existingFlightsDates = existingFlights.map(flight => flight.date);
     const allFlightsWithSameNetworkIdDates = allFlightsWithSameNetworkId.map(flight => flight.date);
@@ -513,21 +517,17 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     const minDate = Math.min(...allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
     const maxDate = Math.max(...allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
 
-    // Convert startEffDate and endEffDate to milliseconds for comparison
-    const startEffDateInMillis = startEffDate.getTime();
-    const endEffDateInMillis = endEffDate.getTime();
+    // Convert dates to milliseconds for comparison
+    const startEffDateInMillis = queryStartDate.getTime();
+    const endEffDateInMillis = queryEndDate.getTime();
 
-    // Check if startEffDate is greater than or equal to the smallest date and endEffDate is less than or equal to the largest date
+    // Check if rotation date range fits within the existing flight date range
     const isDateRangeValid = startEffDateInMillis >= minDate && endEffDateInMillis <= maxDate;
 
-    let allDatesInRange = false;
-
-    allFlightsWithSameNetworkId.forEach((flight) => {
+    // Check if ALL flights with same networkId fall within the rotation's effective date range
+    const allDatesInRange = allFlightsWithSameNetworkId.length > 0 && allFlightsWithSameNetworkId.every((flight) => {
       const flightDate = new Date(flight.date);
-      if (!(flightDate >= startEffDate && flightDate <= endEffDate)) {
-        allDatesInRange = false; // No need to change, as at least one entry is outside the range
-      }
-      allDatesInRange = true; // If this point is reached, it means all entries so far are within the range
+      return flightDate >= queryStartDate && flightDate <= queryEndDate;
     });
 
     console.log("isSubset : " + isSubset)
@@ -545,46 +545,56 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     const allFlightsIds = allFlightsWithSameNetworkId.map(flight => flight._id.toString());
 
     if (existingFlights.length === 0) {
-      // Add rotation details
+      // Case A: No row is found — populate new flights in Master table
       const rotationDetailsId = await addRotationDetails(req, res);
-
-      // a. If no row is found, populate new flights in Master table
       await AddDataFromRotations(req, res, rotationDetailsId);
+
+      // Update RotationSummary totals
+      await updateRotationSummaryTotals(userId, rotationNumber);
 
       return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.' });
 
     } else if ((networkIdToCheck && isSubset && isDateRangeValid) || (existingFlightsIds.every(id => allFlightsIds.includes(id)) && allDatesInRange)) {
-
-      // Add rotation details
+      // Case B: Rows found for all dates — update rotationNumber in existing flights
       const rotationDetailsId = await addRotationDetails(req, res);
 
-      // b. If rows are found for all dates, update rotationNumber in existing flights
       const historyPromises = existingFlights.map(async (flight) => {
-        // Create a copy of the flight for FlightsHistory
         const flightHistory = new FlightHistory({
-          ...flight._doc, // Copy all properties from the original flight
+          ...flight._doc,
           addedByRotation: `${rotationNumber}-${depNumber - 1}`,
           flightId: flight._id
         });
-
-        // Save the flight history document
         await flightHistory.save();
 
-        // Update the original flight
         await Flights.findByIdAndUpdate(flight._id, {
           rotationNumber: rotationNumber,
           addedByRotation: `${rotationNumber}-${depNumber}`
         });
       });
 
-      // Wait for all history operations to complete
       await Promise.all(historyPromises);
+
+      // Update RotationSummary totals
+      await updateRotationSummaryTotals(userId, rotationNumber);
 
       return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.' });
     } else {
+      // Case C: Rows found on at least one date — erase and repopulate
+      const rotationDetailsId = await addRotationDetails(req, res);
 
-      await RotationSummary.deleteMany({ rotationNumber: rotationNumber, userId: userId });
-      return res.status(500).json({ message: 'Data Inconsistent', flightNumber });
+      const result = await eraseAndRepopulateMasterTable(
+        req, res, userId, arrStn, bt, depNumber, depStn,
+        datesInRange, flightNumber, std, sta, variant,
+        rotationNumber, existingFlights, rotationDetailsId
+      );
+
+      if (result.success) {
+        // Update RotationSummary totals
+        await updateRotationSummaryTotals(userId, rotationNumber);
+        return res.status(200).json({ message: 'Master table erased and repopulated successfully.' });
+      } else {
+        return res.status(500).json({ message: 'Error erasing and repopulating master table', flightNumber });
+      }
     }
 
   } catch (error) {
@@ -592,6 +602,44 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     return res.status(500).json({ success: false, message: 'An error occurred while modifying flights.' });
   }
 };
+// Helper: update RotationSummary computed totals after adding a rotation detail
+const updateRotationSummaryTotals = async (userId, rotationNumber) => {
+  try {
+    const details = await RotationDetails.find({ rotationNumber, userId });
+    let totalBtMinutes = 0;
+    let totalGtMinutes = 0;
+
+    details.forEach(d => {
+      if (d.bt && /^\d{2}:\d{2}$/.test(d.bt)) {
+        const [h, m] = d.bt.split(':').map(Number);
+        totalBtMinutes += h * 60 + m;
+      }
+      if (d.gt && /^\d{2}:\d{2}$/.test(d.gt)) {
+        const [h, m] = d.gt.split(':').map(Number);
+        totalGtMinutes += h * 60 + m;
+      }
+    });
+
+    const bhTotal = `${Math.floor(totalBtMinutes / 60).toString().padStart(2, '0')}:${(totalBtMinutes % 60).toString().padStart(2, '0')}`;
+    const gtTotal = `${Math.floor(totalGtMinutes / 60).toString().padStart(2, '0')}:${(totalGtMinutes % 60).toString().padStart(2, '0')}`;
+    const totalMinutes = totalBtMinutes + totalGtMinutes;
+    const rotationTotalTime = `${Math.floor(totalMinutes / 60).toString().padStart(2, '0')}:${(totalMinutes % 60).toString().padStart(2, '0')}`;
+
+    // Compute firstDepLastArr
+    const firstDep = details.length > 0 ? details[0].depStn : '';
+    const lastArr = details.length > 0 ? details[details.length - 1].arrStn : '';
+    const firstDepLastArr = firstDep && lastArr ? `${firstDep}-${lastArr}` : '';
+
+    await RotationSummary.findOneAndUpdate(
+      { rotationNumber, userId },
+      { bhTotal, gtTotal, rotationTotalTime, firstDepLastArr },
+      { upsert: false }
+    );
+  } catch (error) {
+    console.error('Error updating RotationSummary totals:', error);
+  }
+};
+
 const deleteCompleteRotation = async (req, res) => {
   const userId = req.user.id;
   const rotationNumber = req.body.rotationNumber;
@@ -599,27 +647,27 @@ const deleteCompleteRotation = async (req, res) => {
   const totalDepNumber = req.body.totalDepNumber;
 
   try {
-    for (let depNumber = totalDepNumber; depNumber >= 0; depNumber--) {
+    for (let depNumber = totalDepNumber; depNumber > 0; depNumber--) {
       const addedByRotationPrev = `${rotationNumber}-${depNumber - 1}`;
       const addedByRotationCurrent = `${rotationNumber}-${depNumber}`;
 
       const sectorHistoryEntries = await SectorHistory.find({
-        addedByRotation: { $in: addedByRotationPrev },
+        addedByRotation: addedByRotationPrev,
         userId: userId
       });
 
       const flightHistoryEntries = await FlightHistory.find({
-        addedByRotation: { $in: addedByRotationPrev },
+        addedByRotation: addedByRotationPrev,
         userId: userId
       });
 
       const dataHistoryEntries = await DataHistory.find({
-        addedByRotation: { $in: addedByRotationPrev },
+        addedByRotation: addedByRotationPrev,
         userId: userId
       });
 
       const stationHistoryEntries = await StationsHistory.find({
-        addedByRotation: { $in: addedByRotationPrev },
+        addedByRotation: addedByRotationPrev,
         userId: userId
       });
 
@@ -644,6 +692,7 @@ const deleteCompleteRotation = async (req, res) => {
         // If depNumber is 1, exclude the addedByRotation field
         if (parseInt(depNumber) === 1) {
           delete flightEntryData.addedByRotation;
+          flightEntryData.rotationNumber = null;
         }
 
         await Flights.deleteOne({ _id: flightHistoryEntry.flightId });
@@ -686,10 +735,10 @@ const deleteCompleteRotation = async (req, res) => {
       }
 
       // Always delete the entries with addedByRotation as addedByRotationCurrent from the sector schema
-      // await Sector.deleteMany({ addedByRotation: { $in: addedByRotationCurrent } });
-      // await Flights.deleteMany({ addedByRotation: { $in: addedByRotationCurrent } });
-      // await Data.deleteMany({ addedByRotation: { $in: addedByRotationCurrent } });
-      // await Stations.deleteMany({ addedByRotation: { $in: addedByRotationCurrent } });
+      // await Sector.deleteMany({ addedByRotation: addedByRotationCurrent });
+      // await Flights.deleteMany({ addedByRotation: addedByRotationCurrent });
+      // await Data.deleteMany({ addedByRotation: addedByRotationCurrent });
+      // await Stations.deleteMany({ addedByRotation: addedByRotationCurrent });
     }
 
     // Delete entries from RotationDetails model
@@ -697,6 +746,16 @@ const deleteCompleteRotation = async (req, res) => {
 
     // Delete entries from RotationSummary model
     await RotationSummary.deleteMany({ rotationNumber: rotationNumber, userId: userId });
+
+    // Delete 'Y' for this rotation in RotationOccurrence table
+    const rotNumInt = parseInt(rotationNumber);
+    if (rotNumInt >= 1 && rotNumInt <= 7) {
+      const rotationField = `rotation_${rotNumInt}`;
+      await RotationOccurrence.updateMany(
+        { [rotationField]: 'Y', userId: userId }, // <-- Added userId constraint
+        { $set: { [rotationField]: 'N' } }
+      );
+    }
 
     // await createConnections(userId);
 
@@ -714,10 +773,10 @@ const deletePrevInRotation = async (req, res) => {
 
   try {
 
-    const sectorHistoryEntries = await SectorHistory.find({ addedByRotation: { $in: addedByRotationPrev } });
-    const flightHistoryEntries = await FlightHistory.find({ addedByRotation: { $in: addedByRotationPrev } });
-    const dataHistoryEntries = await DataHistory.find({ addedByRotation: { $in: addedByRotationPrev } });
-    const stationHistoryEntries = await StationsHistory.find({ addedByRotation: { $in: addedByRotationPrev } });
+    const sectorHistoryEntries = await SectorHistory.find({ addedByRotation: addedByRotationPrev, userId: userId });
+    const flightHistoryEntries = await FlightHistory.find({ addedByRotation: addedByRotationPrev, userId: userId });
+    const dataHistoryEntries = await DataHistory.find({ addedByRotation: addedByRotationPrev, userId: userId });
+    const stationHistoryEntries = await StationsHistory.find({ addedByRotation: addedByRotationPrev, userId: userId });
 
     for (const sectorHistoryEntry of sectorHistoryEntries) {
       let sectorEntryData = { ...sectorHistoryEntry._doc };
@@ -744,6 +803,7 @@ const deletePrevInRotation = async (req, res) => {
 
 
         delete flightEntryData.addedByRotation;
+        flightEntryData.rotationNumber = null;
       }
 
       await Flights.deleteOne({ _id: flightHistoryEntry.flightId });
