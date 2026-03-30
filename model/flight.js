@@ -12,7 +12,7 @@ const flightSchema = new mongoose.Schema(
     arrStn: { type: String },
     sector: { type: String },
     variant: { type: String },
-    
+
     // Numbers
     seats: { type: Number },
     CargoCapT: { type: Number },
@@ -24,8 +24,8 @@ const flightSchema = new mongoose.Schema(
     cargoAtk: { type: Number },
     cargoRtk: { type: Number },
     fh: { type: Number },
-    bh: { type: Number }, 
-    
+    bh: { type: Number },
+
     domIntl: { type: String },
     userTag1: { type: String },
     userTag2: { type: String },
@@ -38,10 +38,14 @@ const flightSchema = new mongoose.Schema(
     rotationNumber: { type: String },
     beyondODs: { type: Boolean, default: false },
     behindODs: { type: Boolean, default: false },
-    addedByRotation : { type: String },
+    addedByRotation: { type: String },
     effFromDt: { type: Date },
     effToDt: { type: Date },
     dow: { type: String },
+    aircraft: {
+      msn: { type: Number, required: false },
+      registration: { type: String, required: false }
+    },
   }
 );
 

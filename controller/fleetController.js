@@ -205,6 +205,11 @@ exports.bulkUpsertFleet = async (req, res) => {
             // Auto-uppercase registration
             if (updateData.regn) updateData.regn = updateData.regn.trim().toUpperCase();
 
+            // 👇 ADD THESE TWO LINES: Convert empty strings to null so Mongoose doesn't crash
+            if (updateData.entry === "") updateData.entry = null;
+            if (updateData.exit === "") updateData.exit = null;
+            // 👆 ------------------------------------------------------------------------
+
             // Ensure SN exists
             if (!updateData.sn) {
                 throw new Error(`Asset at row ${index + 1} is missing a Serial Number (SN)`);

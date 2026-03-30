@@ -2,21 +2,31 @@ const xlsx = require('xlsx');
 const Assignment = require('../model/assignment');
 const Flight = require('../model/flight');
 const Fleet = require('../model/fleet');
-const GroundDay = require('../model/groundDay'); // 👉 IMPORT THE NEW MODEL
+const GroundDay = require('../model/groundDay');
 const moment = require('moment');
 
+// 🛠️ FIX 1: Enforce UTC to prevent dates drifting by 1 day based on server timezone
 const parseExcelDate = (value) => {
     if (!value) return null;
     if (value instanceof Date && !isNaN(value)) {
-        return moment(value).startOf('day').toDate();
+        return moment.utc(moment(value).format('YYYY-MM-DD')).toDate();
     }
     if (!isNaN(value)) {
-        const excelEpoch = new Date(1899, 11, 30);
-        return moment(new Date(excelEpoch.getTime() + value * 86400000)).startOf('day').toDate();
+        const excelEpoch = Date.UTC(1899, 11, 30);
+        return moment.utc(excelEpoch + value * 86400000).toDate();
     }
     const formats = ["DD-MM-YYYY", "DD/MM/YYYY", "YYYY-MM-DD", "MM/DD/YYYY", "DD-MMM-YY", "D MMM YY"];
-    const m = moment(value, formats, true);
+    const m = moment.utc(value, formats, true);
     return m.isValid() ? m.startOf('day').toDate() : null;
+};
+
+// Helper to find Excel columns even if they have weird spaces or casing
+const getExcelValue = (row, possibleKeys) => {
+    for (const key of Object.keys(row)) {
+        const cleanKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (possibleKeys.includes(cleanKey)) return row[key];
+    }
+    return null;
 };
 
 exports.uploadAssignments = async (req, res) => {
@@ -38,13 +48,13 @@ exports.uploadAssignments = async (req, res) => {
 
         let skipped = 0;
 
-        // 🔥 PASS 1: CLEAN + NORMALIZE
         for (let i = 0; i < rawData.length; i++) {
             const row = rawData[i];
 
-            const dateStr = row['Date'] || row['date'] || row['DATE'] || row['date '];
-            const flightNum = row['Flight Number'] || row['flight number'] || row['flight #'] || row['flight#'] || row['Flight #'] || row['flight'] || row['flightno'];
-            const acft = row['ACFT'] || row['acft'] || row['registration'];
+            // 🛡️ FIX 1: Robust Header Extraction
+            const dateStr = getExcelValue(row, ['date']);
+            const flightNum = getExcelValue(row, ['flightnumber', 'flight', 'flightno', 'flight number', 'flight no', 'flight #', 'flight#', 'Flight #', 'Flight #', 'Flight #']);
+            const acft = getExcelValue(row, ['acft', 'registration', 'aircraft']);
 
             const parsedDate = parseExcelDate(dateStr);
 
@@ -53,9 +63,9 @@ exports.uploadAssignments = async (req, res) => {
                 continue;
             }
 
-            const flight = flightNum.toString().trim().toUpperCase();
-            const cleanAcft = acft.toString().trim().toUpperCase();
-            const dateKey = moment(parsedDate).format("YYYY-MM-DD");
+            const flight = String(flightNum).trim().toUpperCase();
+            const cleanAcft = String(acft).trim().toUpperCase();
+            const dateKey = moment.utc(parsedDate).format("YYYY-MM-DD");
 
             validRows.push({
                 assignDate: parsedDate,
@@ -70,54 +80,61 @@ exports.uploadAssignments = async (req, res) => {
         }
 
         if (validRows.length === 0) {
-            return res.status(400).json({ message: "No valid rows found" });
+            return res.status(400).json({ message: "No valid rows found. Check your Excel column names." });
         }
 
         const minDate = new Date(Math.min(...dateSet));
         const maxDate = new Date(Math.max(...dateSet));
-        const flightArray = [...flightSet];
-        const acftArray = [...acftSet];
 
-        // 🔥 FETCH FLIGHTS, FLEET, AND GROUND DAYS IN PARALLEL
+        // 🛡️ FIX 2: Case-Insensitive regex for MongoDB lookups
+        const flightRegexArray = [...flightSet].map(f => new RegExp(`^${f}$`, 'i'));
+        const acftRegexArray = [...acftSet].map(a => new RegExp(`^${a}$`, 'i'));
+
         const [flights, fleetData, groundDays] = await Promise.all([
             Flight.find({
                 date: { $gte: minDate, $lte: maxDate },
-                flight: { $in: flightArray }
-            }).select('flight date rotationNumber').lean(),
+                flight: { $in: flightRegexArray }
+            }).select('_id flight date rotationNumber').lean(),
 
             Fleet.find({
-                regn: { $in: acftArray }
-            }).select('sn regn entry exit').lean(), // Added 'sn' to select
+                regn: { $in: acftRegexArray }
+            }).select('sn regn entry exit').lean(),
 
             GroundDay.find({
                 date: { $gte: minDate, $lte: maxDate }
             }).select('msn date event').lean()
         ]);
 
-        // 🔥 BUILD FAST IN-MEMORY MAPS
         const flightMap = new Map();
         for (const f of flights) {
-            const key = `${moment(f.date).format("YYYY-MM-DD")}_${f.flight.toUpperCase()}`;
+            if (!f.flight) continue;
+            const key = `${moment.utc(f.date).format("YYYY-MM-DD")}_${String(f.flight).trim().toUpperCase()}`;
             flightMap.set(key, f);
         }
 
         const fleetMap = new Map();
         for (const asset of fleetData) {
-            fleetMap.set(asset.regn.toUpperCase(), asset);
+            if (asset.regn) fleetMap.set(String(asset.regn).trim().toUpperCase(), asset);
         }
 
         const groundDayMap = new Map();
         for (const gd of groundDays) {
-            // Key format: YYYY-MM-DD_MSN
-            const key = `${moment(gd.date).format("YYYY-MM-DD")}_${gd.msn}`;
+            if (!gd.msn) continue;
+            const key = `${moment.utc(gd.date).format("YYYY-MM-DD")}_${gd.msn}`;
             groundDayMap.set(key, gd);
         }
 
-        // 🔥 BUILD BULK OPS WITH ALL VALIDATIONS
-        const bulkOperations = [];
+        const assignmentBulkOps = [];
+        const flightBulkOps = [];
+        const seenFlights = new Set();
+
+        // Diagnostic Counters
         let notFoundCount = 0;
-        let outsideDatesCount = 0;
+        let missingFleetDBCount = 0;
+        let preEntryCount = 0;
+        let postExitCount = 0;
         let groundConflictCount = 0;
+        let successfulAcftLinks = 0;
 
         for (const row of validRows) {
             const flightKey = `${row.dateKey}_${row.flight}`;
@@ -127,71 +144,78 @@ exports.uploadAssignments = async (req, res) => {
             const errors = [];
             let isValid = true;
             let removedReason = null;
-            let assignedAcft = row.acft; // Assume it works initially
+            let assignedAcft = row.acft;
 
-            // 1. Flight Validation
             if (!flightRecord) {
                 notFoundCount++;
                 isValid = false;
                 errors.push("Flight not found in master schedule");
             }
 
-            // 2. Fleet Validations
-            if (fleetRecord) {
-                const assignMom = moment(row.assignDate);
-                const entryMom = fleetRecord.entry ? parseExcelDate(fleetRecord.entry) : null;
-                const exitMom = fleetRecord.exit ? parseExcelDate(fleetRecord.exit) : null;
-                const msn = fleetRecord.sn; // Extract MSN from fleet data
+            // 🛡️ THE VALIDATION GAUNTLET
+            if (!fleetRecord) {
+                isValid = false;
+                assignedAcft = null;
+                missingFleetDBCount++;
+                errors.push(`Aircraft ${row.acft} not found in Fleet master`);
+            } else {
+                const assignMom = moment.utc(row.assignDate);
+                // Safe date comparisons
+                const entryMom = fleetRecord.entry ? moment.utc(fleetRecord.entry).startOf('day') : null;
+                const exitMom = fleetRecord.exit ? moment.utc(fleetRecord.exit).endOf('day') : null;
+                const msn = fleetRecord.sn;
 
-                // Rule A: Outside Fleet Dates
-                if (entryMom && assignMom.isBefore(moment(entryMom).startOf('day'))) {
+                if (entryMom && assignMom.isBefore(entryMom)) {
                     isValid = false;
                     assignedAcft = null;
                     removedReason = "OUTSIDE_FLEET_DATES";
-                    errors.push(`Date precedes fleet entry (${moment(entryMom).format('DD-MMM-YY')})`);
-                    outsideDatesCount++;
+                    preEntryCount++;
+                    errors.push(`Date precedes fleet entry`);
                 }
-
-                if (exitMom && assignMom.isAfter(moment(exitMom).endOf('day'))) {
+                else if (exitMom && assignMom.isAfter(exitMom)) {
                     isValid = false;
                     assignedAcft = null;
                     removedReason = "OUTSIDE_FLEET_DATES";
-                    errors.push(`Date succeeds fleet exit (${moment(exitMom).format('DD-MMM-YY')})`);
-                    outsideDatesCount++;
+                    postExitCount++;
+                    errors.push(`Date succeeds fleet exit`);
                 }
+                else {
+                    const groundKey = `${row.dateKey}_${msn}`;
+                    const groundRecord = groundDayMap.get(groundKey);
 
-                // Rule B: Ground Day Conflict (Scheduled Maintenance)
-                const groundKey = `${row.dateKey}_${msn}`;
-                const groundRecord = groundDayMap.get(groundKey);
-
-                if (groundRecord) {
-                    isValid = false;
-                    assignedAcft = null;
-                    removedReason = "GROUND_DAY_CONFLICT";
-                    const eventName = groundRecord.event ? ` (${groundRecord.event})` : '';
-                    errors.push(`Aircraft ${msn} is on ground${eventName} for this date`);
-                    groundConflictCount++;
+                    if (groundRecord) {
+                        isValid = false;
+                        assignedAcft = null;
+                        removedReason = "GROUND_DAY_CONFLICT";
+                        groundConflictCount++;
+                        errors.push(`Aircraft ${msn} is on ground for this date`);
+                    }
                 }
             }
 
-            // Get Rotation Number
+            if (assignedAcft) successfulAcftLinks++;
+
             let rotationNum = null;
             if (flightRecord?.rotationNumber) {
-                rotationNum = parseInt(flightRecord.rotationNumber.replace(/\D/g, ''), 10) || null;
+                rotationNum = parseInt(String(flightRecord.rotationNumber).replace(/\D/g, ''), 10) || null;
             }
 
-            // Create Operation
-            bulkOperations.push({
+            // 🛡️ FIX 3: Safe MSN Parsing (Strips letters if SN is "MSN-1234")
+            let msnVal = null;
+            if (fleetRecord && assignedAcft && fleetRecord.sn) {
+                const strippedSn = String(fleetRecord.sn).replace(/\D/g, ''); // Keeps only numbers
+                if (strippedSn.length > 0) msnVal = Number(strippedSn);
+            }
+
+            assignmentBulkOps.push({
                 updateOne: {
-                    filter: {
-                        date: row.assignDate,
-                        flightNumber: row.flight
-                    },
+                    filter: { date: row.assignDate, flightNumber: row.flight },
                     update: {
                         $set: {
                             date: row.assignDate,
                             flightNumber: row.flight,
-                            'aircraft.registration': assignedAcft, // Null if validation fails
+                            'aircraft.registration': assignedAcft,
+                            'aircraft.msn': msnVal,
                             rotationNumber: rotationNum,
                             isValid: isValid,
                             validationErrors: errors,
@@ -201,22 +225,55 @@ exports.uploadAssignments = async (req, res) => {
                     upsert: true
                 }
             });
+
+            if (flightRecord && flightRecord._id) {
+                const uniqueId = flightRecord._id.toString();
+                if (!seenFlights.has(uniqueId)) {
+                    flightBulkOps.push({
+                        updateOne: {
+                            filter: { _id: flightRecord._id },
+                            update: {
+                                $set: {
+                                    'aircraft.registration': assignedAcft,
+                                    'aircraft.msn': msnVal
+                                }
+                            }
+                        }
+                    });
+                    seenFlights.add(uniqueId);
+                }
+            }
         }
 
-        if (bulkOperations.length > 0) {
-            await Assignment.bulkWrite(bulkOperations, { ordered: false });
-        }
+        const dbPromises = [];
+        if (assignmentBulkOps.length > 0) dbPromises.push(Assignment.bulkWrite(assignmentBulkOps, { ordered: false }));
+        if (flightBulkOps.length > 0) dbPromises.push(Flight.bulkWrite(flightBulkOps, { ordered: false }));
 
+        await Promise.all(dbPromises);
         console.timeEnd("⚡ UploadProcessing");
 
+        // 🛡️ DIAGNOSTIC LOGGING: Watch your terminal!
+        console.log("=== UPLOAD DIAGNOSTICS ===");
+        console.log(`Total Rows Processed: ${validRows.length}`);
+        console.log(`✅ Successfully Assigned ACFT: ${successfulAcftLinks}`);
+        console.log(`❌ Failed: Missing from Fleet DB: ${missingFleetDBCount}`);
+        console.log(`❌ Failed: Pre-Entry Date: ${preEntryCount}`);
+        console.log(`❌ Failed: Post-Exit Date: ${postExitCount}`);
+        console.log(`❌ Failed: Ground Day Conflict: ${groundConflictCount}`);
+        console.log("==========================");
+
         res.status(200).json({
-            message: "Upload complete with all validations",
-            total: rawData.length,
-            valid: validRows.length,
-            skipped,
-            flightNotFound: notFoundCount,
-            fleetDateViolations: outsideDatesCount,
-            groundConflicts: groundConflictCount // Added to the response payload!
+            message: "Upload and Flight Sync complete",
+            diagnostics: {
+                totalValidRows: validRows.length,
+                successfullyAssigned: successfulAcftLinks,
+                rejections: {
+                    missingFromFleetDB: missingFleetDBCount,
+                    preEntryDates: preEntryCount,
+                    postExitDates: postExitCount,
+                    groundConflicts: groundConflictCount
+                }
+            }
         });
 
     } catch (error) {
@@ -225,18 +282,20 @@ exports.uploadAssignments = async (req, res) => {
     }
 };
 
-
 exports.getWeeklyAssignments = async (req, res) => {
     try {
         const { weekEnding } = req.query;
         if (!weekEnding) {
             return res.status(400).json({ message: "weekEnding parameter is required" });
         }
-        const endDate = moment(weekEnding).endOf('day').toDate();
-        const startDate = moment(weekEnding).subtract(6, 'days').startOf('day').toDate();
+        // 🛠️ FIX 5: Enforce UTC bounds on query to align with standard Mongoose DB queries
+        const endDate = moment.utc(weekEnding).endOf('day').toDate();
+        const startDate = moment.utc(weekEnding).subtract(6, 'days').startOf('day').toDate();
+
         const assignments = await Assignment.find({ date: { $gte: startDate, $lte: endDate } })
             .sort({ rotationNumber: 1, flightNumber: 1, date: 1 })
             .lean();
+
         res.status(200).json({ data: assignments });
     } catch (error) {
         console.error("🔥 Fetch Error:", error);

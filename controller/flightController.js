@@ -92,7 +92,7 @@ const searchFlights = async (req, res) => {
     const {
       flight, depStn, std, bt, sta, arrStn, variant, date, day, rotations,
       seats, cargoT, dist, pax, ask, rsk, cargoAtk, cargoRtk, domIntl,
-      userTag1, userTag2, remarks1, remarks2, page, limit,
+      userTag1, userTag2, remarks1, remarks2, acftType, page, limit,
     } = req.body;
 
     // Build a query object
@@ -102,6 +102,22 @@ const searchFlights = async (req, res) => {
     const addRegexFilter = (field, value) => {
       if (value) query[field] = { $regex: value, $options: 'i' };
     };
+
+
+    // 🚀 THE BULLETPROOF ACFT FILTER
+    if (acftType) {
+      // We ONLY search the fields that actually exist in your new schema
+      const orConditions = [
+        { 'aircraft.registration': { $regex: acftType, $options: 'i' } }
+      ];
+
+      // If the user typed a number (like '1' or '1021'), also search the exact MSN
+      if (!isNaN(acftType) && acftType.trim() !== '') {
+        orConditions.push({ 'aircraft.msn': Number(acftType) });
+      }
+
+      query.$or = orConditions;
+    }
 
     addRegexFilter('flight', flight);
     addRegexFilter('depStn', depStn);
