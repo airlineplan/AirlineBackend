@@ -53,7 +53,7 @@ exports.uploadAssignments = async (req, res) => {
 
             // 🛡️ FIX 1: Robust Header Extraction
             const dateStr = getExcelValue(row, ['date']);
-            const flightNum = getExcelValue(row, ['flightnumber', 'flight', 'flightno', 'flight number', 'flight no', 'flight #', 'flight#', 'Flight #', 'Flight #', 'Flight #']);
+            const flightNum = getExcelValue(row, ['flightnumber', 'flight', 'flightno', 'flight number', 'flight no', 'flight #', 'flight#', 'Flight #', 'Flight # ']);
             const acft = getExcelValue(row, ['acft', 'registration', 'aircraft']);
 
             const parsedDate = parseExcelDate(dateStr);
