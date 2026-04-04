@@ -176,37 +176,42 @@ const getFlightsWoRotations = async (req, res) => {
 
     const dowRegex = regexForFindingSuperset(dow);
 
-    // Correction for from Date
+    // Parse dates — no UTC offset correction needed (dates are already calendar strings)
     const fromDate = new Date(effFromDate);
-    fromDate.setUTCDate(fromDate.getUTCDate() + 1);
     fromDate.setUTCHours(0, 0, 0, 0);
-    const formattedFromDate = fromDate.toISOString().replace(/\.\d{3}Z$/, "+00:00");
 
-    // Correction for To Date
     const toDate = new Date(effToDate);
-    toDate.setUTCDate(toDate.getUTCDate() + 1);
-    toDate.setUTCHours(0, 0, 0, 0);
-    const formattedToDate = toDate.toISOString().replace(/\.\d{3}Z$/, "+00:00");
+    toDate.setUTCHours(23, 59, 59, 999);
+
+    // For the effFromDt / effToDt overlap filter, use the raw ISO dates
+    const formattedFromDate = fromDate.toISOString();
+    const formattedToDate   = toDate.toISOString();
 
     let filter = {
       userId: id,
       isComplete: true,
       $or: [{ rotationNumber: { $exists: false } }, { rotationNumber: null }],
       variant: selectedVariant,
-      effFromDt: { $lte: formattedFromDate },
-      effToDt: { $gte: formattedToDate },
+      effFromDt: { $lte: new Date(formattedToDate) },
+      effToDt:   { $gte: new Date(formattedFromDate) },
       dow: { $regex: dowRegex, $options: 'i' }
     };
 
     const datesArray = [];
+    const dowNums = dow.split('').map(Number); // e.g. [1,2,3,4,5]
 
-    // Iterate through each date between fromDate and toDate
-    for (let date = fromDate; date <= toDate; date.setDate(date.getDate() + 1)) {
-      const dayOfWeek = date.getDay(); // 0 for Sunday, 1 for Monday, ..., 6 for Saturday
-
-      // Check if the dayOfWeek matches any selectedDow
-      if (dow.includes(String(dayOfWeek))) {
-        datesArray.push(new Date(date)); // Add the date to the array
+    // Walk each calendar day in [fromDate, toDate]
+    for (
+      let date = new Date(fromDate);
+      date <= toDate;
+      date.setUTCDate(date.getUTCDate() + 1)
+    ) {
+      // JS getDay(): 0=Sun,1=Mon,...,6=Sat
+      // System DOW:  1=Mon,...,6=Sat,7=Sun
+      const jsDow = date.getUTCDay();
+      const sysDow = jsDow === 0 ? 7 : jsDow; // convert Sunday 0→7
+      if (dowNums.includes(sysDow)) {
+        datesArray.push(new Date(date));
       }
     }
 

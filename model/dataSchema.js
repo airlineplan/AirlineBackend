@@ -156,7 +156,9 @@ async function updateBeyondODsAndBehindODs(updatedDoc, originalDoc, domFlights, 
 }
 
 function getTzMinutes(tzString) {
-  if (!tzString || !tzString.startsWith("UTC")) return 0;
+  if (!tzString || !tzString.startsWith("UTC")) return null;
+
+  if (tzString === "UTC") return 0;
 
   const sign = tzString.includes("-") ? -1 : 1;
   const timePart = tzString.replace(/UTC[+-]/, "");
@@ -179,11 +181,11 @@ async function calculateSTA(doc) {
     userId: doc.userId
   });
 
-  let depTzMins = 0;
-  let arrTzMins = 0;
+  let depTzMins = null;
+  let arrTzMins = null;
 
   const selectTz = (station) => {
-    if (!station) return 0;
+    if (!station) return null;
 
     let tz = station.stdtz;
 
@@ -208,7 +210,9 @@ async function calculateSTA(doc) {
 
   if (isNaN(stdH) || isNaN(btH)) return;
 
-  const diffInTzMins = arrTzMins - depTzMins;
+  const diffInTzMins = (depTzMins !== null && arrTzMins !== null && !isNaN(depTzMins) && !isNaN(arrTzMins)) 
+    ? arrTzMins - depTzMins 
+    : 0;
 
   let totalMins =
     (stdH * 60 + (stdM || 0)) +

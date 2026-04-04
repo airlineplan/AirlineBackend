@@ -66,7 +66,6 @@ const {
   isValidDepStn
 } = require('./controllerUtils');
 
-const { AddDataFromRotations } = require('./dataController');
 const createNewFlights = async (userId, flightNumber, depStn, std, sta, arrStn, variant, dates, rotationNumber) => {
 
   const newFlights = dates.map(date => ({
@@ -157,6 +156,7 @@ const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNu
     });
 
     // Step 3: Repopulate Master table
+    const { AddDataFromRotations } = require('./dataController');
     await AddDataFromRotations(req, res, rotationDetailsId);
 
     return { success: true };
@@ -547,6 +547,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     if (existingFlights.length === 0) {
       // Case A: No row is found — populate new flights in Master table
       const rotationDetailsId = await addRotationDetails(req, res);
+      const { AddDataFromRotations } = require('./dataController');
       await AddDataFromRotations(req, res, rotationDetailsId);
 
       // Update RotationSummary totals
@@ -557,6 +558,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     } else if ((networkIdToCheck && isSubset && isDateRangeValid) || (existingFlightsIds.every(id => allFlightsIds.includes(id)) && allDatesInRange)) {
       // Case B: Rows found for all dates — update rotationNumber in existing flights
       const rotationDetailsId = await addRotationDetails(req, res);
+      const { AddDataFromRotations } = require('./dataController');
 
       const historyPromises = existingFlights.map(async (flight) => {
         const flightHistory = new FlightHistory({
@@ -861,7 +863,6 @@ const deletePrevInRotation = async (req, res) => {
 
 module.exports = {
   deleteRotation,
-  AddDataFromRotations,
   singleRotationDetail,
   getRotations,
   getNextRotationNumber,

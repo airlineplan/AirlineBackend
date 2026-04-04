@@ -817,9 +817,7 @@ const getViewData = async (req, res) => {
       weekStartInViewTZ.getTime() - offsetMinutes * 60000
     );
 
-    const endDate = new Date(startDate);
-    endDate.setUTCDate(startDate.getUTCDate() + 6);
-    endDate.setUTCHours(23, 59, 59, 999);
+    const endDate = new Date(startDate.getTime() + 7 * 24 * 60 * 60 * 1000 - 1);
 
     /* ---------------------------------------------------------
        2️⃣  FETCH ALL FLIGHTS IN WEEK
