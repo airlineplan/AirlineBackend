@@ -173,31 +173,26 @@ const getFlightsWoRotations = async (req, res) => {
     const id = req.user.id;
 
     const { allowedDeptStn, allowedStdLt, selectedVariant, effToDate, effFromDate, dow } = req.body;
-
     const dowRegex = regexForFindingSuperset(dow);
-
     // Parse dates — no UTC offset correction needed (dates are already calendar strings)
     const fromDate = new Date(effFromDate);
     fromDate.setUTCHours(0, 0, 0, 0);
-
     const toDate = new Date(effToDate);
     toDate.setUTCHours(23, 59, 59, 999);
-
     // For the effFromDt / effToDt overlap filter, use the raw ISO dates
     const formattedFromDate = fromDate.toISOString();
-    const formattedToDate   = toDate.toISOString();
-
+    const formattedToDate = toDate.toISOString();
     let filter = {
       userId: id,
       isComplete: true,
       $or: [{ rotationNumber: { $exists: false } }, { rotationNumber: null }],
       variant: selectedVariant,
       effFromDt: { $lte: new Date(formattedToDate) },
-      effToDt:   { $gte: new Date(formattedFromDate) },
+      effToDt: { $gte: new Date(formattedFromDate) },
       dow: { $regex: dowRegex, $options: 'i' }
     };
-
     const datesArray = [];
+
     const dowNums = dow.split('').map(Number); // e.g. [1,2,3,4,5]
 
     // Walk each calendar day in [fromDate, toDate]

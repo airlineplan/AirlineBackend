@@ -210,8 +210,8 @@ async function calculateSTA(doc) {
 
   if (isNaN(stdH) || isNaN(btH)) return;
 
-  const diffInTzMins = (depTzMins !== null && arrTzMins !== null && !isNaN(depTzMins) && !isNaN(arrTzMins)) 
-    ? arrTzMins - depTzMins 
+  const diffInTzMins = (depTzMins !== null && arrTzMins !== null && !isNaN(depTzMins) && !isNaN(arrTzMins))
+    ? arrTzMins - depTzMins
     : 0;
 
   let totalMins =
@@ -409,20 +409,20 @@ async function createFlgts(doc) {
         userId: doc.userId,
         networkId: doc._id,
         rotationNumber: doc.rotationNumber,
-        isComplete: !!doc.networkId,
+        isComplete: doc.addedByRotation ? true : !!doc.networkId,
         addedByRotation: doc.addedByRotation,
         effFromDt: doc.effFromDt,
         effToDt: doc.effToDt,
         dow: doc.dow,
         bh: bh,
         fh: fh,
-        ft: ft, 
+        ft: ft,
         acftType: doc.variant,
       });
 
       try {
         await newFlight.save();
-        
+
         //tracker for creating connections
         userData.findByIdAndUpdate(doc.userId, { todoConnection: true });
 

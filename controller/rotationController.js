@@ -736,11 +736,30 @@ const deleteCompleteRotation = async (req, res) => {
         await StationsHistory.deleteOne({ _id: stationHistoryEntry._id });
       }
 
-      // Always delete the entries with addedByRotation as addedByRotationCurrent from the sector schema
-      // await Sector.deleteMany({ addedByRotation: addedByRotationCurrent });
-      // await Flights.deleteMany({ addedByRotation: addedByRotationCurrent });
-      // await Data.deleteMany({ addedByRotation: addedByRotationCurrent });
-      // await Stations.deleteMany({ addedByRotation: addedByRotationCurrent });
+      // Case A cleanup: if no history entries existed for this dep leg (it was a brand-new
+      // flight created directly in the rotation), delete the Data/Flights/Sector it created.
+      const hasHistory = (
+        flightHistoryEntries.length > 0 ||
+        dataHistoryEntries.length > 0 ||
+        sectorHistoryEntries.length > 0
+      );
+
+      if (!hasHistory) {
+        const dataEntriesCreatedByLeg = await Data.find({
+          addedByRotation: addedByRotationCurrent,
+          userId: userId
+        });
+
+        for (const dataEntry of dataEntriesCreatedByLeg) {
+          const networkId = dataEntry._id;
+          await Flights.deleteMany({ networkId: networkId.toString() });
+          await Sector.deleteMany({ networkId: networkId.toString() });
+          await Data.deleteOne({ _id: networkId });
+        }
+
+        // Also remove any flights directly tagged (fallback)
+        await Flights.deleteMany({ addedByRotation: addedByRotationCurrent, userId: userId });
+      }
     }
 
     // Delete entries from RotationDetails model
@@ -843,6 +862,40 @@ const deletePrevInRotation = async (req, res) => {
       // If entry exists, add it to the data schema
       await Stations.create(stationEntryData);
       await StationsHistory.deleteOne({ _id: stationHistoryEntry._id });
+    }
+
+    // Case A cleanup: if no history entries existed for this leg (it was a brand-new flight
+    // created from the rotation), we must delete the Data/Flights/Sector entries ourselves.
+    // This mirrors the effect of deleting from the Network page.
+    const hasHistory = (
+      flightHistoryEntries.length > 0 ||
+      dataHistoryEntries.length > 0 ||
+      sectorHistoryEntries.length > 0
+    );
+
+    if (!hasHistory) {
+      // Find and delete Data entries that were created by THIS rotation leg
+      const dataEntriesCreatedByLeg = await Data.find({
+        addedByRotation: addedByRotationCurrent,
+        userId: userId
+      });
+
+      for (const dataEntry of dataEntriesCreatedByLeg) {
+        const networkId = dataEntry._id;
+
+        // Delete all Flights tied to this network entry
+        await Flights.deleteMany({ networkId: networkId.toString() });
+
+        // Delete the Sector entry tied to this network entry
+        await Sector.deleteMany({ networkId: networkId.toString() });
+
+        // Delete the Data entry itself
+        await Data.deleteOne({ _id: networkId });
+      }
+
+      // Also delete any Flights directly tagged with addedByRotationCurrent
+      // (in case they were created without a networkId linkage)
+      await Flights.deleteMany({ addedByRotation: addedByRotationCurrent, userId: userId });
     }
 
     // Delete the document using its _id and userId
