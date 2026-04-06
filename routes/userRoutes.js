@@ -32,6 +32,7 @@ const authController = require("../controller/authController");
 const maintenanceController = require("../controller/maintenanceController");
 const assignmentController = require("../controller/assignmentController");
 const fleetController = require("../controller/fleetController");
+const costController = require("../controller/costController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -91,6 +92,11 @@ user.post("/deletePrevInRotation/", verifyToken, jsonParser, rotationController.
 user.post("/list-page-data", verifyToken, dataController.getListPageData);
 user.get("/view-page-data", verifyToken, dataController.getViewData);
 user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
+
+// --- COST ENDPOINTS ---
+user.get("/cost-config", verifyToken, costController.getCostConfig);
+user.post("/cost-config", verifyToken, jsonParser, costController.saveCostConfig);
+user.post("/cost-page-data", verifyToken, jsonParser, costController.getCostPageData);
 
 // Add this alongside your existing routes
 user.get("/maintenance-dashboard", verifyToken, maintenanceController.getMaintenanceDashboard);
