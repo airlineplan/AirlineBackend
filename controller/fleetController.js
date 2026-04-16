@@ -6,6 +6,13 @@ const AircraftOnwing = require('../model/aircraftOnwing');
 const moment = require('moment');
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
+const normalizeSnKey = (value) => {
+    if (value === null || value === undefined) return "";
+    const raw = String(value).trim().toUpperCase();
+    if (!raw) return "";
+    const digitsOnly = raw.replace(/\D/g, "");
+    return digitsOnly || raw;
+};
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
@@ -15,116 +22,127 @@ exports.getFleetScheduleMetrics = async (req, res) => {
         const { month } = req.query;
         if (!month) return res.status(400).json({ message: "Month is required" });
 
-        const startDt = moment(month, "MMMM YYYY").startOf('month').toDate();
-        // Look back further for Onwing records to get active configurations prior to the month start
-        const endDt = moment(month, "MMMM YYYY").endOf('month').toDate();
+        const startDt = moment.utc(month, "MMMM YYYY").startOf('month').toDate();
+        const endDt = moment.utc(month, "MMMM YYYY").endOf('month').toDate();
 
-        // 1. Fetch data
         const [groundDays, assignments, flights, onwings] = await Promise.all([
-            GroundDay.find({ userId, date: { $gte: startDt, $lte: endDt } }),
-            Assignment.find({ userId, date: { $gte: startDt, $lte: endDt }, isValid: true }),
-            Flight.find({ userId, date: { $gte: startDt, $lte: endDt } }),
-            AircraftOnwing.find({ userId, date: { $lte: endDt } }).sort({ date: 1 }) // Sorted chronologically
+            GroundDay.find({ userId, date: { $gte: startDt, $lte: endDt } })
+                .select("msn date event")
+                .lean(),
+            Assignment.find({ userId, date: { $gte: startDt, $lte: endDt }, isValid: true })
+                .select("date flightNumber aircraft.msn")
+                .lean(),
+            Flight.find({ userId, date: { $gte: startDt, $lte: endDt } })
+                .select("date flight bh fh")
+                .lean(),
+            AircraftOnwing.find({ userId, date: { $lte: endDt } })
+                .select("msn date pos1Esn pos2Esn apun")
+                .sort({ date: 1 })
+                .lean()
         ]);
 
-        const flightMap = {};
-        flights.forEach(f => {
+        const flightMap = new Map();
+        flights.forEach((f) => {
             if (!f.date || !f.flight) return;
-            const dateKey = moment(f.date).format("YYYY-MM-DD");
-            const key = `${dateKey}_${f.flight.trim()}`;
-            if (!flightMap[key]) flightMap[key] = [];
-            flightMap[key].push(f);
+            const dateKey = moment.utc(f.date).format("YYYY-MM-DD");
+            const key = `${dateKey}_${String(f.flight).trim().toUpperCase()}`;
+            if (!flightMap.has(key)) flightMap.set(key, []);
+            flightMap.get(key).push(f);
         });
 
         const metricsMap = {};
-        const groundMap = {}; // Helper to easily find grounded MSNs: groundMap['DD MMM YY']['4120'] = "C-check"
+        const groundMap = {};
 
-        // 2. Process Ground Days for AIRCRAFT
-        groundDays.forEach(gd => {
-            const msn = gd.msn;
-            if (!msn) return;
-            const dateStr = moment(gd.date).format("DD MMM YY");
+        groundDays.forEach((gd) => {
+            const snKey = normalizeSnKey(gd.msn);
+            if (!snKey) return;
+            const dateStr = moment.utc(gd.date).format("DD MMM YY");
 
-            // Populate helper map
             if (!groundMap[dateStr]) groundMap[dateStr] = {};
-            groundMap[dateStr][msn] = gd.event || "Maintenance";
+            groundMap[dateStr][snKey] = gd.event || "Maintenance";
 
-            // Add to main metrics map for the Aircraft row
-            if (!metricsMap[msn]) metricsMap[msn] = {};
-            metricsMap[msn][dateStr] = {
+            if (!metricsMap[snKey]) metricsMap[snKey] = {};
+            metricsMap[snKey][dateStr] = {
                 status: "maintenance",
-                label: gd.event || "Maintenance"
+                label: "0",
+                bh: 0,
+                fh: 0,
+                dep: 0,
+                event: gd.event || "Maintenance"
             };
         });
 
-        // 3. Process Assignments for AIRCRAFT
-        assignments.forEach(assign => {
-            const msn = assign.aircraft?.msn;
-            if (!msn) return;
+        assignments.forEach((assign) => {
+            const snKey = normalizeSnKey(assign.aircraft?.msn);
+            if (!snKey) return;
 
-            const dateStr = moment(assign.date).format("DD MMM YY");
-            const dateKey = moment(assign.date).format("YYYY-MM-DD");
-            const fKey = `${dateKey}_${assign.flightNumber.trim()}`;
+            const dateStr = moment.utc(assign.date).format("DD MMM YY");
+            const dateKey = moment.utc(assign.date).format("YYYY-MM-DD");
+            const fKey = `${dateKey}_${String(assign.flightNumber || "").trim().toUpperCase()}`;
 
-            if (!metricsMap[msn]) metricsMap[msn] = {};
+            if (!metricsMap[snKey]) metricsMap[snKey] = {};
 
-            // Only add assignment if there isn't already a maintenance event for this day
-            if (!metricsMap[msn][dateStr] || metricsMap[msn][dateStr].status !== "maintenance") {
-                if (!metricsMap[msn][dateStr]) {
-                    metricsMap[msn][dateStr] = { status: "aircraft-assigned", label: "", bh: 0, fh: 0, dep: 0 };
+            if (!metricsMap[snKey][dateStr] || metricsMap[snKey][dateStr].status !== "maintenance") {
+                if (!metricsMap[snKey][dateStr]) {
+                    metricsMap[snKey][dateStr] = { status: "aircraft-assigned", label: "0", bh: 0, fh: 0, dep: 0 };
                 }
 
-                const matchedFlights = flightMap[fKey] || [];
-                matchedFlights.forEach(f => {
-                    metricsMap[msn][dateStr].bh += (f.bh || 0);
-                    metricsMap[msn][dateStr].fh += (f.fh || 0);
-                    metricsMap[msn][dateStr].dep += 1;
+                const matchedFlights = flightMap.get(fKey) || [];
+                matchedFlights.forEach((f) => {
+                    metricsMap[snKey][dateStr].bh += Number(f.bh) || 0;
+                    metricsMap[snKey][dateStr].fh += Number(f.fh) || 0;
+                    metricsMap[snKey][dateStr].dep += 1;
                 });
             }
         });
 
-        Object.keys(metricsMap).forEach(msn => {
-            Object.keys(metricsMap[msn]).forEach(dateStr => {
-                const data = metricsMap[msn][dateStr];
+        Object.keys(metricsMap).forEach((snKey) => {
+            Object.keys(metricsMap[snKey]).forEach((dateStr) => {
+                const data = metricsMap[snKey][dateStr];
                 if (data.status === "aircraft-assigned") {
                     data.label = data.bh > 0 ? data.bh.toFixed(2) : "0";
                 }
             });
         });
 
-        // 4. NEW: INHERIT GROUND DAYS FOR ENGINES & APUs
-        const daysInMonth = moment(month, "MMMM YYYY").daysInMonth();
-        const monthStart = moment(month, "MMMM YYYY").startOf('month');
+        const daysInMonth = moment.utc(month, "MMMM YYYY").daysInMonth();
+        const monthStart = moment.utc(month, "MMMM YYYY").startOf('month');
+        const activeOnwingByMsn = {};
+        let onwingIdx = 0;
 
         for (let i = 0; i < daysInMonth; i++) {
-            const currentDay = moment(monthStart).add(i, 'days');
+            const currentDay = moment(monthStart).add(i, "days");
+            const currentDayEnd = moment(currentDay).endOf("day");
             const dDisp = currentDay.format("DD MMM YY");
 
-            // Find the active configuration for this specific day
-            const latestOnwingPerMsn = {};
-            onwings.forEach(ow => {
-                if (moment(ow.date).isSameOrBefore(currentDay)) {
-                    latestOnwingPerMsn[ow.msn] = ow; // Overwrites until we get the latest valid record for this day
-                }
-            });
+            while (
+                onwingIdx < onwings.length &&
+                moment.utc(onwings[onwingIdx].date).isSameOrBefore(currentDayEnd)
+            ) {
+                const ow = onwings[onwingIdx];
+                const acftSn = normalizeSnKey(ow.msn);
+                if (acftSn) activeOnwingByMsn[acftSn] = ow;
+                onwingIdx += 1;
+            }
 
-            // If an Aircraft (MSN) is grounded today, ground its attached Engines and APU
-            Object.keys(latestOnwingPerMsn).forEach(msn => {
-                if (groundMap[dDisp] && groundMap[dDisp][msn]) {
-                    const eventLabel = groundMap[dDisp][msn];
-                    const config = latestOnwingPerMsn[msn];
-
-                    // Gather all attached assets
+            Object.keys(activeOnwingByMsn).forEach((acftSn) => {
+                if (groundMap[dDisp] && groundMap[dDisp][acftSn]) {
+                    const eventLabel = groundMap[dDisp][acftSn];
+                    const config = activeOnwingByMsn[acftSn];
                     const attachedAssets = [config.pos1Esn, config.pos2Esn, config.apun].filter(Boolean);
 
-                    // Assign the maintenance event to the Engines/APU in the metrics map
-                    attachedAssets.forEach(assetSn => {
-                        const snKey = String(assetSn).trim();
+                    attachedAssets.forEach((assetSn) => {
+                        const snKey = normalizeSnKey(assetSn);
+                        if (!snKey) return;
                         if (!metricsMap[snKey]) metricsMap[snKey] = {};
 
                         metricsMap[snKey][dDisp] = {
                             status: "maintenance",
-                            label: eventLabel
+                            label: "0",
+                            bh: 0,
+                            fh: 0,
+                            dep: 0,
+                            event: eventLabel
                         };
                     });
                 }
