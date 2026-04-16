@@ -12,6 +12,8 @@ const flightSchema = new mongoose.Schema(
     arrStn: { type: String },
     sector: { type: String },
     variant: { type: String },
+    acftType: { type: String },
+    ft: { type: String },
 
     // Numbers
     seats: { type: Number },
@@ -50,4 +52,5 @@ const flightSchema = new mongoose.Schema(
 );
 
 flightSchema.index({ userId: 1, depStn: 1, arrStn: 1, domIntl: 1, std: 1, date: 1 });
+flightSchema.index({ userId: 1, date: 1, flight: 1 });
 module.exports = mongoose.model("FLIGHT", flightSchema);

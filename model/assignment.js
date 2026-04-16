@@ -2,6 +2,12 @@ const mongoose = require("mongoose");
 
 const assignmentSchema = new mongoose.Schema(
     {
+        userId: {
+            type: String,
+            required: true,
+            index: true
+        },
+
         date: {
             type: Date,
             required: true,
@@ -77,5 +83,7 @@ const assignmentSchema = new mongoose.Schema(
         timestamps: true
     }
 );
+
+assignmentSchema.index({ userId: 1, date: 1, flightNumber: 1 });
 
 module.exports = mongoose.model("Assignment", assignmentSchema);

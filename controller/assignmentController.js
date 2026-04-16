@@ -32,6 +32,11 @@ const getExcelValue = (row, possibleKeys) => {
 exports.uploadAssignments = async (req, res) => {
     try {
         console.time("⚡ UploadProcessing");
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized user context missing" });
+        }
 
         if (!req.file) {
             return res.status(400).json({ message: "No file uploaded" });
@@ -92,6 +97,7 @@ exports.uploadAssignments = async (req, res) => {
 
         const [flights, fleetData, groundDays] = await Promise.all([
             Flight.find({
+                userId,
                 date: { $gte: minDate, $lte: maxDate },
                 flight: { $in: flightRegexArray }
             }).select('_id flight date rotationNumber').lean(),
@@ -124,9 +130,7 @@ exports.uploadAssignments = async (req, res) => {
             groundDayMap.set(key, gd);
         }
 
-        const assignmentBulkOps = [];
-        const flightBulkOps = [];
-        const seenFlights = new Set();
+        const processedRowsByFlightKey = new Map();
 
         // Diagnostic Counters
         let notFoundCount = 0;
@@ -207,11 +211,38 @@ exports.uploadAssignments = async (req, res) => {
                 if (strippedSn.length > 0) msnVal = Number(strippedSn);
             }
 
+            processedRowsByFlightKey.set(flightKey, {
+                row,
+                flightRecord,
+                assignedAcft,
+                msnVal,
+                rotationNum,
+                isValid,
+                errors,
+                removedReason
+            });
+        }
+
+        const assignmentBulkOps = [];
+        const flightBulkOps = [];
+        for (const item of processedRowsByFlightKey.values()) {
+            const {
+                row,
+                flightRecord,
+                assignedAcft,
+                msnVal,
+                rotationNum,
+                isValid,
+                errors,
+                removedReason
+            } = item;
+
             assignmentBulkOps.push({
                 updateOne: {
-                    filter: { date: row.assignDate, flightNumber: row.flight },
+                    filter: { userId, date: row.assignDate, flightNumber: row.flight },
                     update: {
                         $set: {
+                            userId,
                             date: row.assignDate,
                             flightNumber: row.flight,
                             'aircraft.registration': assignedAcft,
@@ -227,21 +258,17 @@ exports.uploadAssignments = async (req, res) => {
             });
 
             if (flightRecord && flightRecord._id) {
-                const uniqueId = flightRecord._id.toString();
-                if (!seenFlights.has(uniqueId)) {
-                    flightBulkOps.push({
-                        updateOne: {
-                            filter: { _id: flightRecord._id },
-                            update: {
-                                $set: {
-                                    'aircraft.registration': assignedAcft,
-                                    'aircraft.msn': msnVal
-                                }
+                flightBulkOps.push({
+                    updateOne: {
+                        filter: { _id: flightRecord._id, userId },
+                        update: {
+                            $set: {
+                                'aircraft.registration': assignedAcft,
+                                'aircraft.msn': msnVal
                             }
                         }
-                    });
-                    seenFlights.add(uniqueId);
-                }
+                    }
+                });
             }
         }
 
@@ -266,6 +293,7 @@ exports.uploadAssignments = async (req, res) => {
             message: "Upload and Flight Sync complete",
             diagnostics: {
                 totalValidRows: validRows.length,
+                uniqueFlightsProcessed: processedRowsByFlightKey.size,
                 successfullyAssigned: successfulAcftLinks,
                 rejections: {
                     missingFromFleetDB: missingFleetDBCount,
@@ -284,6 +312,11 @@ exports.uploadAssignments = async (req, res) => {
 
 exports.getWeeklyAssignments = async (req, res) => {
     try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized user context missing" });
+        }
+
         const { weekEnding } = req.query;
         if (!weekEnding) {
             return res.status(400).json({ message: "weekEnding parameter is required" });
@@ -292,7 +325,10 @@ exports.getWeeklyAssignments = async (req, res) => {
         const endDate = moment.utc(weekEnding).endOf('day').toDate();
         const startDate = moment.utc(weekEnding).subtract(6, 'days').startOf('day').toDate();
 
-        const assignments = await Assignment.find({ date: { $gte: startDate, $lte: endDate } })
+        const assignments = await Assignment.find({
+            userId,
+            date: { $gte: startDate, $lte: endDate }
+        })
             .sort({ rotationNumber: 1, flightNumber: 1, date: 1 })
             .lean();
 
