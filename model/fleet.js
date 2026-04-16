@@ -3,6 +3,12 @@ const mongoose = require("mongoose");
 
 const fleetSchema = new mongoose.Schema(
     {
+        userId: {
+            type: String,
+            required: true,
+            index: true
+        },
+
         sno: {
             type: Number,
             required: false
@@ -25,8 +31,7 @@ const fleetSchema = new mongoose.Schema(
         sn: {
             type: String,
             required: true,
-            trim: true,
-            unique: true // Asset SN should generally be unique
+            trim: true
         },
         // 👇 CRITICAL: These 3 fields must match exactly for the Assignment validation to work
         regn: {
@@ -68,5 +73,8 @@ const fleetSchema = new mongoose.Schema(
         timestamps: true // Automatically adds createdAt and updatedAt
     }
 );
+
+fleetSchema.index({ userId: 1, sn: 1 }, { unique: true });
+fleetSchema.index({ userId: 1, regn: 1 });
 
 module.exports = mongoose.model("Fleet", fleetSchema);

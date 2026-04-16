@@ -108,7 +108,8 @@ const searchFlights = async (req, res) => {
     if (acftType) {
       // We ONLY search the fields that actually exist in your new schema
       const orConditions = [
-        { 'aircraft.registration': { $regex: acftType, $options: 'i' } }
+        { 'aircraft.registration': { $regex: acftType, $options: 'i' } },
+        { acftType: { $regex: acftType, $options: 'i' } }
       ];
 
       // If the user typed a number (like '1' or '1021'), also search the exact MSN

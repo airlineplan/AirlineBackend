@@ -2,6 +2,11 @@
 const mongoose = require("mongoose");
 
 const aircraftOnwingSchema = new mongoose.Schema({
+    userId: {
+        type: String,
+        required: true,
+        index: true
+    },
     date: {
         type: Date,
         required: true,
@@ -28,6 +33,6 @@ const aircraftOnwingSchema = new mongoose.Schema({
 });
 
 // Compound index for fast lookup of an aircraft's configuration over time
-aircraftOnwingSchema.index({ date: 1, msn: 1 });
+aircraftOnwingSchema.index({ userId: 1, date: 1, msn: 1 });
 
 module.exports = mongoose.model("AircraftOnwing", aircraftOnwingSchema);

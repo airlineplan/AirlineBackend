@@ -2,6 +2,12 @@
 const mongoose = require("mongoose");
 
 const groundDaySchema = new mongoose.Schema({
+    userId: {
+        type: String,
+        required: true,
+        trim: true,
+        index: true
+    },
     msn: {
         type: String,
         required: true,
@@ -20,6 +26,6 @@ const groundDaySchema = new mongoose.Schema({
 });
 
 // Compound index for super fast lookups
-groundDaySchema.index({ date: 1, msn: 1 });
+groundDaySchema.index({ userId: 1, date: 1, msn: 1 });
 
 module.exports = mongoose.model("GroundDay", groundDaySchema);

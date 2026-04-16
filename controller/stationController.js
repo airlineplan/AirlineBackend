@@ -65,6 +65,16 @@ const {
   isValidDepStn
 } = require('./controllerUtils');
 
+const normalizeHHMM = (value) => {
+  if (value === undefined || value === null || value === "") return "00:00";
+  const [hRaw, mRaw] = String(value).split(":");
+  const hours = Number(hRaw);
+  const minutes = Number(mRaw);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return "00:00";
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return "00:00";
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+};
+
 const getStationsTableData = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -100,6 +110,14 @@ const saveStation = async (req, res) => {
     // Iterate over stations array and update each station sequentially
     for (const stationData of stations) {
       const { _id, ...updateFields } = stationData;
+
+      // Keep taxi times in canonical HH:MM format before persisting.
+      if (Object.prototype.hasOwnProperty.call(updateFields, "avgTaxiOutTime")) {
+        updateFields.avgTaxiOutTime = normalizeHHMM(updateFields.avgTaxiOutTime);
+      }
+      if (Object.prototype.hasOwnProperty.call(updateFields, "avgTaxiInTime")) {
+        updateFields.avgTaxiInTime = normalizeHHMM(updateFields.avgTaxiInTime);
+      }
 
       const existingStation = await Stations.findById(_id);
 

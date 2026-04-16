@@ -29,6 +29,51 @@ const getExcelValue = (row, possibleKeys) => {
     return null;
 };
 
+const normalizeSnForCompare = (value) => {
+    if (value === null || value === undefined) return '';
+    const raw = String(value).trim().toUpperCase();
+    if (!raw) return '';
+    const digitsOnly = raw.replace(/\D/g, '');
+    return digitsOnly || raw;
+};
+
+const parseLegNumberFromFlight = (flightRecord) => {
+    if (!flightRecord) return null;
+
+    if (flightRecord.legNumber !== undefined && flightRecord.legNumber !== null) {
+        const leg = parseInt(String(flightRecord.legNumber).replace(/\D/g, ''), 10);
+        if (!Number.isNaN(leg)) return leg;
+    }
+
+    if (flightRecord.addedByRotation) {
+        const addedBy = String(flightRecord.addedByRotation);
+        const parts = addedBy.split('-');
+        if (parts.length >= 2) {
+            const leg = parseInt(String(parts[1]).replace(/\D/g, ''), 10);
+            if (!Number.isNaN(leg)) return leg;
+        }
+    }
+
+    return null;
+};
+
+const pickFleetRecordForDate = (fleetRecordsForRegn, assignDate) => {
+    if (!Array.isArray(fleetRecordsForRegn) || fleetRecordsForRegn.length === 0) {
+        return null;
+    }
+
+    const assignMom = moment.utc(assignDate).startOf('day');
+    for (const record of fleetRecordsForRegn) {
+        const entryMom = record.entry ? moment.utc(record.entry).startOf('day') : null;
+        const exitMom = record.exit ? moment.utc(record.exit).endOf('day') : null;
+        const isBeforeEntry = entryMom && assignMom.isBefore(entryMom);
+        const isAfterExit = exitMom && assignMom.isAfter(exitMom);
+        if (!isBeforeEntry && !isAfterExit) return record;
+    }
+
+    return fleetRecordsForRegn[0];
+};
+
 exports.uploadAssignments = async (req, res) => {
     try {
         console.time("⚡ UploadProcessing");
@@ -100,13 +145,16 @@ exports.uploadAssignments = async (req, res) => {
                 userId,
                 date: { $gte: minDate, $lte: maxDate },
                 flight: { $in: flightRegexArray }
-            }).select('_id flight date rotationNumber').lean(),
+            }).select('_id flight date rotationNumber addedByRotation legNumber').lean(),
 
             Fleet.find({
+                userId,
+                category: "Aircraft",
                 regn: { $in: acftRegexArray }
             }).select('sn regn entry exit').lean(),
 
             GroundDay.find({
+                userId,
                 date: { $gte: minDate, $lte: maxDate }
             }).select('msn date event').lean()
         ]);
@@ -120,13 +168,18 @@ exports.uploadAssignments = async (req, res) => {
 
         const fleetMap = new Map();
         for (const asset of fleetData) {
-            if (asset.regn) fleetMap.set(String(asset.regn).trim().toUpperCase(), asset);
+            if (!asset.regn) continue;
+            const regnKey = String(asset.regn).trim().toUpperCase();
+            if (!fleetMap.has(regnKey)) fleetMap.set(regnKey, []);
+            fleetMap.get(regnKey).push(asset);
         }
 
         const groundDayMap = new Map();
         for (const gd of groundDays) {
             if (!gd.msn) continue;
-            const key = `${moment.utc(gd.date).format("YYYY-MM-DD")}_${gd.msn}`;
+            const normalizedSn = normalizeSnForCompare(gd.msn);
+            if (!normalizedSn) continue;
+            const key = `${moment.utc(gd.date).format("YYYY-MM-DD")}_${normalizedSn}`;
             groundDayMap.set(key, gd);
         }
 
@@ -143,7 +196,8 @@ exports.uploadAssignments = async (req, res) => {
         for (const row of validRows) {
             const flightKey = `${row.dateKey}_${row.flight}`;
             const flightRecord = flightMap.get(flightKey);
-            const fleetRecord = fleetMap.get(row.acft);
+            const fleetRecordsForRegn = fleetMap.get(row.acft) || [];
+            const fleetRecord = pickFleetRecordForDate(fleetRecordsForRegn, row.assignDate);
 
             const errors = [];
             let isValid = true;
@@ -167,7 +221,7 @@ exports.uploadAssignments = async (req, res) => {
                 // Safe date comparisons
                 const entryMom = fleetRecord.entry ? moment.utc(fleetRecord.entry).startOf('day') : null;
                 const exitMom = fleetRecord.exit ? moment.utc(fleetRecord.exit).endOf('day') : null;
-                const msn = fleetRecord.sn;
+                const msn = normalizeSnForCompare(fleetRecord.sn);
 
                 if (entryMom && assignMom.isBefore(entryMom)) {
                     isValid = false;
@@ -203,6 +257,7 @@ exports.uploadAssignments = async (req, res) => {
             if (flightRecord?.rotationNumber) {
                 rotationNum = parseInt(String(flightRecord.rotationNumber).replace(/\D/g, ''), 10) || null;
             }
+            const legNumber = parseLegNumberFromFlight(flightRecord);
 
             // 🛡️ FIX 3: Safe MSN Parsing (Strips letters if SN is "MSN-1234")
             let msnVal = null;
@@ -217,6 +272,7 @@ exports.uploadAssignments = async (req, res) => {
                 assignedAcft,
                 msnVal,
                 rotationNum,
+                legNumber,
                 isValid,
                 errors,
                 removedReason
@@ -232,6 +288,7 @@ exports.uploadAssignments = async (req, res) => {
                 assignedAcft,
                 msnVal,
                 rotationNum,
+                legNumber,
                 isValid,
                 errors,
                 removedReason
@@ -248,6 +305,7 @@ exports.uploadAssignments = async (req, res) => {
                             'aircraft.registration': assignedAcft,
                             'aircraft.msn': msnVal,
                             rotationNumber: rotationNum,
+                            legNumber,
                             isValid: isValid,
                             validationErrors: errors,
                             removedReason: removedReason

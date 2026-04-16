@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const TIME_HHMM_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const stationSchema = new mongoose.Schema({
     stationName: {
@@ -9,11 +10,13 @@ const stationSchema = new mongoose.Schema({
     // ADDED TAXI TIMES
     avgTaxiOutTime: {
         type: String,
-        default: "00:00" 
+        default: "00:00",
+        match: TIME_HHMM_REGEX
     },
     avgTaxiInTime: {
         type: String,
-        default: "00:00"
+        default: "00:00",
+        match: TIME_HHMM_REGEX
     },
     // ----------------
     stdtz: {

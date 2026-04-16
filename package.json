@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node --inspect  index.js"
+    "start": "node --inspect  index.js",
+    "migrate:flights-acft-fh-ft": "node scripts/backfillFlightAcftFhFt.js"
   },
   "keywords": [],
   "author": "",

@@ -35,6 +35,18 @@ const flightHistorySchema = new mongoose.Schema(
     variant: {
       type: String,
     },
+    acftType: {
+      type: String,
+    },
+    ft: {
+      type: String,
+    },
+    bh: {
+      type: Number,
+    },
+    fh: {
+      type: Number,
+    },
     seats: {
       type: String,
     },

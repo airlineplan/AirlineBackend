@@ -5,9 +5,13 @@ const GroundDay = require('../model/groundDay');
 const AircraftOnwing = require('../model/aircraftOnwing');
 const moment = require('moment');
 
+const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
+        const userId = getUserIdFromReq(req);
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+
         const { month } = req.query;
         if (!month) return res.status(400).json({ message: "Month is required" });
 
@@ -17,10 +21,10 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
         // 1. Fetch data
         const [groundDays, assignments, flights, onwings] = await Promise.all([
-            GroundDay.find({ date: { $gte: startDt, $lte: endDt } }),
-            Assignment.find({ date: { $gte: startDt, $lte: endDt }, isValid: true }),
-            Flight.find({ date: { $gte: startDt, $lte: endDt } }),
-            AircraftOnwing.find({ date: { $lte: endDt } }).sort({ date: 1 }) // Sorted chronologically
+            GroundDay.find({ userId, date: { $gte: startDt, $lte: endDt } }),
+            Assignment.find({ userId, date: { $gte: startDt, $lte: endDt }, isValid: true }),
+            Flight.find({ userId, date: { $gte: startDt, $lte: endDt } }),
+            AircraftOnwing.find({ userId, date: { $lte: endDt } }).sort({ date: 1 }) // Sorted chronologically
         ]);
 
         const flightMap = {};
@@ -138,8 +142,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
 exports.getFleetMonths = async (req, res) => {
     try {
-        // Assuming your verifyToken middleware sets req.userId or req.user.id
-        const userId = req.userId || req.user?.id;
+        const userId = getUserIdFromReq(req);
 
         if (!userId) {
             return res.status(400).json({ message: "User ID missing from token" });
@@ -179,7 +182,10 @@ exports.getFleetMonths = async (req, res) => {
 // 1. GET: Fetch all fleet assets
 exports.getAllFleet = async (req, res) => {
     try {
-        const fleet = await Fleet.find().sort({ sno: 1 });
+        const userId = getUserIdFromReq(req);
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+
+        const fleet = await Fleet.find({ userId }).sort({ sno: 1 });
         res.status(200).json({ data: fleet });
     } catch (error) {
         console.error("🔥 Error fetching fleet:", error);
@@ -190,6 +196,9 @@ exports.getAllFleet = async (req, res) => {
 // 2. POST (Bulk): Create or Update multiple assets at once
 exports.bulkUpsertFleet = async (req, res) => {
     try {
+        const userId = getUserIdFromReq(req);
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+
         const { fleetData } = req.body;
 
         if (!fleetData || !Array.isArray(fleetData)) {
@@ -204,6 +213,7 @@ exports.bulkUpsertFleet = async (req, res) => {
 
             // Auto-uppercase registration
             if (updateData.regn) updateData.regn = updateData.regn.trim().toUpperCase();
+            updateData.userId = userId;
 
             // 👇 ADD THESE TWO LINES: Convert empty strings to null so Mongoose doesn't crash
             if (updateData.entry === "") updateData.entry = null;
@@ -220,7 +230,7 @@ exports.bulkUpsertFleet = async (req, res) => {
 
             return {
                 updateOne: {
-                    filter: { sn: asset.sn.trim() },
+                    filter: { userId, sn: asset.sn.trim() },
                     update: { $set: updateData },
                     upsert: true
                 }
@@ -241,6 +251,7 @@ exports.bulkUpsertFleet = async (req, res) => {
             if (asset.category === 'Aircraft' && asset.regn && asset.sn) {
                 const regnKey = asset.regn.trim().toUpperCase();
                 aircraftMap[regnKey] = {
+                    userId,
                     msn: asset.sn.trim(),
                     // Use the fleet entry date. If missing, default to current date.
                     date: asset.entry ? new Date(asset.entry) : new Date(),
@@ -284,9 +295,10 @@ exports.bulkUpsertFleet = async (req, res) => {
                 onwingOps.push({
                     updateOne: {
                         // Match by MSN and Date so we update existing configs for that specific date instead of duplicating
-                        filter: { msn: config.msn, date: config.date },
+                        filter: { userId, msn: config.msn, date: config.date },
                         update: {
                             $set: {
+                                userId,
                                 pos1Esn: config.pos1Esn,
                                 pos2Esn: config.pos2Esn,
                                 apun: config.apun
@@ -313,9 +325,12 @@ exports.bulkUpsertFleet = async (req, res) => {
 // 3. DELETE: Remove a specific asset by its MongoDB _id
 exports.deleteFleetAsset = async (req, res) => {
     try {
+        const userId = getUserIdFromReq(req);
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+
         const { id } = req.params;
 
-        const deletedAsset = await Fleet.findByIdAndDelete(id);
+        const deletedAsset = await Fleet.findOneAndDelete({ _id: id, userId });
 
         if (!deletedAsset) {
             return res.status(404).json({ message: "Asset not found" });
