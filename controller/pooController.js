@@ -42,6 +42,13 @@ function normalizeStation(value) {
     return String(value || "").trim().toUpperCase();
 }
 
+function normalizeRevenueLabel(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized.includes("intl")) return "Intl";
+    if (normalized.includes("dom")) return "Dom";
+    return "";
+}
+
 function normalizeDomIntl(value) {
     return String(value || "").trim().toLowerCase() === "intl" ? "Intl" : "Dom";
 }
@@ -81,6 +88,67 @@ function safeRatio(numerator, denominator) {
 
 function formatDateKey(date) {
     return moment(date).format("YYYY-MM-DD");
+}
+
+function normalizeGroupByField(field) {
+    const normalized = String(field || "").trim();
+    if (normalized === "stop") return "stops";
+    return normalized;
+}
+
+function buildRevenueGroupKeyExpression(fields) {
+    if (fields.length === 1) {
+        return `$${fields[0]}`;
+    }
+
+    const concatParts = [];
+    fields.forEach((field, index) => {
+        if (index > 0) concatParts.push(" | ");
+        if (field === "stops") {
+            concatParts.push({
+                $ifNull: [
+                    { $toString: `$${field}` },
+                    "Unknown",
+                ],
+            });
+        } else {
+            concatParts.push({
+                $ifNull: [`$${field}`, "Unknown"],
+            });
+        }
+    });
+
+    return { $concat: concatParts };
+}
+
+function buildRevenueSelectionClauses(values, type) {
+    const normalizedValues = values
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean);
+
+    if (normalizedValues.length === 0) return [];
+
+    if (type === "label") {
+        const clauses = [];
+        if (normalizedValues.includes("domestic_od")) clauses.push({ odDI: "Dom" });
+        if (normalizedValues.includes("international_od")) clauses.push({ odDI: "Intl" });
+        if (normalizedValues.includes("domestic_sector")) clauses.push({ legDI: "Dom" });
+        if (normalizedValues.includes("international_sector")) clauses.push({ legDI: "Intl" });
+        return clauses;
+    }
+
+    if (type === "trafficClass") {
+        const clauses = [];
+        if (normalizedValues.includes("leg")) clauses.push({ trafficType: "leg" });
+        if (normalizedValues.includes("beyond")) clauses.push({ trafficType: "beyond" });
+        if (normalizedValues.includes("behind")) clauses.push({ trafficType: "behind" });
+        if (normalizedValues.includes("transit")) clauses.push({ trafficType: { $in: ["transit_fl", "transit_sl"] } });
+        if (normalizedValues.includes("interline")) clauses.push({ interline: { $nin: ["", null] } });
+        if (normalizedValues.includes("codeshare")) clauses.push({ codeshare: { $nin: ["", null] } });
+        return clauses;
+    }
+
+    return [];
 }
 
 function buildSectorMap(sectors) {
@@ -1609,13 +1677,20 @@ exports.getRevenueData = async (req, res) => {
     try {
         const userId = req.user.id;
         const {
+            label,
+            trafficClass,
             fromDate,
             toDate,
+            from,
+            to,
+            flight,
+            flightNumber,
             poo,
             od,
             sector,
-            flightNumber,
             variant,
+            userTag1,
+            userTag2,
             trafficType,
             identifier,
             groupBy = "poo",
@@ -1623,28 +1698,101 @@ exports.getRevenueData = async (req, res) => {
         } = req.query;
 
         const match = { userId };
+        const andClauses = [];
+
         if (fromDate && toDate) {
-            match.date = {
-                $gte: moment(fromDate).startOf("day").toDate(),
-                $lte: moment(toDate).endOf("day").toDate(),
-            };
+            andClauses.push({
+                date: {
+                    $gte: moment(fromDate).startOf("day").toDate(),
+                    $lte: moment(toDate).endOf("day").toDate(),
+                },
+            });
         } else if (fromDate) {
-            match.date = { $gte: moment(fromDate).startOf("day").toDate() };
+            andClauses.push({
+                date: { $gte: moment(fromDate).startOf("day").toDate() },
+            });
         } else if (toDate) {
-            match.date = { $lte: moment(toDate).endOf("day").toDate() };
+            andClauses.push({
+                date: { $lte: moment(toDate).endOf("day").toDate() },
+            });
         }
 
-        if (poo) match.poo = { $in: poo.split(",").map(normalizeStation) };
-        if (od) match.od = { $in: od.split(",").map((item) => item.trim().toUpperCase()) };
-        if (sector) match.sector = { $in: sector.split(",").map((item) => item.trim().toUpperCase()) };
-        if (flightNumber) match.flightNumber = { $in: flightNumber.split(",").map((item) => item.trim()) };
-        if (variant) match.variant = { $in: variant.split(",").map((item) => item.trim()) };
-        if (trafficType) match.trafficType = { $in: trafficType.split(",").map((item) => item.trim()) };
-        if (identifier) match.identifier = { $in: identifier.split(",").map((item) => item.trim()) };
+        if (poo) andClauses.push({ poo: { $in: poo.split(",").map(normalizeStation) } });
+        if (od) andClauses.push({ od: { $in: od.split(",").map((item) => item.trim().toUpperCase()) } });
+        if (sector) andClauses.push({ sector: { $in: sector.split(",").map((item) => item.trim().toUpperCase()) } });
+        const normalizedDirectFlights = String(flightNumber || flight || "").split(",").map((item) => item.trim()).filter(Boolean);
+        if (normalizedDirectFlights.length > 0) andClauses.push({ flightNumber: { $in: normalizedDirectFlights } });
+        if (variant) andClauses.push({ variant: { $in: variant.split(",").map((item) => item.trim()) } });
+        if (trafficType) andClauses.push({ trafficType: { $in: trafficType.split(",").map((item) => item.trim()) } });
+        if (identifier) andClauses.push({ identifier: { $in: identifier.split(",").map((item) => item.trim()) } });
+
+        const labelClauses = buildRevenueSelectionClauses(String(label || "").split(","), "label");
+        if (labelClauses.length > 0) andClauses.push({ $or: labelClauses });
+
+        const trafficClassClauses = buildRevenueSelectionClauses(String(trafficClass || "").split(","), "trafficClass");
+        if (trafficClassClauses.length > 0) andClauses.push({ $or: trafficClassClauses });
+
+        const dataFilterClauses = [];
+        const normalizedFrom = String(from || "").split(",").map((item) => normalizeStation(item)).filter(Boolean);
+        const normalizedTo = String(to || "").split(",").map((item) => normalizeStation(item)).filter(Boolean);
+        const normalizedFlights = String(flight || flightNumber || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
+        const normalizedVariants = String(variant || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
+        const normalizedUserTag1 = String(userTag1 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
+        const normalizedUserTag2 = String(userTag2 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
+
+        if (normalizedFrom.length > 0) dataFilterClauses.push({ depStn: { $in: normalizedFrom } });
+        if (normalizedTo.length > 0) dataFilterClauses.push({ arrStn: { $in: normalizedTo } });
+        if (normalizedFlights.length > 0) dataFilterClauses.push({ flight: { $in: normalizedFlights } });
+        if (normalizedVariants.length > 0) dataFilterClauses.push({ variant: { $in: normalizedVariants } });
+        if (normalizedUserTag1.length > 0) dataFilterClauses.push({ userTag1: { $in: normalizedUserTag1 } });
+        if (normalizedUserTag2.length > 0) dataFilterClauses.push({ userTag2: { $in: normalizedUserTag2 } });
+
+        if (dataFilterClauses.length > 0) {
+            const dataMatch = { userId };
+            const normalizedRevenueLabel = normalizeRevenueLabel(label);
+
+            if (String(label || "").trim().toLowerCase() !== "both" && normalizedRevenueLabel) {
+                dataMatch.domINTL = normalizedRevenueLabel;
+            }
+
+            dataMatch.$and = dataFilterClauses;
+
+            const matchingData = await Data.find(dataMatch).select("flight depStn arrStn sector");
+
+            const allowedFlights = [...new Set(matchingData.map((row) => String(row.flight || "").trim()).filter(Boolean))];
+            const allowedSectors = [...new Set(matchingData.map((row) => String(row.sector || "").trim().toUpperCase()).filter(Boolean))];
+
+            if (allowedFlights.length > 0) {
+                andClauses.push({ flightNumber: { $in: allowedFlights } });
+            }
+
+            if (allowedSectors.length > 0) {
+                andClauses.push({ sector: { $in: allowedSectors } });
+            }
+        }
+
+        if (andClauses.length > 0) {
+            match.$and = andClauses;
+        }
+
+        const groupByFields = String(groupBy || "poo")
+            .split(",")
+            .map(normalizeGroupByField)
+            .filter(Boolean);
+        const safeGroupByFields = groupByFields.length > 0 ? [...new Set(groupByFields)] : ["poo"];
+        const groupKeyExpr = buildRevenueGroupKeyExpression(safeGroupByFields);
 
         let periodExpr;
-        if (periodicity.toLowerCase() === "daily") {
-            periodExpr = { $dateToString: { format: "%Y-%m-%d", date: "$date" } };
+        if (periodicity.toLowerCase() === "annually") {
+            periodExpr = { $dateToString: { format: "%Y", date: "$date" } };
+        } else if (periodicity.toLowerCase() === "quarterly") {
+            periodExpr = {
+                $concat: [
+                    { $toString: { $year: "$date" } },
+                    "-Q",
+                    { $toString: { $ceil: { $divide: [{ $month: "$date" }, 3] } } },
+                ],
+            };
         } else if (periodicity.toLowerCase() === "weekly") {
             periodExpr = { $dateToString: { format: "%Y-W%V", date: "$date" } };
         } else {
@@ -1656,7 +1804,7 @@ exports.getRevenueData = async (req, res) => {
             {
                 $group: {
                     _id: {
-                        groupKey: `$${groupBy}`,
+                        groupKey: groupKeyExpr,
                         period: periodExpr,
                     },
                     pax: { $sum: "$pax" },
@@ -1695,7 +1843,7 @@ exports.getRevenueData = async (req, res) => {
         res.status(200).json({
             data: pivoted,
             periods: [...periods].sort(),
-            groupBy,
+            groupBy: safeGroupByFields.join(","),
             periodicity,
         });
     } catch (error) {
