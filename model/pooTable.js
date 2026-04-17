@@ -1,11 +1,25 @@
 const mongoose = require('mongoose');
 
 const pooTableSchema = new mongoose.Schema({
+    userId: { type: String, required: true, index: true },
+
     // Identifiers and Routing
     sNo: { type: Number, required: true },
+    rowKey: { type: String, trim: true, required: true },
+    flightId: { type: String, trim: true, required: true, index: true },
+    connectedFlightId: { type: String, trim: true, default: null },
+    connectedFlightNumber: { type: String, trim: true, default: null },
+    ownerFlightId: { type: String, trim: true, default: null },
+    connectionKey: { type: String, trim: true, default: null, index: true },
+    odGroupKey: { type: String, trim: true, default: null, index: true },
+    trafficType: { type: String, trim: true, required: true, index: true },
+    source: { type: String, trim: true, default: "system" },
+    isUserDefined: { type: Boolean, default: false },
     al: { type: String, trim: true }, // Airline Code
     poo: { type: String, trim: true }, // Point of Origin
     od: { type: String, trim: true }, // Origin-Destination
+    odOrigin: { type: String, trim: true, default: null },
+    odDestination: { type: String, trim: true, default: null },
     odDI: { type: String, trim: true }, // OD Domestic/International
     stops: { type: Number, default: 0 },
     identifier: { type: String, trim: true },
@@ -17,12 +31,22 @@ const pooTableSchema = new mongoose.Schema({
     day: { type: String, trim: true }, // e.g., 'Mon', 'Tue' or day number
     flightNumber: { type: String, trim: true },
     variant: { type: String, trim: true },
+    std: { type: String, trim: true, default: null },
+    sta: { type: String, trim: true, default: null },
+    connectedStd: { type: String, trim: true, default: null },
+    connectedSta: { type: String, trim: true, default: null },
 
     // Capacity and Traffic (Pax/Cargo)
     maxPax: { type: Number, default: 0 },
     maxCargoT: { type: Number, default: 0 },
     pax: { type: Number, default: 0 },
     cargoT: { type: Number, default: 0 },
+    sourcePaxTotal: { type: Number, default: 0 },
+    sourceCargoTotal: { type: Number, default: 0 },
+    sourceSeats: { type: Number, default: 0 },
+    sourceCargoCapT: { type: Number, default: 0 },
+    sourcePaxLF: { type: Number, default: 0 },
+    sourceCargoLF: { type: Number, default: 0 },
 
     // Distances
     sectorGcd: { type: Number, default: 0 }, // Great Circle Distance
@@ -34,6 +58,9 @@ const pooTableSchema = new mongoose.Schema({
     odFare: { type: Number, default: 0 },
     odRate: { type: Number, default: 0 },
     prorateRatioL1: { type: Number, default: 0 },
+    applySSPricing: { type: Boolean, default: false },
+    interline: { type: String, trim: true, default: "" },
+    codeshare: { type: String, trim: true, default: "" },
 
     // Leg Revenue (Local Currency)
     legPaxRev: { type: Number, default: 0 },
@@ -67,6 +94,19 @@ const pooTableSchema = new mongoose.Schema({
     timestamps: true, // Automatically adds createdAt and updatedAt fields
     collection: 'pooTables'
 });
+
+pooTableSchema.index(
+    { userId: 1, rowKey: 1 },
+    { unique: true }
+);
+
+pooTableSchema.index(
+    { userId: 1, poo: 1, date: 1, trafficType: 1, sNo: 1 }
+);
+
+pooTableSchema.index(
+    { userId: 1, date: 1, odGroupKey: 1, poo: 1 }
+);
 
 const PooTable = mongoose.model('PooTable', pooTableSchema);
 

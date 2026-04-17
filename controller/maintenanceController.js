@@ -14,6 +14,90 @@ const moment = require('moment'); // <-- Added missing moment import
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
+    const assetKey = String(msnEsn || "").trim();
+    const lookupDate = date ? moment(date).endOf("day").toDate() : null;
+    const ownershipFilter = {
+        $or: [
+            { pos1Esn: assetKey },
+            { pos2Esn: assetKey },
+            { apun: assetKey }
+        ]
+    };
+
+    if (userId) {
+        ownershipFilter.userId = String(userId);
+    }
+
+    if (lookupDate) {
+        ownershipFilter.date = { $lte: lookupDate };
+    }
+
+    const owningAircraft = assetKey
+        ? await AircraftOnwing.findOne(ownershipFilter).sort({ date: -1 }).lean()
+        : null;
+
+    const effectiveMsn = String(owningAircraft?.msn || assetKey).trim();
+    const fleetFilter = effectiveMsn ? { sn: effectiveMsn } : {};
+    if (userId) {
+        fleetFilter.userId = String(userId);
+    }
+
+    const fleet = effectiveMsn ? await Fleet.findOne(fleetFilter).lean() : null;
+
+    return {
+        assetKey,
+        effectiveMsn,
+        fleet,
+    };
+};
+
+const getAssignmentUsageForDate = async ({ effectiveMsn, date, metric }) => {
+    if (!effectiveMsn) {
+        return { timeUsage: 0, cycleUsage: 0 };
+    }
+
+    const msnNumber = Number(effectiveMsn);
+    if (!Number.isFinite(msnNumber)) {
+        return { timeUsage: 0, cycleUsage: 0 };
+    }
+
+    const assignments = await Assignment.find({
+        date: {
+            $gte: date.toDate(),
+            $lt: moment(date).endOf("day").toDate()
+        },
+        "aircraft.msn": msnNumber
+    });
+
+    const timeUsage = assignments.reduce((sum, a) => {
+        const usage = metric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0);
+        return sum + usage;
+    }, 0);
+
+    return {
+        timeUsage,
+        cycleUsage: assignments.length
+    };
+};
+
+const getUtilisationWindow = ({ masterStartDate, masterEndDate, fleet }) => {
+    let startBoundaryDate = masterStartDate ? moment(masterStartDate) : null;
+    let endBoundaryDate = masterEndDate ? moment(masterEndDate) : null;
+
+    if (fleet?.entry) {
+        const fleetEntry = moment(fleet.entry).startOf("day");
+        startBoundaryDate = startBoundaryDate ? moment.max(startBoundaryDate, fleetEntry) : fleetEntry;
+    }
+
+    if (fleet?.exit) {
+        const fleetExit = moment(fleet.exit).endOf("day");
+        endBoundaryDate = endBoundaryDate ? moment.min(endBoundaryDate, fleetExit) : fleetExit;
+    }
+
+    return { startBoundaryDate, endBoundaryDate };
+};
+
 /**
  * 1. GET: Fetch Main Dashboard Data
  */
@@ -204,6 +288,7 @@ exports.getResetRecords = async (req, res) => {
  */
 exports.bulkSaveResetRecords = async (req, res) => {
     try {
+        const userId = req.user?.userId || req.user?._id;
         const resetData = Array.isArray(req.body) ? req.body : req.body?.resetData;
 
         if (!resetData || !Array.isArray(resetData)) {
@@ -220,6 +305,12 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const msnEsn = String(record.msnEsn || "").trim();
             const pn = String(record.pn || "").trim();
             const snBn = String(record.snBn || "").trim();
+            const utilizationContext = await getEffectiveUtilisationContext({
+                userId,
+                msnEsn,
+                date: record.date
+            });
+            const effectiveMsn = utilizationContext.effectiveMsn || msnEsn;
 
             const updateFields = {
                 date: new Date(record.date),
@@ -281,10 +372,19 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const masterStartDate = firstFlight && firstFlight.date ? moment(firstFlight.date).startOf('day') : false;
 
             // Optional: check Fleet for safety, but primary boundary is masterStartDate
-            const fleet = await Fleet.findOne({ sn: msnEsn });
+            const fleet = utilizationContext.fleet || await Fleet.findOne({
+                ...(userId ? { userId: String(userId) } : {}),
+                sn: effectiveMsn
+            }).lean();
+            const utilisationWindow = getUtilisationWindow({
+                masterStartDate,
+                masterEndDate: false,
+                fleet
+            });
+            const startBoundaryDate = utilisationWindow.startBoundaryDate;
 
             // Proceed to backfill ONLY if we have a valid boundary date
-            if (masterStartDate) {
+            if (startBoundaryDate) {
                 let currDate = moment(record.date).startOf('day');
 
                 // Keep running totals that we will decrement
@@ -301,24 +401,12 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 let currentDsr = updateFields.dsRplmt;
 
                 // Loop backward until we reach the master start date
-                while (currDate.isAfter(masterStartDate)) {
-                    // Fetch assignments that occurred ON currDate (the day we are subtracting usage FROM)
-                    const assignments = await Assignment.find({
-                        date: {
-                            $gte: currDate.toDate(),
-                            $lt: moment(currDate).endOf('day').toDate()
-                        },
-                        "aircraft.msn": Number(msnEsn)
+                while (currDate.isAfter(startBoundaryDate)) {
+                    const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
+                        effectiveMsn,
+                        date: currDate,
+                        metric: record.metric || "BH"
                     });
-
-                    let timeUsage = 0;
-                    let cycleUsage = assignments.length; // Count of flight legs
-
-                    if (record.metric === "FH") {
-                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.flightHours || 0), 0);
-                    } else { // Default BH
-                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.blockHours || 0), 0);
-                    }
 
                     // Decrement running totals based on the usage FOR that day
                     // Subtract timeUsage from hours, cycleUsage from cycles, 1 from days
@@ -400,23 +488,11 @@ exports.bulkSaveResetRecords = async (req, res) => {
 
                 // Loop forward until the boundary
                 while (currDate.isSameOrBefore(endBoundaryDate)) {
-                    // Fetch assignments that occurred ON currDate (the day we are adding usage FOR)
-                    const assignments = await Assignment.find({
-                        date: {
-                            $gte: currDate.toDate(),
-                            $lt: moment(currDate).endOf('day').toDate()
-                        },
-                        "aircraft.msn": Number(msnEsn)
+                    const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
+                        effectiveMsn,
+                        date: currDate,
+                        metric: record.metric || "BH"
                     });
-
-                    let timeUsage = 0;
-                    let cycleUsage = assignments.length;
-
-                    if (record.metric === "FH") {
-                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.flightHours || 0), 0);
-                    } else {
-                        timeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.blockHours || 0), 0);
-                    }
 
                     // Increment running totals based on usage
                     // Add timeUsage to hours, cycleUsage to cycles, 1 to days
@@ -494,6 +570,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
  */
 exports.computeMaintenanceLogic = async (req, res) => {
     try {
+        const userId = req.user?.userId || req.user?._id;
         // 1. Determine Global Boundaries
         const firstFlight = await Flight.findOne().sort({ date: 1 }).lean();
         const lastFlight = await Flight.findOne().sort({ date: -1 }).lean();
@@ -517,17 +594,32 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
         for (const group of resetGroups) {
             const { msnEsn, pn, snBn } = group._id;
+            const utilizationContext = await getEffectiveUtilisationContext({
+                userId,
+                msnEsn,
+                date: null
+            });
+            const effectiveMsn = utilizationContext.effectiveMsn || msnEsn;
             
             // Get all resets for this specific part/asset, sorted chronologically
             const resets = await MaintenanceReset.find({ msnEsn, pn, snBn }).sort({ date: 1 }).lean();
             if (resets.length === 0) continue;
 
-            const fleet = await Fleet.findOne({ sn: msnEsn });
+            const fleet = utilizationContext.fleet || await Fleet.findOne({
+                ...(userId ? { userId: String(userId) } : {}),
+                sn: effectiveMsn
+            }).lean();
+            const utilisationWindow = getUtilisationWindow({
+                masterStartDate,
+                masterEndDate,
+                fleet
+            });
+            const startBoundaryDate = utilisationWindow.startBoundaryDate;
+            const endBoundaryDate = utilisationWindow.endBoundaryDate;
             
             // Determine the true end boundary (fleet exit or master table end)
-            let endBoundaryDate = masterEndDate;
-            if (fleet && fleet.exit && moment(fleet.exit).isBefore(masterEndDate)) {
-                endBoundaryDate = moment(fleet.exit).endOf('day');
+            if (!endBoundaryDate) {
+                endBoundaryDate = masterEndDate;
             }
 
             // --- RECALCULATION LOGIC ---
@@ -537,7 +629,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                 const nextReset = resets[i + 1];
 
                 // If this is the FIRST reset, backfill to masterStartDate
-                if (i === 0) {
+                if (i === 0 && startBoundaryDate) {
                     let currDate = moment(currentReset.date).startOf('day');
                     let currentTsn = currentReset.tsn;
                     let currentCsn = currentReset.csn;
@@ -549,13 +641,13 @@ exports.computeMaintenanceLogic = async (req, res) => {
                     let currentCsr = currentReset.csRplmt;
                     let currentDsr = currentReset.dsRplmt;
 
-                    while (currDate.isAfter(masterStartDate)) {
+                    while (currDate.isAfter(startBoundaryDate)) {
                         const assignments = await Assignment.find({
                             date: {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
                             },
-                            "aircraft.msn": Number(msnEsn)
+                            "aircraft.msn": Number(effectiveMsn)
                         });
 
                         const timeUsage = assignments.reduce((sum, a) => 
@@ -639,7 +731,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
                             },
-                            "aircraft.msn": Number(msnEsn)
+                            "aircraft.msn": Number(effectiveMsn)
                         }, {
                             $unset: { "aircraft.msn": "", "aircraft.registration": "" },
                             $set: { removedReason: "GROUND_DAY_CONFLICT" }
@@ -677,7 +769,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                             $gte: currDate.toDate(),
                             $lt: moment(currDate).endOf('day').toDate()
                         },
-                        "aircraft.msn": Number(msnEsn)
+                        "aircraft.msn": Number(effectiveMsn)
                     });
 
                     const timeUsage = assignments.reduce((sum, a) => 
@@ -723,7 +815,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
                             },
-                            "aircraft.msn": Number(msnEsn)
+                            "aircraft.msn": Number(effectiveMsn)
                         }, {
                             $unset: { "aircraft.msn": "", "aircraft.registration": "" },
                             $set: { removedReason: "GROUND_DAY_CONFLICT" }

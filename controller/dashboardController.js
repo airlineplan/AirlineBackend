@@ -29,6 +29,35 @@ const createConnections = require('../helper/createConnections');
 
 moment.tz.setDefault("America/New_York");
 
+const normalizeQueryValues = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return [];
+  }
+
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((item) => {
+      if (item && typeof item === "object") {
+        return String(item.value ?? item.label ?? "").trim();
+      }
+
+      return String(item).trim();
+    })
+    .filter(Boolean);
+};
+
+const normalizeSingleQueryValue = (value) => {
+  if (Array.isArray(value)) {
+    return normalizeSingleQueryValue(value[0]);
+  }
+
+  if (value && typeof value === "object") {
+    return String(value.value ?? value.label ?? "").trim();
+  }
+
+  return String(value ?? "").trim();
+};
+
 
 
 const {
@@ -84,6 +113,7 @@ const populateDashboardDropDowns = async (req, res) => {
       {
         $group: {
           _id: null,
+          flight: { $addToSet: "$flight" },
           from: { $addToSet: "$depStn" },
           to: { $addToSet: "$arrStn" },
           variant: { $addToSet: "$variant" },
@@ -120,6 +150,7 @@ const populateDashboardDropDowns = async (req, res) => {
     );
 
     const data = {
+      flight: formatOptions(dataValues.flight ?? []),
       from: formatOptions(dataValues.from ?? []),
       to: formatOptions(dataValues.to ?? []),
       variant: formatOptions(dataValues.variant ?? []),
@@ -136,56 +167,71 @@ const populateDashboardDropDowns = async (req, res) => {
 };
 const getDashboardData = async (req, res) => {
 
-  let { from, to, variant, sector, userTag1, userTag2, label, periodicity } = req.query;
+  let { from, to, variant, sector, flight, userTag1, userTag2, label, periodicity } = req.query;
 
-  console.log("from" + from + " to" + to + " variant" + variant + " sector" + sector + " periodicity" + periodicity + " label" + label);
+  console.log("from" + from + " to" + to + " variant" + variant + " sector" + sector + " flight" + flight + " periodicity" + periodicity + " label" + label);
 
-  if (periodicity && label) {
-    periodicity = periodicity.value.toLowerCase();
-    label = label.value.toLowerCase()
-    id = req.user.id;
+  if (!periodicity || !label) {
+    return res.status(400).json({ error: "Missing label or periodicity" });
+  }
 
-    //building mongo query
-    let datequery = {
-      userId: id
-    };
+  periodicity = normalizeSingleQueryValue(periodicity).toLowerCase();
+  label = normalizeSingleQueryValue(label).toLowerCase();
+  const id = req.user.id;
 
-    let flightsQuery = {
-      userId: id
-    };
+  //building mongo query
+  let datequery = {
+    userId: id
+  };
 
-    if (label === "both") {
-      flightsQuery.domIntl = { $in: ["dom", "intl"] };
-    } else {
-      datequery.domINTL = label
-      flightsQuery.domIntl = label
-    }
+  let flightsQuery = {
+    userId: id
+  };
 
-    if (variant && Array.isArray(variant) && variant.length > 0) {
-      flightsQuery.variant = { $in: variant.map(item => item.value) };
-    }
+  if (label === "both") {
+    flightsQuery.domIntl = { $in: ["dom", "intl"] };
+  } else {
+    datequery.domINTL = label
+    flightsQuery.domIntl = label
+  }
 
-    if (sector && Array.isArray(sector) && sector.length > 0) {
-      flightsQuery.sector = { $in: sector.map(item => item.value) };
-    }
+  const normalizedVariant = normalizeQueryValues(variant);
+  const normalizedSector = normalizeQueryValues(sector);
+  const normalizedFlight = normalizeQueryValues(flight);
+  const normalizedUserTag1 = normalizeQueryValues(userTag1);
+  const normalizedUserTag2 = normalizeQueryValues(userTag2);
+  const normalizedFrom = normalizeQueryValues(from);
+  const normalizedTo = normalizeQueryValues(to);
 
-    if (userTag1 && Array.isArray(userTag1) && userTag1.length > 0) {
-      flightsQuery.userTag1 = { $in: userTag1.map(item => item.value) };
-    }
+  if (normalizedVariant.length > 0) {
+    flightsQuery.variant = { $in: normalizedVariant };
+  }
 
-    if (userTag2 && Array.isArray(userTag2) && userTag2.length > 0) {
-      flightsQuery.userTag2 = { $in: userTag2.map(item => item.value) };
-    }
+  if (normalizedSector.length > 0) {
+    flightsQuery.sector = { $in: normalizedSector };
+  }
 
-    if (from && Array.isArray(from) && from.length > 0) {
-      flightsQuery.depStn = { $in: from.map(item => item.value) };
-    }
+  if (normalizedFlight.length > 0) {
+    flightsQuery.flight = { $in: normalizedFlight };
+  }
 
-    if (to && Array.isArray(to) && to.length > 0) {
-      flightsQuery.arrStn = { $in: to.map(item => item.value) };
-    }
+  if (normalizedUserTag1.length > 0) {
+    flightsQuery.userTag1 = { $in: normalizedUserTag1 };
+  }
 
-    try {
+  if (normalizedUserTag2.length > 0) {
+    flightsQuery.userTag2 = { $in: normalizedUserTag2 };
+  }
+
+  if (normalizedFrom.length > 0) {
+    flightsQuery.depStn = { $in: normalizedFrom };
+  }
+
+  if (normalizedTo.length > 0) {
+    flightsQuery.arrStn = { $in: normalizedTo };
+  }
+
+  try {
 
       const datas = await Data.find(datequery);
       // Calculate the start and end dates based on the periodicity
@@ -541,7 +587,6 @@ const getDashboardData = async (req, res) => {
       console.error(error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
-  }
 };
 
 module.exports = {

@@ -38,6 +38,18 @@ const timeZoneCorrectedDates = (date, tzString) => {
   }
 }
 
+const normalizeQueryValue = (value) => {
+  if (Array.isArray(value)) {
+    return normalizeQueryValue(value[0]);
+  }
+
+  if (value && typeof value === "object") {
+    return String(value.value ?? value.label ?? "").trim();
+  }
+
+  return String(value ?? "").trim();
+};
+
 const AddData = async (req, res) => {
   try {
     let {
@@ -2072,52 +2084,62 @@ const getDashboardData = async (req, res) => {
 
   console.log("from" + from + " to" + to + " variant" + variant + " sector" + sector + " periodicity" + periodicity + " label" + label);
 
-  if (periodicity && label) {
-    periodicity = periodicity.value.toLowerCase();
-    label = label.value.toLowerCase()
-    id = req.user.id;
+  if (!periodicity || !label) {
+    return res.status(400).json({ error: "Missing label or periodicity" });
+  }
 
-    //building mongo query
-    let datequery = {
-      userId: id
-    };
+  periodicity = normalizeQueryValue(periodicity).toLowerCase();
+  label = normalizeQueryValue(label).toLowerCase();
+  const id = req.user.id;
 
-    let flightsQuery = {
-      userId: id
-    };
+  //building mongo query
+  let datequery = {
+    userId: id
+  };
 
-    if (label === "both") {
-      flightsQuery.domIntl = { $in: ["dom", "intl"] };
-    } else {
-      datequery.domINTL = label
-      flightsQuery.domIntl = label
-    }
+  let flightsQuery = {
+    userId: id
+  };
 
-    if (variant && Array.isArray(variant) && variant.length > 0) {
-      flightsQuery.variant = { $in: variant.map(item => item.value) };
-    }
+  if (label === "both") {
+    flightsQuery.domIntl = { $in: ["dom", "intl"] };
+  } else {
+    datequery.domINTL = label
+    flightsQuery.domIntl = label
+  }
 
-    if (sector && Array.isArray(sector) && sector.length > 0) {
-      flightsQuery.sector = { $in: sector.map(item => item.value) };
-    }
+  const normalizedVariant = normalizeQueryValue(variant);
+  const normalizedSector = normalizeQueryValue(sector);
+  const normalizedUserTag1 = normalizeQueryValue(userTag1);
+  const normalizedUserTag2 = normalizeQueryValue(userTag2);
+  const normalizedFrom = normalizeQueryValue(from);
+  const normalizedTo = normalizeQueryValue(to);
 
-    if (userTag1 && Array.isArray(userTag1) && userTag1.length > 0) {
-      flightsQuery.userTag1 = { $in: userTag1.map(item => item.value) };
-    }
+  if (normalizedVariant) {
+    flightsQuery.variant = { $in: [normalizedVariant] };
+  }
 
-    if (userTag2 && Array.isArray(userTag2) && userTag2.length > 0) {
-      flightsQuery.userTag2 = { $in: userTag2.map(item => item.value) };
-    }
+  if (normalizedSector) {
+    flightsQuery.sector = { $in: [normalizedSector] };
+  }
 
-    if (from && Array.isArray(from) && from.length > 0) {
-      flightsQuery.depStn = { $in: from.map(item => item.value) };
-    }
+  if (normalizedUserTag1) {
+    flightsQuery.userTag1 = { $in: [normalizedUserTag1] };
+  }
 
-    if (to && Array.isArray(to) && to.length > 0) {
-      flightsQuery.arrStn = { $in: to.map(item => item.value) };
-    }
+  if (normalizedUserTag2) {
+    flightsQuery.userTag2 = { $in: [normalizedUserTag2] };
+  }
 
-    try {
+  if (normalizedFrom) {
+    flightsQuery.depStn = { $in: [normalizedFrom] };
+  }
+
+  if (normalizedTo) {
+    flightsQuery.arrStn = { $in: [normalizedTo] };
+  }
+
+  try {
 
       const datas = await Data.find(datequery);
       // Calculate the start and end dates based on the periodicity
@@ -2473,7 +2495,6 @@ const getDashboardData = async (req, res) => {
       console.error(error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
-  }
 };
 
 function roundToLastDateOfNextQuarter(date) {
@@ -3615,8 +3636,10 @@ const getListPageData = async (req, res) => {
     // =====================================
     const matchQuery = { userId };
 
-    if (label && label.value !== "both") {
-      matchQuery.domIntl = label.value.toLowerCase();
+    const normalizedLabel = normalizeQueryValue(label);
+
+    if (normalizedLabel && normalizedLabel.toLowerCase() !== "both") {
+      matchQuery.domIntl = normalizedLabel.toLowerCase();
     }
 
     const applyArrayFilter = (field, filterArray) => {
