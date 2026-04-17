@@ -69,7 +69,7 @@ const maintenanceResetSchema = new mongoose.Schema(
     }
 );
 
-// Compound index for fast querying when filtering by Date, Aircraft/Engine, and Part
-maintenanceResetSchema.index({ date: 1, msnEsn: 1, snBn: 1 });
+// One reset record per MSN/ESN + PN + SN/BN combination
+maintenanceResetSchema.index({ msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceReset", maintenanceResetSchema);

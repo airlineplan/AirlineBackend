@@ -11,6 +11,9 @@ const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
 
+const escapeRegex = (value = "") =>
+    String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
  * 1. GET: Fetch Main Dashboard Data
  */
@@ -40,40 +43,91 @@ exports.getMaintenanceDashboard = async (req, res) => {
 
         // 5. Build dynamically mapped Dashboard Status table Data
         let maintenanceData = [];
-        const { date } = req.query;
+        const { date, msnEsn } = req.query;
 
         if (date) {
             const startOfDay = moment(date).startOf('day').toDate();
             const endOfDay = moment(date).endOf('day').toDate();
 
-            const fleetAssets = await Fleet.find({}).lean();
-            const utils = await Utilisation.find({
+            const fleetFilter = {};
+            if (userId) {
+                fleetFilter.userId = String(userId);
+            }
+            if (msnEsn) {
+                fleetFilter.sn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
+            }
+
+            const utilFilter = {
                 date: { $gte: startOfDay, $lte: endOfDay }
-            }).lean();
+            };
+            if (userId) {
+                utilFilter.userId = userId;
+            }
+            if (msnEsn) {
+                utilFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
+            }
 
-            // Fetch the most recent resets to accurately pull PN and SN/BN assignments
-            const mResets = await MaintenanceReset.find({}).sort({ date: -1 }).lean();
+            const resetFilter = {};
+            if (msnEsn) {
+                resetFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
+            }
+            if (date) {
+                resetFilter.date = { $lte: endOfDay };
+            }
 
-            maintenanceData = fleetAssets.map(f => {
-                const sn = f.sn; // MSN/ESN
-                const util = utils.find(u => String(u.msnEsn) === String(sn));
-                const latestReset = mResets.find(r => String(r.msnEsn) === String(sn));
+            const [fleetAssets, utils, resetRecords] = await Promise.all([
+                Fleet.find(fleetFilter).lean(),
+                Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
+                MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean()
+            ]);
+
+            const fallbackFleetRows = msnEsn && fleetAssets.length === 0
+                ? [{
+                    _id: `fallback-${msnEsn.trim()}`,
+                    sn: msnEsn.trim(),
+                    titled: "",
+                    type: "",
+                    variant: ""
+                }]
+                : fleetAssets;
+
+            const utilByMsn = new Map();
+            utils.forEach(record => {
+                const key = String(record.msnEsn || "").trim().toUpperCase();
+                if (!utilByMsn.has(key)) {
+                    utilByMsn.set(key, record);
+                }
+            });
+
+            const resetByMsn = new Map();
+            resetRecords.forEach(record => {
+                const key = String(record.msnEsn || "").trim().toUpperCase();
+                if (!resetByMsn.has(key)) {
+                    resetByMsn.set(key, record);
+                }
+            });
+
+            maintenanceData = fallbackFleetRows.map(f => {
+                const msn = String(f.sn || msnEsn || "").trim();
+                const lookupKey = msn.toUpperCase();
+                const util = utilByMsn.get(lookupKey);
+                const latestReset = resetByMsn.get(lookupKey);
 
                 return {
                     id: f._id,
-                    msn: sn,
-                    pn: latestReset && latestReset.pn ? latestReset.pn : f.variant || "",
-                    sn: latestReset && latestReset.snBn ? latestReset.snBn : "",
+                    msn,
+                    pn: latestReset?.pn || "",
+                    sn: latestReset?.snBn || "",
                     titled: f.titled || "",
-                    tsn: util ? util.tsn : "",
-                    csn: util ? util.csn : "",
-                    dsn: util ? util.dsn : "",
-                    tso: util ? util.tsoTsr : "",
-                    cso: util ? util.csoCsr : "",
-                    dso: util ? util.dsoDsr : "",
-                    tsr: util ? util.tsRplmt : "",
-                    csr: util ? util.csRplmt : "",
-                    dsr: util ? util.dsRplmt : "",
+                    tsn: util?.tsn ?? "",
+                    csn: util?.csn ?? "",
+                    dsn: util?.dsn ?? "",
+                    tso: util?.tsoTsr ?? "",
+                    cso: util?.csoCsr ?? "",
+                    dso: util?.dsoDsr ?? "",
+                    tsr: util?.tsRplmt ?? "",
+                    csr: util?.csRplmt ?? "",
+                    dsr: util?.dsRplmt ?? "",
                     allDisplay: ""
                 };
             });
@@ -150,7 +204,7 @@ exports.getResetRecords = async (req, res) => {
  */
 exports.bulkSaveResetRecords = async (req, res) => {
     try {
-        const { resetData } = req.body;
+        const resetData = Array.isArray(req.body) ? req.body : req.body?.resetData;
 
         if (!resetData || !Array.isArray(resetData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
@@ -163,12 +217,15 @@ exports.bulkSaveResetRecords = async (req, res) => {
         for (const record of resetData) {
             // Clean up empty string values to null for numeric fields
             const parseNum = (val) => (val === "" || val === undefined) ? null : Number(val);
+            const msnEsn = String(record.msnEsn || "").trim();
+            const pn = String(record.pn || "").trim();
+            const snBn = String(record.snBn || "").trim();
 
             const updateFields = {
                 date: new Date(record.date),
-                msnEsn: record.msnEsn,
-                pn: record.pn,
-                snBn: record.snBn,
+                msnEsn,
+                pn,
+                snBn,
                 tsn: parseNum(record.tsn),
                 csn: parseNum(record.csn),
                 dsn: parseNum(record.dsn),
@@ -184,8 +241,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
             bulkOperations.push({
                 updateOne: {
                     filter: {
-                        date: updateFields.date,
                         msnEsn: updateFields.msnEsn,
+                        pn: updateFields.pn,
                         snBn: updateFields.snBn
                     },
                     update: {
@@ -202,8 +259,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
             utilisationOps.push({
                 updateOne: {
                     filter: {
-                        date: updateFields.date,
                         msnEsn: updateFields.msnEsn,
+                        pn: updateFields.pn,
                         snBn: updateFields.snBn
                     },
                     update: {
@@ -224,7 +281,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const masterStartDate = firstFlight && firstFlight.date ? moment(firstFlight.date).startOf('day') : false;
 
             // Optional: check Fleet for safety, but primary boundary is masterStartDate
-            const fleet = await Fleet.findOne({ sn: record.msnEsn });
+            const fleet = await Fleet.findOne({ sn: msnEsn });
 
             // Proceed to backfill ONLY if we have a valid boundary date
             if (masterStartDate) {
@@ -251,7 +308,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                             $gte: currDate.toDate(),
                             $lt: moment(currDate).endOf('day').toDate()
                         },
-                        "aircraft.msn": Number(record.msnEsn)
+                        "aircraft.msn": Number(msnEsn)
                     });
 
                     let timeUsage = 0;
@@ -285,15 +342,16 @@ exports.bulkSaveResetRecords = async (req, res) => {
                         updateOne: {
                             filter: {
                                 date: currDate.toDate(),
-                                msnEsn: record.msnEsn,
-                                snBn: record.snBn
+                                msnEsn,
+                                pn,
+                                snBn
                             },
                             update: {
                                 $set: {
                                     date: currDate.toDate(),
-                                    msnEsn: record.msnEsn,
-                                    pn: record.pn,
-                                    snBn: record.snBn,
+                                    msnEsn,
+                                    pn,
+                                    snBn,
                                     tsn: currentTsn,
                                     csn: currentCsn,
                                     dsn: currentDsn,
@@ -348,7 +406,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                             $gte: currDate.toDate(),
                             $lt: moment(currDate).endOf('day').toDate()
                         },
-                        "aircraft.msn": Number(record.msnEsn)
+                        "aircraft.msn": Number(msnEsn)
                     });
 
                     let timeUsage = 0;
@@ -379,15 +437,16 @@ exports.bulkSaveResetRecords = async (req, res) => {
                         updateOne: {
                             filter: {
                                 date: currDate.toDate(),
-                                msnEsn: record.msnEsn,
-                                snBn: record.snBn
+                                msnEsn,
+                                pn,
+                                snBn
                             },
                             update: {
                                 $set: {
                                     date: currDate.toDate(),
-                                    msnEsn: record.msnEsn,
-                                    pn: record.pn,
-                                    snBn: record.snBn,
+                                    msnEsn,
+                                    pn,
+                                    snBn,
                                     tsn: currentTsn,
                                     csn: currentCsn,
                                     dsn: currentDsn,
@@ -451,16 +510,16 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
         // 2. Identify all Assets and Parts needing recalculation
         const resetGroups = await MaintenanceReset.aggregate([
-            { $group: { _id: { msnEsn: "$msnEsn", snBn: "$snBn" } } }
+            { $group: { _id: { msnEsn: "$msnEsn", pn: "$pn", snBn: "$snBn" } } }
         ]);
 
         const totalOps = [];
 
         for (const group of resetGroups) {
-            const { msnEsn, snBn } = group._id;
+            const { msnEsn, pn, snBn } = group._id;
             
             // Get all resets for this specific part/asset, sorted chronologically
-            const resets = await MaintenanceReset.find({ msnEsn, snBn }).sort({ date: 1 }).lean();
+            const resets = await MaintenanceReset.find({ msnEsn, pn, snBn }).sort({ date: 1 }).lean();
             if (resets.length === 0) continue;
 
             const fleet = await Fleet.findOne({ sn: msnEsn });
@@ -517,11 +576,11 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
                                         date: currDate.toDate(),
-                                        msnEsn, pn: currentReset.pn, snBn,
+                                        msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                                         tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
                                         tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
@@ -538,11 +597,11 @@ exports.computeMaintenanceLogic = async (req, res) => {
                 // --- SAVE THE RESET POINT ITSELF ---
                 totalOps.push({
                     updateOne: {
-                        filter: { date: new Date(currentReset.date), msnEsn, snBn },
+                        filter: { date: new Date(currentReset.date), msnEsn, pn, snBn },
                         update: {
                             $set: {
                                 date: new Date(currentReset.date),
-                                msnEsn, pn: currentReset.pn, snBn,
+                                msnEsn, pn, snBn,
                                 tsn: currentReset.tsn, csn: currentReset.csn, dsn: currentReset.dsn,
                                 tsoTsr: currentReset.tsoTsr, csoCsr: currentReset.csoCsr, dsoDsr: currentReset.dsoDsr,
                                 tsRplmt: currentReset.tsRplmt, csRplmt: currentReset.csRplmt, dsRplmt: currentReset.dsRplmt,
@@ -593,11 +652,11 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
                                         date: currDate.toDate(),
-                                        msnEsn, pn: currentReset.pn, snBn,
+                                        msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                                         tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
                                         tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
@@ -681,11 +740,11 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, snBn },
+                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
                                         date: currDate.toDate(),
-                                        msnEsn, pn: currentReset.pn, snBn,
+                                        msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                                         tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
                                         tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
@@ -717,11 +776,11 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                     totalOps.push({
                         updateOne: {
-                            filter: { date: currDate.toDate(), msnEsn, snBn },
+                            filter: { date: currDate.toDate(), msnEsn, pn, snBn },
                             update: {
                                 $set: {
                                     date: currDate.toDate(),
-                                    msnEsn, pn: currentReset.pn, snBn,
+                                    msnEsn, pn, snBn,
                                     tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                                     tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
                                     tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,

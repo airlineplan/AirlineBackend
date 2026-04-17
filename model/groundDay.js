@@ -21,11 +21,10 @@ const groundDaySchema = new mongoose.Schema({
     },
     event: {
         type: String,
-        trim: true // e.g., "C-check"
+        trim: true
     }
 });
 
-// Compound index for super fast lookups
 groundDaySchema.index({ userId: 1, date: 1, msn: 1 });
 
 module.exports = mongoose.model("GroundDay", groundDaySchema);

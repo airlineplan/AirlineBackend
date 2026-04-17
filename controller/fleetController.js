@@ -37,7 +37,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 .lean(),
             AircraftOnwing.find({ userId, date: { $lte: endDt } })
                 .select("msn date pos1Esn pos2Esn apun")
-                .sort({ date: 1 })
+                .sort({ date: 1, msn: 1, _id: 1 })
                 .lean()
         ]);
 
@@ -64,7 +64,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             if (!metricsMap[snKey]) metricsMap[snKey] = {};
             metricsMap[snKey][dateStr] = {
                 status: "maintenance",
-                label: "0",
+                label: gd.event || "Maintenance",
                 bh: 0,
                 fh: 0,
                 dep: 0,
@@ -138,7 +138,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
                         metricsMap[snKey][dDisp] = {
                             status: "maintenance",
-                            label: "0",
+                            label: eventLabel || "Maintenance",
                             bh: 0,
                             fh: 0,
                             dep: 0,
