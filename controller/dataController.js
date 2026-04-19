@@ -24,7 +24,7 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
-const { computeFlightCosts } = require("../utils/costLogic");
+const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 
 const createConnections = require('../helper/createConnections');
 
@@ -331,7 +331,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
 const downloadExpenses = async (req, res) => {
   try {
     const userId = req.user.id;
-    const costConfig = await CostConfig.findOne({ userId }).lean() || {};
+    const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId }).lean() || {});
     const workbook = new exceljs.stream.xlsx.WorkbookWriter({
       stream: res,
       useSharedStrings: true, // Reduce memory footprint
@@ -368,19 +368,41 @@ const downloadExpenses = async (req, res) => {
       { header: "Cargo RTK", key: "cargoRtk" },
       { header: "Engine fuel consumption", key: "engineFuelConsumption" },
       { header: "Engine fuel cost", key: "engineFuelCost" },
-      { header: "MR contribution", key: "mrContribution" },
+      { header: "Engine fuel cost CCY", key: "engineFuelCostCCY" },
+      { header: "Engine fuel cost RCCY", key: "engineFuelCostRCCY" },
+      { header: "Maintenance reserve contribution", key: "maintenanceReserveContribution" },
+      { header: "Maintenance reserve contribution CCY", key: "maintenanceReserveContributionCCY" },
+      { header: "Maintenance reserve contribution RCCY", key: "maintenanceReserveContributionRCCY" },
       { header: "Transit maintenance", key: "transitMaintenance" },
-      { header: "Other maintenance 1", key: "otherMaintenance1" },
-      { header: "Other maintenance 2", key: "otherMaintenance2" },
-      { header: "Other maintenance 3", key: "otherMaintenance3" },
-      { header: "Nav ENR", key: "navEnr" },
-      { header: "Nav Trml", key: "navTrml" },
-      { header: "APT-Landing cost", key: "aptLandingCost" },
-      { header: "APT-Handling cost", key: "aptHandlingCost" },
-      { header: "APT-Other cost", key: "aptOtherCost" },
-      { header: "Other DOC 1", key: "otherDoc1" },
-      { header: "Other DOC 2", key: "otherDoc2" },
-      { header: "Other DOC 3", key: "otherDoc3" },
+      { header: "Transit maintenance CCY", key: "transitMaintenanceCCY" },
+      { header: "Transit maintenance RCCY", key: "transitMaintenanceRCCY" },
+      { header: "Other maintenance", key: "otherMaintenance" },
+      { header: "Other maintenance CCY", key: "otherMaintenanceCCY" },
+      { header: "Other maintenance RCCY", key: "otherMaintenanceRCCY" },
+      { header: "Navigation", key: "navigation" },
+      { header: "Navigation CCY", key: "navigationCCY" },
+      { header: "Navigation RCCY", key: "navigationRCCY" },
+      { header: "Airport", key: "airport" },
+      { header: "Airport CCY", key: "airportCCY" },
+      { header: "Airport RCCY", key: "airportRCCY" },
+      { header: "Other DOC", key: "otherDoc" },
+      { header: "Other DOC CCY", key: "otherDocCCY" },
+      { header: "Other DOC RCCY", key: "otherDocRCCY" },
+      { header: "APU fuel cost", key: "apuFuelCost" },
+      { header: "APU fuel cost CCY", key: "apuFuelCostCCY" },
+      { header: "APU fuel cost RCCY", key: "apuFuelCostRCCY" },
+      { header: "MR monthly", key: "mrMonthly" },
+      { header: "MR monthly CCY", key: "mrMonthlyCCY" },
+      { header: "MR monthly RCCY", key: "mrMonthlyRCCY" },
+      { header: "Qualifying Sch Mx Events", key: "qualifyingSchMxEvents" },
+      { header: "Qualifying Sch Mx Events CCY", key: "qualifyingSchMxEventsCCY" },
+      { header: "Qualifying Sch Mx Events RCCY", key: "qualifyingSchMxEventsRCCY" },
+      { header: "Other Mx expenses", key: "otherMxExpenses" },
+      { header: "Other Mx expenses CCY", key: "otherMxExpensesCCY" },
+      { header: "Other Mx expenses RCCY", key: "otherMxExpensesRCCY" },
+      { header: "Rotable changes", key: "rotableChanges" },
+      { header: "Rotable changes CCY", key: "rotableChangesCCY" },
+      { header: "Rotable changes RCCY", key: "rotableChangesRCCY" },
       { header: "Crew Allowances", key: "crewAllowances" },
       { header: "Layover cost", key: "layoverCost" },
       { header: "Crew positioning cost", key: "crewPositioningCost" },
@@ -400,29 +422,27 @@ const downloadExpenses = async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename=FLGTs.xlsx`);
 
     let count = 1;
+    const products = await Flights.find({ userId }).lean();
+    const enrichedProducts = computeFlightCostsBatch(products, costConfig);
 
-    // Use MongoDB cursor to stream data
-    const cursor = Flights.find({ userId }).cursor();
-
-    for await (const product of cursor) {
-      const excelProduct = computeFlightCosts(product.toObject(), costConfig);
+    for (const excelProduct of enrichedProducts) {
       const row = {
         s_no: count,
         ...excelProduct,
-        date: product.date ? new Date(product.date).toISOString().split("T")[0] : "",
-        ft: product.ft ? parseFloat(product.ft) : 0,       // NEW: Parse FT as float
-        acftType: product.acftType || "",
-        bh: product.bh ? parseFloat(product.bh) : 0,       // NEW: Parse BH as float
-        fh: product.fh ? parseFloat(product.fh) : 0,
-        seats: parseFloat(product.seats) || 0,
-        CargoCapT: parseFloat(product.CargoCapT) || 0,
-        dist: parseFloat(product.dist) || 0,
-        pax: parseInt(product.pax, 10) || 0,
-        CargoT: parseFloat(product.CargoT) || 0,
-        ask: parseInt(product.ask, 10) || 0,
-        rsk: parseInt(product.rsk, 10) || 0,
-        cargoAtk: parseInt(product.cargoAtk, 10) || 0,
-        cargoRtk: parseInt(product.cargoRtk, 10) || 0,
+        date: excelProduct.date ? new Date(excelProduct.date).toISOString().split("T")[0] : "",
+        ft: excelProduct.ft ? parseFloat(excelProduct.ft) : 0,
+        acftType: excelProduct.acftType || "",
+        bh: excelProduct.bh ? parseFloat(excelProduct.bh) : 0,
+        fh: excelProduct.fh ? parseFloat(excelProduct.fh) : 0,
+        seats: parseFloat(excelProduct.seats) || 0,
+        CargoCapT: parseFloat(excelProduct.CargoCapT) || 0,
+        dist: parseFloat(excelProduct.dist) || 0,
+        pax: parseInt(excelProduct.pax, 10) || 0,
+        CargoT: parseFloat(excelProduct.CargoT) || 0,
+        ask: parseInt(excelProduct.ask, 10) || 0,
+        rsk: parseInt(excelProduct.rsk, 10) || 0,
+        cargoAtk: parseInt(excelProduct.cargoAtk, 10) || 0,
+        cargoRtk: parseInt(excelProduct.cargoRtk, 10) || 0,
       };
 
       worksheet.addRow(row).commit();

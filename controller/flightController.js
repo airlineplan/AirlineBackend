@@ -24,7 +24,7 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
-const { computeFlightCosts } = require("../utils/costLogic");
+const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 
 const createConnections = require('../helper/createConnections');
 
@@ -161,8 +161,11 @@ const searchFlights = async (req, res) => {
 
     // Fetch flights
     const data = await Flights.find(query).skip(skip).limit(limitNum);
-    const costConfig = await CostConfig.findOne({ userId: req.user.id }).lean() || {};
-    const enrichedData = data.map((flgt) => computeFlightCosts(flgt.toObject(), costConfig));
+    const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId: req.user.id }).lean() || {});
+    const enrichedData = computeFlightCostsBatch(
+      data.map((flgt) => flgt.toObject()),
+      costConfig
+    );
 
     // Get total count
     const total = await Flights.countDocuments(query);

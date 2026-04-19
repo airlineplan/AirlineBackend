@@ -1,6 +1,6 @@
 const CostConfig = require("../model/costConfigSchema");
 const Flights = require("../model/flight");
-const { computeFlightCosts } = require("../utils/costLogic");
+const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
@@ -70,12 +70,10 @@ exports.getCostPageData = async (req, res) => {
     const flights = await Flights.find(matchQuery).lean();
 
     // 3. Fetch Cost Config 
-    const costConfig = await CostConfig.findOne({ userId }).lean() || {};
+    const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId }).lean() || {});
 
     // 4. Compute Costs
-    const enrichedFlights = flights.map(flgt => {
-      return computeFlightCosts(flgt, costConfig);
-    });
+    const enrichedFlights = computeFlightCostsBatch(flights, costConfig);
 
     res.status(200).json({ flights: enrichedFlights });
 
