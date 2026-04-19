@@ -3,15 +3,26 @@ const Flight = require('../model/flight'); // Add this to query flight dates
 const Assignment = require('../model/assignment'); // Adjust path if needed
 const GroundDay = require('../model/groundDay');
 const AircraftOnwing = require('../model/aircraftOnwing');
+const RotableMovement = require('../model/rotableMovementSchema');
 const moment = require('moment');
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
-const normalizeSnKey = (value) => {
+const normalizeNumericAssetKey = (value) => {
     if (value === null || value === undefined) return "";
     const raw = String(value).trim().toUpperCase();
     if (!raw) return "";
     const digitsOnly = raw.replace(/\D/g, "");
     return digitsOnly || raw;
+};
+const normalizeApuKey = (value) => {
+    if (value === null || value === undefined) return "";
+    return String(value).trim().toUpperCase();
+};
+const createMetricKey = (category, value) => {
+    const normalized =
+        category === "APU" ? normalizeApuKey(value) : normalizeNumericAssetKey(value);
+
+    return normalized ? `${category}:${normalized}` : "";
 };
 const createAssignedMetricEntry = (metric = {}) => ({
     status: "aircraft-assigned",
@@ -20,6 +31,17 @@ const createAssignedMetricEntry = (metric = {}) => ({
     fh: Number(metric.fh) || 0,
     dep: Number(metric.dep) || 0
 });
+const createMaintenanceMetricEntry = (event = "Maintenance") => ({
+    status: "maintenance",
+    label: event,
+    bh: 0,
+    fh: 0,
+    dep: 0,
+    event
+});
+const isSpareFleetAsset = (asset = {}) =>
+    ["Engine", "APU"].includes(asset.category) &&
+    String(asset.titled || "").toLowerCase().includes("spare");
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
@@ -32,7 +54,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
         const startDt = moment.utc(month, "MMMM YYYY").startOf('month').toDate();
         const endDt = moment.utc(month, "MMMM YYYY").endOf('month').toDate();
 
-        const [groundDays, assignments, flights, onwings] = await Promise.all([
+        const [groundDays, assignments, flights, onwings, fleetAssets, rotableMovements] = await Promise.all([
             GroundDay.find({ userId, date: { $gte: startDt, $lte: endDt } })
                 .select("msn date event")
                 .lean(),
@@ -45,6 +67,13 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             AircraftOnwing.find({ userId, date: { $lte: endDt } })
                 .select("msn date pos1Esn pos2Esn apun")
                 .sort({ date: 1, msn: 1, _id: 1 })
+                .lean(),
+            Fleet.find({ userId })
+                .select("category sn titled")
+                .lean(),
+            RotableMovement.find({ userId, date: { $lte: endDt } })
+                .select("date msn removedSN installedSN")
+                .sort({ date: 1, _id: 1 })
                 .lean()
         ]);
 
@@ -59,28 +88,69 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
         const metricsMap = {};
         const groundMap = {};
+        const componentGroundMap = {
+            Engine: {},
+            APU: {}
+        };
+
+        const spareComponentKeys = new Set(
+            fleetAssets
+                .filter(isSpareFleetAsset)
+                .map((asset) => createMetricKey(asset.category, asset.sn))
+                .filter(Boolean)
+        );
+
+        const rotableHistoryMap = {};
 
         groundDays.forEach((gd) => {
-            const snKey = normalizeSnKey(gd.msn);
-            if (!snKey) return;
             const dateStr = moment.utc(gd.date).format("DD MMM YY");
+            const aircraftKey = createMetricKey("Aircraft", gd.msn);
+            const engineKey = createMetricKey("Engine", gd.msn);
+            const apuKey = createMetricKey("APU", gd.msn);
 
-            if (!groundMap[dateStr]) groundMap[dateStr] = {};
-            groundMap[dateStr][snKey] = gd.event || "Maintenance";
+            if (aircraftKey) {
+                if (!groundMap[dateStr]) groundMap[dateStr] = {};
+                groundMap[dateStr][aircraftKey] = gd.event || "Maintenance";
 
-            if (!metricsMap[snKey]) metricsMap[snKey] = {};
-            metricsMap[snKey][dateStr] = {
-                status: "maintenance",
-                label: gd.event || "Maintenance",
-                bh: 0,
-                fh: 0,
-                dep: 0,
-                event: gd.event || "Maintenance"
-            };
+                if (!metricsMap[aircraftKey]) metricsMap[aircraftKey] = {};
+                metricsMap[aircraftKey][dateStr] = createMaintenanceMetricEntry(gd.event || "Maintenance");
+            }
+
+            if (engineKey) {
+                if (!componentGroundMap.Engine[dateStr]) componentGroundMap.Engine[dateStr] = {};
+                componentGroundMap.Engine[dateStr][engineKey] = gd.event || "Maintenance";
+            }
+
+            if (apuKey) {
+                if (!componentGroundMap.APU[dateStr]) componentGroundMap.APU[dateStr] = {};
+                componentGroundMap.APU[dateStr][apuKey] = gd.event || "Maintenance";
+            }
+        });
+
+        rotableMovements.forEach((movement) => {
+            const dateValue = movement.date ? new Date(movement.date) : null;
+            if (!dateValue) return;
+
+            [
+                { category: "Engine", field: "installedSN", state: "installed" },
+                { category: "Engine", field: "removedSN", state: "removed" },
+                { category: "APU", field: "installedSN", state: "installed" },
+                { category: "APU", field: "removedSN", state: "removed" }
+            ].forEach(({ category, field, state }) => {
+                const componentKey = createMetricKey(category, movement[field]);
+                if (!componentKey || !spareComponentKeys.has(componentKey)) return;
+
+                if (!rotableHistoryMap[componentKey]) rotableHistoryMap[componentKey] = [];
+                rotableHistoryMap[componentKey].push({
+                    date: dateValue,
+                    ownerAcftSn: createMetricKey("Aircraft", movement.msn),
+                    state
+                });
+            });
         });
 
         assignments.forEach((assign) => {
-            const snKey = normalizeSnKey(assign.aircraft?.msn);
+            const snKey = createMetricKey("Aircraft", assign.aircraft?.msn);
             if (!snKey) return;
 
             const dateStr = moment.utc(assign.date).format("DD MMM YY");
@@ -127,20 +197,27 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 moment.utc(onwings[onwingIdx].date).isSameOrBefore(currentDayEnd)
             ) {
                 const ow = onwings[onwingIdx];
-                const acftSn = normalizeSnKey(ow.msn);
+                const acftSn = createMetricKey("Aircraft", ow.msn);
                 if (acftSn) activeOnwingByMsn[acftSn] = ow;
                 onwingIdx += 1;
             }
 
             const componentOwnerMap = {};
             Object.entries(activeOnwingByMsn).forEach(([acftSn, config]) => {
-                [config.pos1Esn, config.pos2Esn, config.apun].forEach((assetSn) => {
-                    const componentSn = normalizeSnKey(assetSn);
+                const componentMappings = [
+                    { category: "Engine", value: config.pos1Esn },
+                    { category: "Engine", value: config.pos2Esn },
+                    { category: "APU", value: config.apun }
+                ];
+
+                componentMappings.forEach(({ category, value }) => {
+                    const componentSn = createMetricKey(category, value);
                     if (componentSn) componentOwnerMap[componentSn] = acftSn;
                 });
             });
 
             Object.entries(componentOwnerMap).forEach(([componentSn, ownerAcftSn]) => {
+                if (spareComponentKeys.has(componentSn)) return;
                 if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
 
                 const existingComponentMetric = metricsMap[componentSn][dDisp];
@@ -148,20 +225,50 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
                 const aircraftGroundEvent = groundMap[dDisp]?.[ownerAcftSn];
                 if (aircraftGroundEvent) {
-                    metricsMap[componentSn][dDisp] = {
-                        status: "maintenance",
-                        label: aircraftGroundEvent || "Maintenance",
-                        bh: 0,
-                        fh: 0,
-                        dep: 0,
-                        event: aircraftGroundEvent
-                    };
+                    metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(aircraftGroundEvent || "Maintenance");
                     return;
                 }
 
                 const aircraftMetric = metricsMap[ownerAcftSn]?.[dDisp];
                 if (aircraftMetric?.status === "aircraft-assigned") {
                     metricsMap[componentSn][dDisp] = createAssignedMetricEntry(aircraftMetric);
+                }
+            });
+
+            spareComponentKeys.forEach((componentSn) => {
+                if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
+
+                const componentHistory = rotableHistoryMap[componentSn] || [];
+                let latestMovement = null;
+
+                for (let idx = componentHistory.length - 1; idx >= 0; idx -= 1) {
+                    const movement = componentHistory[idx];
+                    if (moment.utc(movement.date).isSameOrBefore(currentDayEnd)) {
+                        latestMovement = movement;
+                        break;
+                    }
+                }
+
+                if (!latestMovement) return;
+
+                const componentCategory = componentSn.startsWith("APU:") ? "APU" : "Engine";
+                const componentGroundEvent = componentGroundMap[componentCategory]?.[dDisp]?.[componentSn];
+                if (latestMovement.state === "removed" && componentGroundEvent) {
+                    metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(componentGroundEvent);
+                    return;
+                }
+
+                const ownerAcftSn = latestMovement.ownerAcftSn;
+                const aircraftGroundEvent = ownerAcftSn ? groundMap[dDisp]?.[ownerAcftSn] : null;
+                if (aircraftGroundEvent) {
+                    metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(aircraftGroundEvent);
+                    return;
+                }
+
+                const aircraftMetric = ownerAcftSn ? metricsMap[ownerAcftSn]?.[dDisp] : null;
+                if (aircraftMetric?.status === "aircraft-assigned") {
+                    metricsMap[componentSn][dDisp] = createAssignedMetricEntry(aircraftMetric);
+                    return;
                 }
             });
         }
@@ -323,7 +430,7 @@ exports.bulkUpsertFleet = async (req, res) => {
                 }
             }
             else if (asset.category === 'APU') {
-                // For APU, the title usually directly matches the Aircraft Registration (e.g., "VT-DKU")
+                // For APU, the title directly names the owning aircraft (e.g., "VT-DKU")
                 if (aircraftMap[titleStr]) aircraftMap[titleStr].apun = asset.sn.trim();
             }
         });
