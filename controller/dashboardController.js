@@ -60,6 +60,28 @@ const normalizeSingleQueryValue = (value) => {
   return String(value ?? "").trim();
 };
 
+const getUserIdFromReq = (req) => {
+  const rawUserId =
+    req.user?.id ??
+    req.userId ??
+    req.user?.userId ??
+    req.user?._id;
+
+  const normalizedUserId = String(rawUserId ?? "").trim();
+  return normalizedUserId || "";
+};
+
+const normalizeDropdownValueList = (values = []) =>
+  Array.from(
+    new Set(
+      values
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean)
+    )
+  ).sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })
+  );
+
 
 
 const {
@@ -98,7 +120,7 @@ const {
 
 const populateDashboardDropDowns = async (req, res) => {
   try {
-    const userId = req.user?.id;
+    const userId = getUserIdFromReq(req);
 
     if (!userId) {
       return res.status(400).json({ message: "User ID missing" });
@@ -108,6 +130,12 @@ const populateDashboardDropDowns = async (req, res) => {
       { $match: { userId: userId } },
       { $group: { _id: null, sector: { $addToSet: "$sector" } } },
       { $project: { _id: 0, sector: 1 } },
+    ]);
+
+    const distinctFlights = await Flights.aggregate([
+      { $match: { userId: userId } },
+      { $group: { _id: null, flight: { $addToSet: "$flight" } } },
+      { $project: { _id: 0, flight: 1 } },
     ]);
 
     const distinctValues = await Data.aggregate([
@@ -126,6 +154,7 @@ const populateDashboardDropDowns = async (req, res) => {
       {
         $project: {
           _id: 0,
+          flight: 1,
           from: 1,
           to: 1,
           variant: 1,
@@ -136,19 +165,18 @@ const populateDashboardDropDowns = async (req, res) => {
     ]);
 
     const formatOptions = (values = []) =>
-      values
-        .filter((v) => v !== null && v !== undefined && v !== "")
-        .map((value) => ({
-          value,
-          label: value,
-        }));
+      normalizeDropdownValueList(values).map((value) => ({
+        value,
+        label: value,
+      }));
 
     // Safe extraction
     const sectorList = distinctSectors?.[0]?.sector ?? [];
+    const flightList = distinctFlights?.[0]?.flight ?? [];
     const dataValues = distinctValues?.[0] ?? {};
 
     const filteredSectors = sectorList.filter(
-      (sector) => sector !== "undefined-undefined"
+      (sector) => String(sector ?? "").trim() !== "undefined-undefined"
     );
 
     const distinctPooValues = await PooTable.aggregate([
@@ -164,7 +192,9 @@ const populateDashboardDropDowns = async (req, res) => {
     ]);
 
     const data = {
-      flight: formatOptions(dataValues.flight ?? []),
+      flight: formatOptions(
+        Array.from(new Set([...(flightList || []), ...(dataValues.flight ?? [])]))
+      ),
       from: formatOptions(dataValues.from ?? []),
       to: formatOptions(dataValues.to ?? []),
       variant: formatOptions(dataValues.variant ?? []),
