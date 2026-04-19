@@ -23,6 +23,8 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const CostConfig = require("../model/costConfigSchema");
+const { computeFlightCosts } = require("../utils/costLogic");
 
 const createConnections = require('../helper/createConnections');
 
@@ -329,6 +331,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
 const downloadExpenses = async (req, res) => {
   try {
     const userId = req.user.id;
+    const costConfig = await CostConfig.findOne({ userId }).lean() || {};
     const workbook = new exceljs.stream.xlsx.WorkbookWriter({
       stream: res,
       useSharedStrings: true, // Reduce memory footprint
@@ -363,6 +366,24 @@ const downloadExpenses = async (req, res) => {
       { header: "RSK", key: "rsk" },
       { header: "Cargo ATK", key: "cargoAtk" },
       { header: "Cargo RTK", key: "cargoRtk" },
+      { header: "Engine fuel consumption", key: "engineFuelConsumption" },
+      { header: "Engine fuel cost", key: "engineFuelCost" },
+      { header: "MR contribution", key: "mrContribution" },
+      { header: "Transit maintenance", key: "transitMaintenance" },
+      { header: "Other maintenance 1", key: "otherMaintenance1" },
+      { header: "Other maintenance 2", key: "otherMaintenance2" },
+      { header: "Other maintenance 3", key: "otherMaintenance3" },
+      { header: "Nav ENR", key: "navEnr" },
+      { header: "Nav Trml", key: "navTrml" },
+      { header: "APT-Landing cost", key: "aptLandingCost" },
+      { header: "APT-Handling cost", key: "aptHandlingCost" },
+      { header: "APT-Other cost", key: "aptOtherCost" },
+      { header: "Other DOC 1", key: "otherDoc1" },
+      { header: "Other DOC 2", key: "otherDoc2" },
+      { header: "Other DOC 3", key: "otherDoc3" },
+      { header: "Crew Allowances", key: "crewAllowances" },
+      { header: "Layover cost", key: "layoverCost" },
+      { header: "Crew positioning cost", key: "crewPositioningCost" },
       { header: "Dom / INTL", key: "domIntl" },
       { header: "User Tag 1", key: "userTag1" },
       { header: "User Tag 2", key: "userTag2" },
@@ -384,9 +405,10 @@ const downloadExpenses = async (req, res) => {
     const cursor = Flights.find({ userId }).cursor();
 
     for await (const product of cursor) {
-      const excelProduct = {
+      const excelProduct = computeFlightCosts(product.toObject(), costConfig);
+      const row = {
         s_no: count,
-        ...product.toObject(),
+        ...excelProduct,
         date: product.date ? new Date(product.date).toISOString().split("T")[0] : "",
         ft: product.ft ? parseFloat(product.ft) : 0,       // NEW: Parse FT as float
         acftType: product.acftType || "",
@@ -403,7 +425,7 @@ const downloadExpenses = async (req, res) => {
         cargoRtk: parseInt(product.cargoRtk, 10) || 0,
       };
 
-      worksheet.addRow(excelProduct).commit();
+      worksheet.addRow(row).commit();
       count++;
     }
 
