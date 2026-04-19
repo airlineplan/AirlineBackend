@@ -359,6 +359,13 @@ exports.bulkUpsertFleet = async (req, res) => {
         const fleetBulkOps = fleetData.map((asset, index) => {
             const updateData = { ...asset };
 
+            updateData.sn = String(updateData.sn || "").trim();
+            updateData.category = updateData.category ? String(updateData.category).trim() : updateData.category;
+            updateData.type = updateData.type ? String(updateData.type).trim() : updateData.type;
+            updateData.variant = updateData.variant ? String(updateData.variant).trim() : updateData.variant;
+            updateData.titled = updateData.titled ? String(updateData.titled).trim() : updateData.titled;
+            updateData.ownership = updateData.ownership ? String(updateData.ownership).trim() : updateData.ownership;
+
             // Auto-uppercase registration
             if (updateData.regn) updateData.regn = updateData.regn.trim().toUpperCase();
             updateData.userId = userId;
@@ -378,7 +385,7 @@ exports.bulkUpsertFleet = async (req, res) => {
 
             return {
                 updateOne: {
-                    filter: { userId, sn: asset.sn.trim() },
+                    filter: { userId, sn: updateData.sn },
                     update: { $set: updateData },
                     upsert: true
                 }

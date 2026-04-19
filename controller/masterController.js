@@ -116,29 +116,25 @@ const getMasterWeeks = async (req, res) => {
 
     const { minDate, maxDate } = result[0];
 
-    // 2️⃣ Convert to Date objects
-    const startDate = new Date(minDate);
-    const endDate = new Date(maxDate);
+    // 2️⃣ Use moment.utc to generate weeks to avoid timezone-induced date shifts
+    let current = moment.utc(minDate).startOf('day');
+    const end = moment.utc(maxDate).startOf('day');
 
-    // Normalize time
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(0, 0, 0, 0);
-
-    // 3️⃣ Find first Sunday >= startDate
-    const firstSunday = new Date(startDate);
-    const day = firstSunday.getDay(); // 0 = Sunday
-
-    if (day !== 0) {
-      firstSunday.setDate(firstSunday.getDate() + (7 - day));
+    // Find first Sunday >= current
+    if (current.day() !== 0) {
+      current.add(7 - current.day(), 'days');
     }
 
-    // 4️⃣ Generate all Sundays until endDate
-    const weeks = [];
-    let current = new Date(firstSunday);
+    // Find last Sunday >= end
+    let lastSunday = moment.utc(end).startOf('day');
+    if (lastSunday.day() !== 0) {
+      lastSunday.add(7 - lastSunday.day(), 'days');
+    }
 
-    while (current <= endDate) {
-      weeks.push(current.toISOString().split("T")[0]);
-      current.setDate(current.getDate() + 7);
+    const weeks = [];
+    while (current.isSameOrBefore(lastSunday)) {
+      weeks.push(current.format('YYYY-MM-DD'));
+      current.add(7, 'days');
     }
 
     return res.json({ weeks });
