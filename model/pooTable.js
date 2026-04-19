@@ -35,6 +35,8 @@ const pooTableSchema = new mongoose.Schema({
     sta: { type: String, trim: true, default: null },
     connectedStd: { type: String, trim: true, default: null },
     connectedSta: { type: String, trim: true, default: null },
+    flightList: { type: [String], default: [] },
+    timeInclLayover: { type: String, trim: true, default: null },
 
     // Capacity and Traffic (Pax/Cargo)
     maxPax: { type: Number, default: 0 },
@@ -51,6 +53,7 @@ const pooTableSchema = new mongoose.Schema({
     // Distances
     sectorGcd: { type: Number, default: 0 }, // Great Circle Distance
     odViaGcd: { type: Number, default: 0 },
+    totalGcd: { type: Number, default: 0 },
 
     // Fares, Rates, and Proration
     legFare: { type: Number, default: 0 },
@@ -58,6 +61,8 @@ const pooTableSchema = new mongoose.Schema({
     odFare: { type: Number, default: 0 },
     odRate: { type: Number, default: 0 },
     prorateRatioL1: { type: Number, default: 0 },
+    fareProrateRatioL1L2: { type: Number, default: 0 },
+    rateProrateRatioL1L2: { type: Number, default: 0 },
     applySSPricing: { type: Boolean, default: false },
     interline: { type: String, trim: true, default: "" },
     codeshare: { type: String, trim: true, default: "" },
@@ -89,7 +94,13 @@ const pooTableSchema = new mongoose.Schema({
     // Total Revenue (Reporting Currency - RCCY)
     rccyPax: { type: Number, default: 0 },
     rccyCargo: { type: Number, default: 0 },
-    rccyTotalRev: { type: Number, default: 0 }
+    rccyTotalRev: { type: Number, default: 0 },
+    fnlRccyPaxRev: { type: Number, default: 0 },
+    fnlRccyCargoRev: { type: Number, default: 0 },
+    fnlRccyTotalRev: { type: Number, default: 0 },
+    reportingCurrency: { type: String, trim: true, default: "" },
+    stationCurrencySource: { type: String, trim: true, default: "manual" },
+    reportingCurrencySource: { type: String, trim: true, default: "manual" }
 }, {
     timestamps: true, // Automatically adds createdAt and updatedAt fields
     collection: 'pooTables'

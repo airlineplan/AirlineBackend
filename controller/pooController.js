@@ -1,9 +1,12 @@
 const moment = require("moment");
 
 const Connections = require("../model/connectionSchema");
+const Data = require("../model/dataSchema");
 const Flight = require("../model/flight");
 const PooTable = require("../model/pooTable");
+const RevenueConfig = require("../model/revenueConfigSchema");
 const Sector = require("../model/sectorSchema");
+const Station = require("../model/stationSchema");
 
 const TRAFFIC_TYPES = {
     LEG: "leg",
@@ -27,6 +30,8 @@ const REVENUE_FIELDS = [
     "odFare",
     "odRate",
     "prorateRatioL1",
+    "fareProrateRatioL1L2",
+    "rateProrateRatioL1L2",
     "pooCcyToRccy",
 ];
 
@@ -37,6 +42,7 @@ const STRING_FIELDS = [
 ];
 
 const BOOLEAN_FIELDS = ["applySSPricing"];
+const BLANK_OPTION_VALUE = "__BLANK__";
 
 function normalizeStation(value) {
     return String(value || "").trim().toUpperCase();
@@ -51,6 +57,14 @@ function normalizeRevenueLabel(value) {
 
 function normalizeDomIntl(value) {
     return String(value || "").trim().toLowerCase() === "intl" ? "Intl" : "Dom";
+}
+
+function normalizeCurrencyCode(value) {
+    return String(value || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z]/g, "")
+        .slice(0, 3);
 }
 
 function parseNumber(value, fallback = 0) {
@@ -88,6 +102,53 @@ function safeRatio(numerator, denominator) {
 
 function formatDateKey(date) {
     return moment(date).format("YYYY-MM-DD");
+}
+
+function timeToMinutes(value) {
+    const [hours, minutes] = String(value || "")
+        .split(":")
+        .map((part) => Number(part));
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    return (hours * 60) + minutes;
+}
+
+function formatDuration(minutes) {
+    const safeMinutes = Math.max(0, Math.round(parseNumber(minutes)));
+    const hours = Math.floor(safeMinutes / 60);
+    const mins = safeMinutes % 60;
+    return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+}
+
+function diffMinutes(start, end) {
+    const startMinutes = timeToMinutes(start);
+    const endMinutes = timeToMinutes(end);
+    if (startMinutes === null || endMinutes === null) return 0;
+    let diff = endMinutes - startMinutes;
+    if (diff < 0) diff += 24 * 60;
+    return diff;
+}
+
+function calculateLayoverMinutes(firstSta, secondStd) {
+    return diffMinutes(firstSta, secondStd);
+}
+
+function calculateTimeInclLayover(firstSnapshot, secondSnapshot = null) {
+    if (!secondSnapshot) {
+        return formatDuration(diffMinutes(firstSnapshot.std, firstSnapshot.sta));
+    }
+
+    const firstLeg = diffMinutes(firstSnapshot.std, firstSnapshot.sta);
+    const layover = calculateLayoverMinutes(firstSnapshot.sta, secondSnapshot.std);
+    const secondLeg = diffMinutes(secondSnapshot.std, secondSnapshot.sta);
+    return formatDuration(firstLeg + layover + secondLeg);
+}
+
+function buildValidationError(issues) {
+    const error = new Error(
+        issues.map((issue) => issue.message).join(" | ")
+    );
+    error.validationIssues = issues;
+    return error;
 }
 
 function normalizeGroupByField(field) {
@@ -166,6 +227,65 @@ function buildSectorMap(sectors) {
     return sectorMap;
 }
 
+function buildStationCurrencyMap(stations) {
+    const stationMap = new Map();
+    stations.forEach((station) => {
+        stationMap.set(normalizeStation(station.stationName), normalizeCurrencyCode(station.currencyCode));
+    });
+    return stationMap;
+}
+
+function normalizeRevenueConfig(config = {}) {
+    const reportingCurrency = normalizeCurrencyCode(config.reportingCurrency) || "USD";
+    const currencyCodes = [
+        reportingCurrency,
+        ...(Array.isArray(config.currencyCodes) ? config.currencyCodes : []),
+    ]
+        .map(normalizeCurrencyCode)
+        .filter(Boolean);
+
+    return {
+        reportingCurrency,
+        currencyCodes: [...new Set(currencyCodes)],
+        fxRates: Array.isArray(config.fxRates)
+            ? config.fxRates.map((row) => ({
+                pair: String(row?.pair || "").trim().toUpperCase(),
+                dateKey: String(row?.dateKey || "").trim(),
+                rate: roundToTwo(row?.rate || 1),
+            }))
+            : [],
+    };
+}
+
+function buildFxRateMap(fxRates = []) {
+    const map = new Map();
+    fxRates.forEach((row) => {
+        if (!row.pair || !row.dateKey) return;
+        map.set(`${row.pair}::${row.dateKey}`, roundToTwo(row.rate || 1));
+    });
+    return map;
+}
+
+function resolveCurrencyContext({ stationCurrencyMap, revenueConfig, fxRateMap, poo, date }) {
+    const normalizedPoo = normalizeStation(poo);
+    const reportingCurrency = revenueConfig.reportingCurrency || "USD";
+    const pooCcy = stationCurrencyMap.get(normalizedPoo) || reportingCurrency;
+    const dateKey = formatDateKey(date);
+    const pair = `${pooCcy}/${reportingCurrency}`;
+    const rate =
+        pooCcy === reportingCurrency
+            ? 1
+            : (fxRateMap.get(`${pair}::${dateKey}`) || 1);
+
+    return {
+        pooCcy,
+        pooCcyToRccy: roundToTwo(rate),
+        reportingCurrency,
+        stationCurrencySource: stationCurrencyMap.has(normalizedPoo) ? "station" : "reporting_default",
+        reportingCurrencySource: "financial_config",
+    };
+}
+
 function buildFlightSnapshot(flight, sectorMap) {
     const sector = `${normalizeStation(flight.depStn)}-${normalizeStation(flight.arrStn)}`;
     const sectorInfo = sectorMap.get(sector) || {};
@@ -192,6 +312,7 @@ function buildFlightSnapshot(flight, sectorMap) {
         variant: String(flight.variant || "").trim(),
         std: String(flight.std || sectorInfo.std || "").trim(),
         sta: String(flight.sta || sectorInfo.sta || "").trim(),
+        bt: String(flight.bt || "").trim(),
         maxPax: sourceSeats,
         maxCargoT: sourceCargoCapT,
         sourceSeats,
@@ -278,6 +399,8 @@ function createWorkingState(record) {
         connectedFlightId: record.connectedFlightId || null,
         flightNumber: record.flightNumber,
         connectedFlightNumber: record.connectedFlightNumber || null,
+        flightList: Array.isArray(record.flightList) ? record.flightList : [],
+        timeInclLayover: String(record.timeInclLayover || "").trim(),
         maxPax: parseNumber(record.maxPax),
         maxCargoT: roundToTwo(record.maxCargoT),
         pax: roundToWhole(record.pax),
@@ -290,12 +413,15 @@ function createWorkingState(record) {
         sourceCargoLF: roundToTwo(record.sourceCargoLF),
         sectorGcd: parseNumber(record.sectorGcd),
         odViaGcd: parseNumber(record.odViaGcd),
+        totalGcd: parseNumber(record.totalGcd),
         stops: parseNumber(record.stops),
         legFare: roundToTwo(record.legFare),
         legRate: roundToTwo(record.legRate),
         odFare: roundToTwo(record.odFare),
         odRate: roundToTwo(record.odRate),
         prorateRatioL1: roundToTwo(record.prorateRatioL1),
+        fareProrateRatioL1L2: roundToTwo(record.fareProrateRatioL1L2),
+        rateProrateRatioL1L2: roundToTwo(record.rateProrateRatioL1L2),
         legPaxRev: roundToTwo(record.legPaxRev),
         legCargoRev: roundToTwo(record.legCargoRev),
         legTotalRev: roundToTwo(record.legTotalRev),
@@ -313,16 +439,26 @@ function createWorkingState(record) {
         rccyPax: roundToTwo(record.rccyPax),
         rccyCargo: roundToTwo(record.rccyCargo),
         rccyTotalRev: roundToTwo(record.rccyTotalRev),
+        fnlRccyPaxRev: roundToTwo(record.fnlRccyPaxRev),
+        fnlRccyCargoRev: roundToTwo(record.fnlRccyCargoRev),
+        fnlRccyTotalRev: roundToTwo(record.fnlRccyTotalRev),
+        reportingCurrency: normalizeCurrencyCode(record.reportingCurrency),
+        stationCurrencySource: String(record.stationCurrencySource || "manual").trim(),
+        reportingCurrencySource: String(record.reportingCurrencySource || "manual").trim(),
         applySSPricing: Boolean(record.applySSPricing),
         interline: String(record.interline || "").trim(),
         codeshare: String(record.codeshare || "").trim(),
     };
 }
 
-function calculateProrateRatio(row) {
-    const explicit = parseNumber(row.prorateRatioL1);
+function calculateProrateRatio(row, fieldName) {
+    const explicit = parseNumber(row[fieldName]);
     if (explicit > 0) {
         return Math.min(explicit, 1);
+    }
+    const sharedExplicit = parseNumber(row.prorateRatioL1);
+    if (sharedExplicit > 0) {
+        return Math.min(sharedExplicit, 1);
     }
     if (row.stops !== 1) {
         return 1;
@@ -330,11 +466,11 @@ function calculateProrateRatio(row) {
     return Math.min(safeRatio(row.sectorGcd, row.odViaGcd), 1);
 }
 
-function calculateLegShare(row) {
+function calculateLegShare(row, fieldName) {
     if (row.stops !== 1) {
         return 1;
     }
-    const firstLegRatio = calculateProrateRatio(row);
+    const firstLegRatio = calculateProrateRatio(row, fieldName);
     if (
         row.trafficType === TRAFFIC_TYPES.BEHIND ||
         row.trafficType === TRAFFIC_TYPES.TRANSIT_FL
@@ -345,12 +481,13 @@ function calculateLegShare(row) {
 }
 
 function recalculateRevenue(row) {
-    const legShare = calculateLegShare(row);
     const next = { ...row };
+    const fareShare = calculateLegShare(row, "fareProrateRatioL1L2");
+    const rateShare = calculateLegShare(row, "rateProrateRatioL1L2");
 
     if (row.stops === 1) {
-        next.legFare = roundToTwo(row.odFare * legShare);
-        next.legRate = roundToTwo(row.odRate * legShare);
+        next.legFare = roundToTwo(row.odFare * fareShare);
+        next.legRate = roundToTwo(row.odRate * rateShare);
     }
 
     next.legPaxRev = roundToTwo(parseNumber(next.pax) * parseNumber(next.legFare));
@@ -374,6 +511,9 @@ function recalculateRevenue(row) {
     next.rccyPax = next.rccyOdPaxRev;
     next.rccyCargo = next.rccyOdCargoRev;
     next.rccyTotalRev = next.rccyOdTotalRev;
+    next.fnlRccyPaxRev = next.rccyOdPaxRev;
+    next.fnlRccyCargoRev = next.rccyOdCargoRev;
+    next.fnlRccyTotalRev = roundToTwo(next.fnlRccyPaxRev + next.fnlRccyCargoRev);
 
     return next;
 }
@@ -384,11 +524,14 @@ function buildEditableResponse(records) {
             if (a.sNo !== b.sNo) return a.sNo - b.sNo;
             return a.identifier.localeCompare(b.identifier);
         })
-        .map((record) => ({
-            ...record.toObject(),
+        .map((record) => {
+            const baseRecord = typeof record.toObject === "function" ? record.toObject() : record;
+            return {
+            ...baseRecord,
             displayType: DISPLAY_LABELS[record.trafficType] || record.identifier || record.trafficType,
             rowMatchKey: buildRowMatchKey(record),
-        }));
+        };
+        });
 }
 
 async function getSectorInfoMap(userId) {
@@ -430,6 +573,7 @@ function buildLegRows({
     snapshot,
     existingRowsByKey,
     existingRecords,
+    currencyContextByPoo = {},
 }) {
     const odGroupKey = buildLegPairKey(snapshot.flightId);
     const depRowKey = buildRowKey({
@@ -513,19 +657,13 @@ function buildLegRows({
         connectedFlightNumber: null,
         connectedStd: null,
         connectedSta: null,
+        flightList: [snapshot.flightNumber],
+        timeInclLayover: calculateTimeInclLayover(snapshot),
         ownerFlightId: snapshot.flightId,
         connectionKey: null,
         odGroupKey,
-        legFare: depExisting ? roundToTwo(depExisting.legFare) : 0,
-        legRate: depExisting ? roundToTwo(depExisting.legRate) : 0,
-        odFare: depExisting ? roundToTwo(depExisting.odFare) : 0,
-        odRate: depExisting ? roundToTwo(depExisting.odRate) : 0,
-        prorateRatioL1: depExisting ? roundToTwo(depExisting.prorateRatioL1) : 0,
-        pooCcy: depExisting ? String(depExisting.pooCcy || "") : "",
-        pooCcyToRccy: depExisting ? roundToTwo(depExisting.pooCcyToRccy || 1) : 1,
+        totalGcd: snapshot.odViaGcd,
         applySSPricing: depExisting ? Boolean(depExisting.applySSPricing) : false,
-        interline: depExisting ? String(depExisting.interline || "") : "",
-        codeshare: depExisting ? String(depExisting.codeshare || "") : "",
     };
 
     return {
@@ -535,6 +673,21 @@ function buildLegRows({
                 sNo: 0,
                 rowKey: depRowKey,
                 poo: snapshot.depStn,
+                legFare: depExisting ? roundToTwo(depExisting.legFare) : 0,
+                legRate: depExisting ? roundToTwo(depExisting.legRate) : 0,
+                odFare: depExisting ? roundToTwo(depExisting.odFare) : 0,
+                odRate: depExisting ? roundToTwo(depExisting.odRate) : 0,
+                prorateRatioL1: depExisting ? roundToTwo(depExisting.prorateRatioL1) : 0,
+                fareProrateRatioL1L2: depExisting ? roundToTwo(depExisting.fareProrateRatioL1L2) : 0,
+                rateProrateRatioL1L2: depExisting ? roundToTwo(depExisting.rateProrateRatioL1L2) : 0,
+                pooCcy: depExisting ? String(depExisting.pooCcy || "") : currencyContextByPoo[snapshot.depStn]?.pooCcy || "",
+                pooCcyToRccy: depExisting ? roundToTwo(depExisting.pooCcyToRccy || 1) : currencyContextByPoo[snapshot.depStn]?.pooCcyToRccy || 1,
+                reportingCurrency: depExisting ? normalizeCurrencyCode(depExisting.reportingCurrency) : currencyContextByPoo[snapshot.depStn]?.reportingCurrency || "",
+                stationCurrencySource: depExisting ? String(depExisting.stationCurrencySource || "manual") : currencyContextByPoo[snapshot.depStn]?.stationCurrencySource || "manual",
+                reportingCurrencySource: depExisting ? String(depExisting.reportingCurrencySource || "manual") : currencyContextByPoo[snapshot.depStn]?.reportingCurrencySource || "manual",
+                applySSPricing: depExisting ? Boolean(depExisting.applySSPricing) : false,
+                interline: depExisting ? String(depExisting.interline || "") : "",
+                codeshare: depExisting ? String(depExisting.codeshare || "") : "",
                 pax: depPax,
                 cargoT: depCargo,
             }),
@@ -543,6 +696,21 @@ function buildLegRows({
                 sNo: 0,
                 rowKey: arrRowKey,
                 poo: snapshot.arrStn,
+                legFare: arrExisting ? roundToTwo(arrExisting.legFare) : 0,
+                legRate: arrExisting ? roundToTwo(arrExisting.legRate) : 0,
+                odFare: arrExisting ? roundToTwo(arrExisting.odFare) : 0,
+                odRate: arrExisting ? roundToTwo(arrExisting.odRate) : 0,
+                prorateRatioL1: arrExisting ? roundToTwo(arrExisting.prorateRatioL1) : 0,
+                fareProrateRatioL1L2: arrExisting ? roundToTwo(arrExisting.fareProrateRatioL1L2) : 0,
+                rateProrateRatioL1L2: arrExisting ? roundToTwo(arrExisting.rateProrateRatioL1L2) : 0,
+                pooCcy: arrExisting ? String(arrExisting.pooCcy || "") : currencyContextByPoo[snapshot.arrStn]?.pooCcy || "",
+                pooCcyToRccy: arrExisting ? roundToTwo(arrExisting.pooCcyToRccy || 1) : currencyContextByPoo[snapshot.arrStn]?.pooCcyToRccy || 1,
+                reportingCurrency: arrExisting ? normalizeCurrencyCode(arrExisting.reportingCurrency) : currencyContextByPoo[snapshot.arrStn]?.reportingCurrency || "",
+                stationCurrencySource: arrExisting ? String(arrExisting.stationCurrencySource || "manual") : currencyContextByPoo[snapshot.arrStn]?.stationCurrencySource || "manual",
+                reportingCurrencySource: arrExisting ? String(arrExisting.reportingCurrencySource || "manual") : currencyContextByPoo[snapshot.arrStn]?.reportingCurrencySource || "manual",
+                applySSPricing: arrExisting ? Boolean(arrExisting.applySSPricing) : false,
+                interline: arrExisting ? String(arrExisting.interline || "") : "",
+                codeshare: arrExisting ? String(arrExisting.codeshare || "") : "",
                 pax: arrPax,
                 cargoT: arrCargo,
             }),
@@ -557,6 +725,7 @@ function buildSystemConnectionRows({
     secondSnapshot,
     existingRowsByKey,
     shouldReset,
+    pageCurrencyContext = {},
 }) {
     const od = `${firstSnapshot.depStn}-${secondSnapshot.arrStn}`;
     const odDI = firstSnapshot.odDI === "Intl" || secondSnapshot.odDI === "Intl" ? "Intl" : "Dom";
@@ -621,6 +790,8 @@ function buildSystemConnectionRows({
             sta: firstSnapshot.sta,
             connectedStd: secondSnapshot.std,
             connectedSta: secondSnapshot.sta,
+            flightList: [firstSnapshot.flightNumber, secondSnapshot.flightNumber],
+            timeInclLayover: calculateTimeInclLayover(firstSnapshot, secondSnapshot),
             maxPax: sharedLimits.maxPax,
             maxCargoT: sharedLimits.maxCargoT,
             pax: shouldReset || !behindExisting ? 0 : roundToWhole(behindExisting.pax),
@@ -633,13 +804,19 @@ function buildSystemConnectionRows({
             sourceCargoLF: firstSnapshot.sourceCargoLF,
             sectorGcd: firstSnapshot.sectorGcd,
             odViaGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
+            totalGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
             legFare: 0,
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
             prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : "",
-            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : 1,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
+            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
+            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
+            reportingCurrency: sharedRevenue ? normalizeCurrencyCode(sharedRevenue.reportingCurrency) : pageCurrencyContext.reportingCurrency || "",
+            stationCurrencySource: sharedRevenue ? String(sharedRevenue.stationCurrencySource || "manual") : pageCurrencyContext.stationCurrencySource || "manual",
+            reportingCurrencySource: sharedRevenue ? String(sharedRevenue.reportingCurrencySource || "manual") : pageCurrencyContext.reportingCurrencySource || "manual",
             applySSPricing: sharedRevenue ? Boolean(sharedRevenue.applySSPricing) : false,
             interline: sharedRevenue ? String(sharedRevenue.interline || "") : "",
             codeshare: sharedRevenue ? String(sharedRevenue.codeshare || "") : "",
@@ -675,6 +852,8 @@ function buildSystemConnectionRows({
             sta: secondSnapshot.sta,
             connectedStd: firstSnapshot.std,
             connectedSta: firstSnapshot.sta,
+            flightList: [firstSnapshot.flightNumber, secondSnapshot.flightNumber],
+            timeInclLayover: calculateTimeInclLayover(firstSnapshot, secondSnapshot),
             maxPax: sharedLimits.maxPax,
             maxCargoT: sharedLimits.maxCargoT,
             pax: shouldReset || !beyondExisting ? 0 : roundToWhole(beyondExisting.pax),
@@ -687,13 +866,19 @@ function buildSystemConnectionRows({
             sourceCargoLF: secondSnapshot.sourceCargoLF,
             sectorGcd: secondSnapshot.sectorGcd,
             odViaGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
+            totalGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
             legFare: 0,
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
             prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : "",
-            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : 1,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
+            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
+            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
+            reportingCurrency: sharedRevenue ? normalizeCurrencyCode(sharedRevenue.reportingCurrency) : pageCurrencyContext.reportingCurrency || "",
+            stationCurrencySource: sharedRevenue ? String(sharedRevenue.stationCurrencySource || "manual") : pageCurrencyContext.stationCurrencySource || "manual",
+            reportingCurrencySource: sharedRevenue ? String(sharedRevenue.reportingCurrencySource || "manual") : pageCurrencyContext.reportingCurrencySource || "manual",
             applySSPricing: sharedRevenue ? Boolean(sharedRevenue.applySSPricing) : false,
             interline: sharedRevenue ? String(sharedRevenue.interline || "") : "",
             codeshare: sharedRevenue ? String(sharedRevenue.codeshare || "") : "",
@@ -707,6 +892,7 @@ function buildUserTransitRows({
     secondSnapshot,
     existingRowsByKey,
     shouldReset,
+    pageCurrencyContext = {},
 }) {
     const od = `${firstSnapshot.depStn}-${secondSnapshot.arrStn}`;
     const odDI = firstSnapshot.odDI === "Intl" || secondSnapshot.odDI === "Intl" ? "Intl" : "Dom";
@@ -771,6 +957,8 @@ function buildUserTransitRows({
             sta: firstSnapshot.sta,
             connectedStd: secondSnapshot.std,
             connectedSta: secondSnapshot.sta,
+            flightList: [firstSnapshot.flightNumber, secondSnapshot.flightNumber],
+            timeInclLayover: calculateTimeInclLayover(firstSnapshot, secondSnapshot),
             maxPax: sharedLimits.maxPax,
             maxCargoT: sharedLimits.maxCargoT,
             pax: shouldReset || !firstExisting ? 0 : roundToWhole(firstExisting.pax),
@@ -783,13 +971,19 @@ function buildUserTransitRows({
             sourceCargoLF: firstSnapshot.sourceCargoLF,
             sectorGcd: firstSnapshot.sectorGcd,
             odViaGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
+            totalGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
             legFare: 0,
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
             prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : "",
-            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : 1,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
+            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
+            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
+            reportingCurrency: sharedRevenue ? normalizeCurrencyCode(sharedRevenue.reportingCurrency) : pageCurrencyContext.reportingCurrency || "",
+            stationCurrencySource: sharedRevenue ? String(sharedRevenue.stationCurrencySource || "manual") : pageCurrencyContext.stationCurrencySource || "manual",
+            reportingCurrencySource: sharedRevenue ? String(sharedRevenue.reportingCurrencySource || "manual") : pageCurrencyContext.reportingCurrencySource || "manual",
             applySSPricing: sharedRevenue ? Boolean(sharedRevenue.applySSPricing) : false,
             interline: sharedRevenue ? String(sharedRevenue.interline || "") : "",
             codeshare: sharedRevenue ? String(sharedRevenue.codeshare || "") : "",
@@ -825,6 +1019,8 @@ function buildUserTransitRows({
             sta: secondSnapshot.sta,
             connectedStd: firstSnapshot.std,
             connectedSta: firstSnapshot.sta,
+            flightList: [firstSnapshot.flightNumber, secondSnapshot.flightNumber],
+            timeInclLayover: calculateTimeInclLayover(firstSnapshot, secondSnapshot),
             maxPax: sharedLimits.maxPax,
             maxCargoT: sharedLimits.maxCargoT,
             pax: shouldReset || !secondExisting ? 0 : roundToWhole(secondExisting.pax),
@@ -837,13 +1033,19 @@ function buildUserTransitRows({
             sourceCargoLF: secondSnapshot.sourceCargoLF,
             sectorGcd: secondSnapshot.sectorGcd,
             odViaGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
+            totalGcd: roundToTwo(firstSnapshot.sectorGcd + secondSnapshot.sectorGcd),
             legFare: 0,
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
             prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : "",
-            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : 1,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
+            pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
+            pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
+            reportingCurrency: sharedRevenue ? normalizeCurrencyCode(sharedRevenue.reportingCurrency) : pageCurrencyContext.reportingCurrency || "",
+            stationCurrencySource: sharedRevenue ? String(sharedRevenue.stationCurrencySource || "manual") : pageCurrencyContext.stationCurrencySource || "manual",
+            reportingCurrencySource: sharedRevenue ? String(sharedRevenue.reportingCurrencySource || "manual") : pageCurrencyContext.reportingCurrencySource || "manual",
             applySSPricing: sharedRevenue ? Boolean(sharedRevenue.applySSPricing) : false,
             interline: sharedRevenue ? String(sharedRevenue.interline || "") : "",
             codeshare: sharedRevenue ? String(sharedRevenue.codeshare || "") : "",
@@ -903,7 +1105,7 @@ async function buildPooDataset({ userId, poo, date }) {
     const dayEnd = moment(date).endOf("day").toDate();
     const normalizedPoo = normalizeStation(poo);
 
-    const [sectorMap, existingRecords, directFlights] = await Promise.all([
+    const [sectorMap, existingRecords, directFlights, stations, rawRevenueConfig] = await Promise.all([
         getSectorInfoMap(userId),
         PooTable.find({
             userId,
@@ -917,7 +1119,12 @@ async function buildPooDataset({ userId, poo, date }) {
                 { arrStn: normalizedPoo },
             ],
         }).lean(),
+        Station.find({ userId }).lean(),
+        RevenueConfig.findOne({ userId }).lean(),
     ]);
+    const stationCurrencyMap = buildStationCurrencyMap(stations);
+    const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
+    const fxRateMap = buildFxRateMap(revenueConfig.fxRates);
 
     const existingRowsByKey = new Map(existingRecords.map((record) => [record.rowKey, record]));
     const flightsById = new Map(directFlights.map((flight) => [String(flight._id), flight]));
@@ -976,6 +1183,21 @@ async function buildPooDataset({ userId, poo, date }) {
     const snapshots = new Map();
     const resetByFlightId = new Map();
     const rows = [];
+    const currencyContextByPoo = {};
+
+    const getCurrencyContextForPoo = (pooCode) => {
+        const normalizedCode = normalizeStation(pooCode);
+        if (!currencyContextByPoo[normalizedCode]) {
+            currencyContextByPoo[normalizedCode] = resolveCurrencyContext({
+                stationCurrencyMap,
+                revenueConfig,
+                fxRateMap,
+                poo: normalizedCode,
+                date,
+            });
+        }
+        return currencyContextByPoo[normalizedCode];
+    };
 
     for (const flight of flightsById.values()) {
         const snapshot = buildFlightSnapshot(flight, sectorMap);
@@ -984,6 +1206,10 @@ async function buildPooDataset({ userId, poo, date }) {
             snapshot,
             existingRowsByKey,
             existingRecords,
+            currencyContextByPoo: {
+                [snapshot.depStn]: getCurrencyContextForPoo(snapshot.depStn),
+                [snapshot.arrStn]: getCurrencyContextForPoo(snapshot.arrStn),
+            },
         });
         rows.push(...legRows);
         resetByFlightId.set(snapshot.flightId, forceReset);
@@ -1011,6 +1237,7 @@ async function buildPooDataset({ userId, poo, date }) {
                 firstSnapshot,
                 secondSnapshot,
                 existingRowsByKey,
+                pageCurrencyContext: getCurrencyContextForPoo(normalizedPoo),
                 shouldReset:
                     Boolean(resetByFlightId.get(firstSnapshot.flightId)) ||
                     Boolean(resetByFlightId.get(secondSnapshot.flightId)),
@@ -1039,6 +1266,7 @@ async function buildPooDataset({ userId, poo, date }) {
                 firstSnapshot,
                 secondSnapshot,
                 existingRowsByKey,
+                pageCurrencyContext: getCurrencyContextForPoo(normalizedPoo),
                 shouldReset:
                     Boolean(resetByFlightId.get(firstSnapshot.flightId)) ||
                     Boolean(resetByFlightId.get(secondSnapshot.flightId)),
@@ -1085,7 +1313,9 @@ function applyFieldEdits(row, requested) {
 
     STRING_FIELDS.forEach((field) => {
         if (requested[field] !== undefined) {
-            next[field] = String(requested[field] || "").trim();
+            next[field] = field === "pooCcy"
+                ? normalizeCurrencyCode(requested[field])
+                : String(requested[field] || "").trim();
         }
     });
 
@@ -1128,25 +1358,49 @@ function findLegRowForPoo(legRowsByFlight, flightId, poo) {
 }
 
 function validateTraffic(rows) {
-    const errors = [];
+    const issues = [];
 
     rows.forEach((row) => {
         if (row.pax < 0) {
-            errors.push(`${describeRow(row)}: Pax cannot be less than 0`);
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "pax",
+                code: "LESS_THAN_ZERO",
+                message: `${describeRow(row)}: Pax cannot be less than 0`,
+            });
         }
         if (row.cargoT < 0) {
-            errors.push(`${describeRow(row)}: Cargo T cannot be less than 0`);
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "cargoT",
+                code: "LESS_THAN_ZERO",
+                message: `${describeRow(row)}: Cargo T cannot be less than 0`,
+            });
         }
         if (row.pax > row.maxPax) {
-            errors.push(`${describeRow(row)}: Pax exceeds Max Pax (${row.pax} > ${row.maxPax})`);
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "pax",
+                code: "EXCEEDS_MAX",
+                message: `${describeRow(row)}: Pax exceeds Max Pax (${row.pax} > ${row.maxPax})`,
+            });
         }
         if (row.cargoT > row.maxCargoT) {
-            errors.push(`${describeRow(row)}: Cargo T exceeds Max Cargo T (${row.cargoT} > ${row.maxCargoT})`);
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "cargoT",
+                code: "EXCEEDS_MAX",
+                message: `${describeRow(row)}: Cargo T exceeds Max Cargo T (${row.cargoT} > ${row.maxCargoT})`,
+            });
         }
     });
 
-    if (errors.length) {
-        throw new Error(errors.join(" | "));
+    if (issues.length) {
+        throw buildValidationError(issues);
     }
 }
 
@@ -1158,14 +1412,26 @@ function rebalanceLegRow(row, paxDelta, cargoDelta) {
 
 function assertBucketAvailability(row, paxDelta, cargoDelta, context) {
     if (paxDelta > 0 && row.pax < paxDelta) {
-        throw new Error(
-            `${context}: balancing Pax bucket ${describeBucket(row)} only has ${row.pax}, requested ${paxDelta}`
-        );
+        throw buildValidationError([
+            {
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "pax",
+                code: "BALANCING_BUCKET_OVERDRAWN",
+                message: `${context}: balancing Pax bucket ${describeBucket(row)} only has ${row.pax}, requested ${paxDelta}`,
+            },
+        ]);
     }
     if (cargoDelta > 0 && row.cargoT < cargoDelta) {
-        throw new Error(
-            `${context}: balancing Cargo bucket ${describeBucket(row)} only has ${row.cargoT}, requested ${cargoDelta}`
-        );
+        throw buildValidationError([
+            {
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "cargoT",
+                code: "BALANCING_BUCKET_OVERDRAWN",
+                message: `${context}: balancing Cargo bucket ${describeBucket(row)} only has ${row.cargoT}, requested ${cargoDelta}`,
+            },
+        ]);
     }
 }
 
@@ -1294,7 +1560,14 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
 
     const dayStart = moment(date).startOf("day").toDate();
     const dayEnd = moment(date).endOf("day").toDate();
-    const sectorMap = await getSectorInfoMap(userId);
+    const [sectorMap, stations, rawRevenueConfig] = await Promise.all([
+        getSectorInfoMap(userId),
+        Station.find({ userId }).lean(),
+        RevenueConfig.findOne({ userId }).lean(),
+    ]);
+    const stationCurrencyMap = buildStationCurrencyMap(stations);
+    const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
+    const fxRateMap = buildFxRateMap(revenueConfig.fxRates);
     const flightsById = new Map();
 
     const { firstFlight, secondFlight } = await resolveFlightsForTransitDraft({
@@ -1321,6 +1594,13 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
         firstSnapshot,
         secondSnapshot,
         existingRowsByKey,
+        pageCurrencyContext: resolveCurrencyContext({
+            stationCurrencyMap,
+            revenueConfig,
+            fxRateMap,
+            poo: transitDraft.poo,
+            date,
+        }),
         shouldReset: false,
     });
 
@@ -1425,8 +1705,13 @@ async function applyUpdatesForDate({ userId, updates }) {
                             odFare: row.odFare,
                             odRate: row.odRate,
                             prorateRatioL1: row.prorateRatioL1,
+                            fareProrateRatioL1L2: row.fareProrateRatioL1L2,
+                            rateProrateRatioL1L2: row.rateProrateRatioL1L2,
                             pooCcy: row.pooCcy,
                             pooCcyToRccy: row.pooCcyToRccy,
+                            reportingCurrency: row.reportingCurrency,
+                            stationCurrencySource: row.stationCurrencySource,
+                            reportingCurrencySource: row.reportingCurrencySource,
                             applySSPricing: row.applySSPricing,
                             interline: row.interline,
                             codeshare: row.codeshare,
@@ -1445,6 +1730,9 @@ async function applyUpdatesForDate({ userId, updates }) {
                             rccyPax: row.rccyPax,
                             rccyCargo: row.rccyCargo,
                             rccyTotalRev: row.rccyTotalRev,
+                            fnlRccyPaxRev: row.fnlRccyPaxRev,
+                            fnlRccyCargoRev: row.fnlRccyCargoRev,
+                            fnlRccyTotalRev: row.fnlRccyTotalRev,
                         },
                     },
                 },
@@ -1494,8 +1782,21 @@ exports.getPooData = async (req, res) => {
         if (trafficType) filter.trafficType = trafficType;
         if (identifier) filter.identifier = identifier;
 
-        const records = await PooTable.find(filter);
-        res.status(200).json({ data: buildEditableResponse(records) });
+        const [records, station, rawRevenueConfig] = await Promise.all([
+            PooTable.find(filter),
+            poo ? Station.findOne({ userId, stationName: normalizeStation(poo) }).lean() : null,
+            RevenueConfig.findOne({ userId }).lean(),
+        ]);
+        const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
+
+        res.status(200).json({
+            data: buildEditableResponse(records),
+            meta: {
+                selectedPoo: poo ? normalizeStation(poo) : "",
+                stationCurrency: normalizeCurrencyCode(station?.currencyCode),
+                reportingCurrency: revenueConfig.reportingCurrency,
+            },
+        });
     } catch (error) {
         console.error("🔥 Error fetching POO data:", error);
         res.status(500).json({ message: "Failed to fetch POO data", error: error.message });
@@ -1590,6 +1891,8 @@ exports.updatePooRecords = async (req, res) => {
                     odFare: transitDraft.odFare ?? row.odFare,
                     odRate: transitDraft.odRate ?? row.odRate,
                     prorateRatioL1: transitDraft.prorateRatioL1 ?? row.prorateRatioL1,
+                    fareProrateRatioL1L2: transitDraft.fareProrateRatioL1L2 ?? row.fareProrateRatioL1L2,
+                    rateProrateRatioL1L2: transitDraft.rateProrateRatioL1L2 ?? row.rateProrateRatioL1L2,
                     pooCcy: transitDraft.pooCcy ?? row.pooCcy,
                     pooCcyToRccy: transitDraft.pooCcyToRccy ?? row.pooCcyToRccy,
                     applySSPricing: transitDraft.applySSPricing ?? row.applySSPricing,
@@ -1626,6 +1929,8 @@ exports.updatePooRecords = async (req, res) => {
                         pooCcy: row.pooCcy,
                         pooCcyToRccy: row.pooCcyToRccy,
                         prorateRatioL1: row.prorateRatioL1,
+                        fareProrateRatioL1L2: row.fareProrateRatioL1L2,
+                        rateProrateRatioL1L2: row.rateProrateRatioL1L2,
                         applySSPricing: row.applySSPricing,
                         interline: row.interline,
                         codeshare: row.codeshare,
@@ -1669,7 +1974,37 @@ exports.updatePooRecords = async (req, res) => {
         });
     } catch (error) {
         console.error("🔥 Error updating POO records:", error);
-        res.status(400).json({ message: error.message || "Failed to update POO records" });
+        res.status(400).json({
+            message: error.message || "Failed to update POO records",
+            errors: Array.isArray(error.validationIssues) ? error.validationIssues : [],
+        });
+    }
+};
+
+exports.getRevenueConfig = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const config = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
+        res.status(200).json({ success: true, data: config });
+    } catch (error) {
+        console.error("🔥 Error fetching revenue config:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch revenue config" });
+    }
+};
+
+exports.saveRevenueConfig = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const payload = normalizeRevenueConfig(req.body || {});
+        const config = await RevenueConfig.findOneAndUpdate(
+            { userId },
+            { $set: payload },
+            { upsert: true, new: true }
+        );
+        res.status(200).json({ success: true, data: normalizeRevenueConfig(config.toObject()) });
+    } catch (error) {
+        console.error("🔥 Error saving revenue config:", error);
+        res.status(500).json({ success: false, message: "Failed to save revenue config" });
     }
 };
 
@@ -1677,6 +2012,7 @@ exports.getRevenueData = async (req, res) => {
     try {
         const userId = req.user.id;
         const {
+            mode = "aggregate",
             label,
             trafficClass,
             fromDate,
@@ -1687,12 +2023,32 @@ exports.getRevenueData = async (req, res) => {
             flightNumber,
             poo,
             od,
+            odDI,
+            legDI,
             sector,
             variant,
             userTag1,
             userTag2,
             trafficType,
             identifier,
+            al,
+            stop,
+            stops,
+            minTotalGcd,
+            maxTotalGcd,
+            minMaxPax,
+            maxMaxPax,
+            minMaxCargoT,
+            maxMaxCargoT,
+            minPax,
+            maxPax,
+            minCargoT,
+            maxCargoT,
+            minFare,
+            maxFare,
+            minRate,
+            maxRate,
+            timeInclLayover,
             groupBy = "poo",
             periodicity = "monthly",
         } = req.query;
@@ -1719,12 +2075,69 @@ exports.getRevenueData = async (req, res) => {
 
         if (poo) andClauses.push({ poo: { $in: poo.split(",").map(normalizeStation) } });
         if (od) andClauses.push({ od: { $in: od.split(",").map((item) => item.trim().toUpperCase()) } });
+        if (odDI) andClauses.push({ odDI: { $in: odDI.split(",").map(normalizeDomIntl) } });
+        if (legDI) andClauses.push({ legDI: { $in: legDI.split(",").map(normalizeDomIntl) } });
         if (sector) andClauses.push({ sector: { $in: sector.split(",").map((item) => item.trim().toUpperCase()) } });
         const normalizedDirectFlights = String(flightNumber || flight || "").split(",").map((item) => item.trim()).filter(Boolean);
         if (normalizedDirectFlights.length > 0) andClauses.push({ flightNumber: { $in: normalizedDirectFlights } });
         if (variant) andClauses.push({ variant: { $in: variant.split(",").map((item) => item.trim()) } });
         if (trafficType) andClauses.push({ trafficType: { $in: trafficType.split(",").map((item) => item.trim()) } });
         if (identifier) andClauses.push({ identifier: { $in: identifier.split(",").map((item) => item.trim()) } });
+        if (al) andClauses.push({ al: { $in: al.split(",").map((item) => item.trim().toUpperCase()) } });
+
+        const requestedStops = String(stop || stops || "")
+            .split(",")
+            .map((item) => String(item || "").trim())
+            .filter(Boolean);
+        const normalizedStops = requestedStops
+            .map((item) => Number(item))
+            .filter(Number.isFinite);
+        const requestedBlankStop = requestedStops.includes(BLANK_OPTION_VALUE) || requestedStops.includes("(blank)");
+
+        if (requestedBlankStop && normalizedStops.length > 0) {
+            andClauses.push({
+                $or: [
+                    { stops: { $in: normalizedStops } },
+                    { stops: null },
+                    { stops: { $exists: false } },
+                ],
+            });
+        } else if (requestedBlankStop) {
+            andClauses.push({
+                $or: [
+                    { stops: null },
+                    { stops: { $exists: false } },
+                ],
+            });
+        } else if (normalizedStops.length > 0) {
+            andClauses.push({ stops: { $in: normalizedStops } });
+        }
+        if (timeInclLayover) andClauses.push({ timeInclLayover: String(timeInclLayover).trim() });
+
+        const numericRangeFilters = [
+            ["totalGcd", minTotalGcd, maxTotalGcd],
+            ["maxPax", minMaxPax, maxMaxPax],
+            ["maxCargoT", minMaxCargoT, maxMaxCargoT],
+            ["pax", minPax, maxPax],
+            ["cargoT", minCargoT, maxCargoT],
+        ];
+        numericRangeFilters.forEach(([field, minValue, maxValue]) => {
+            const range = {};
+            if (minValue !== undefined && minValue !== "") range.$gte = Number(minValue);
+            if (maxValue !== undefined && maxValue !== "") range.$lte = Number(maxValue);
+            if (Object.keys(range).length > 0) andClauses.push({ [field]: range });
+        });
+
+        const fareRateRangeFilters = [
+            ["odFare", minFare, maxFare],
+            ["odRate", minRate, maxRate],
+        ];
+        fareRateRangeFilters.forEach(([field, minValue, maxValue]) => {
+            const range = {};
+            if (minValue !== undefined && minValue !== "") range.$gte = Number(minValue);
+            if (maxValue !== undefined && maxValue !== "") range.$lte = Number(maxValue);
+            if (Object.keys(range).length > 0) andClauses.push({ [field]: range });
+        });
 
         const labelClauses = buildRevenueSelectionClauses(String(label || "").split(","), "label");
         if (labelClauses.length > 0) andClauses.push({ $or: labelClauses });
@@ -1740,8 +2153,8 @@ exports.getRevenueData = async (req, res) => {
         const normalizedUserTag1 = String(userTag1 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
         const normalizedUserTag2 = String(userTag2 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
 
-        if (normalizedFrom.length > 0) dataFilterClauses.push({ depStn: { $in: normalizedFrom } });
-        if (normalizedTo.length > 0) dataFilterClauses.push({ arrStn: { $in: normalizedTo } });
+        if (normalizedFrom.length > 0) andClauses.push({ odOrigin: { $in: normalizedFrom } });
+        if (normalizedTo.length > 0) andClauses.push({ odDestination: { $in: normalizedTo } });
         if (normalizedFlights.length > 0) dataFilterClauses.push({ flight: { $in: normalizedFlights } });
         if (normalizedVariants.length > 0) dataFilterClauses.push({ variant: { $in: normalizedVariants } });
         if (normalizedUserTag1.length > 0) dataFilterClauses.push({ userTag1: { $in: normalizedUserTag1 } });
@@ -1762,6 +2175,10 @@ exports.getRevenueData = async (req, res) => {
             const allowedFlights = [...new Set(matchingData.map((row) => String(row.flight || "").trim()).filter(Boolean))];
             const allowedSectors = [...new Set(matchingData.map((row) => String(row.sector || "").trim().toUpperCase()).filter(Boolean))];
 
+            if (matchingData.length === 0) {
+                andClauses.push({ _id: null });
+            }
+
             if (allowedFlights.length > 0) {
                 andClauses.push({ flightNumber: { $in: allowedFlights } });
             }
@@ -1773,6 +2190,25 @@ exports.getRevenueData = async (req, res) => {
 
         if (andClauses.length > 0) {
             match.$and = andClauses;
+        }
+
+        if (String(mode).toLowerCase() === "detail") {
+            const rows = await PooTable.find(match)
+                .sort({ date: 1, od: 1, sNo: 1 })
+                .lean();
+
+            const summary = rows.reduce((acc, row) => ({
+                pax: roundToWhole(acc.pax + parseNumber(row.pax)),
+                cargoT: roundToTwo(acc.cargoT + parseNumber(row.cargoT)),
+                odTotalRev: roundToTwo(acc.odTotalRev + parseNumber(row.odTotalRev)),
+                fnlRccyTotalRev: roundToTwo(acc.fnlRccyTotalRev + parseNumber(row.fnlRccyTotalRev)),
+            }), { pax: 0, cargoT: 0, odTotalRev: 0, fnlRccyTotalRev: 0 });
+
+            return res.status(200).json({
+                mode: "detail",
+                rows,
+                summary,
+            });
         }
 
         const groupByFields = String(groupBy || "poo")
@@ -1795,6 +2231,8 @@ exports.getRevenueData = async (req, res) => {
             };
         } else if (periodicity.toLowerCase() === "weekly") {
             periodExpr = { $dateToString: { format: "%Y-W%V", date: "$date" } };
+        } else if (periodicity.toLowerCase() === "daily") {
+            periodExpr = { $dateToString: { format: "%Y-%m-%d", date: "$date" } };
         } else {
             periodExpr = { $dateToString: { format: "%Y-%m", date: "$date" } };
         }
@@ -1813,7 +2251,9 @@ exports.getRevenueData = async (req, res) => {
                     odRev: { $sum: "$odTotalRev" },
                     paxRev: { $sum: "$odPaxRev" },
                     cargoRev: { $sum: "$odCargoRev" },
-                    totalRev: { $sum: "$rccyTotalRev" },
+                    totalRev: { $sum: "$fnlRccyTotalRev" },
+                    fnlRccyPaxRev: { $sum: "$fnlRccyPaxRev" },
+                    fnlRccyCargoRev: { $sum: "$fnlRccyCargoRev" },
                     count: { $sum: 1 },
                 },
             },
@@ -1836,11 +2276,14 @@ exports.getRevenueData = async (req, res) => {
                 paxRev: roundToTwo(result.paxRev),
                 cargoRev: roundToTwo(result.cargoRev),
                 totalRev: roundToTwo(result.totalRev),
+                fnlRccyPaxRev: roundToTwo(result.fnlRccyPaxRev),
+                fnlRccyCargoRev: roundToTwo(result.fnlRccyCargoRev),
                 count: result.count,
             };
         });
 
         res.status(200).json({
+            mode: "aggregate",
             data: pivoted,
             periods: [...periods].sort(),
             groupBy: safeGroupByFields.join(","),

@@ -37,6 +37,12 @@ const stationSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    currencyCode: {
+        type: String,
+        default: "",
+        trim: true,
+        uppercase: true,
+    },
     ddMinCT: {
         type: String,
         required: true,

@@ -75,6 +75,13 @@ const normalizeHHMM = (value) => {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 };
 
+const normalizeCurrencyCode = (value) =>
+  String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "")
+    .slice(0, 3);
+
 const getStationsTableData = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -117,6 +124,9 @@ const saveStation = async (req, res) => {
       }
       if (Object.prototype.hasOwnProperty.call(updateFields, "avgTaxiInTime")) {
         updateFields.avgTaxiInTime = normalizeHHMM(updateFields.avgTaxiInTime);
+      }
+      if (Object.prototype.hasOwnProperty.call(updateFields, "currencyCode")) {
+        updateFields.currencyCode = normalizeCurrencyCode(updateFields.currencyCode);
       }
 
       const existingStation = await Stations.findById(_id);

@@ -229,6 +229,8 @@ user.get("/poo", verifyToken, pooController.getPooData);
 user.post("/poo/populate", verifyToken, jsonParser, pooController.populatePoo);
 user.post("/poo/update", verifyToken, jsonParser, pooController.updatePooRecords);
 user.delete("/poo", verifyToken, jsonParser, pooController.deletePooRecords);
+user.get("/revenue/config", verifyToken, pooController.getRevenueConfig);
+user.post("/revenue/config", verifyToken, jsonParser, pooController.saveRevenueConfig);
 user.get("/revenue", verifyToken, pooController.getRevenueData);
 
 module.exports = user;

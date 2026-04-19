@@ -82,6 +82,8 @@ const normalizeDropdownValueList = (values = []) =>
     a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })
   );
 
+const BLANK_OPTION_VALUE = "__BLANK__";
+
 
 
 const {
@@ -181,8 +183,19 @@ const populateDashboardDropDowns = async (req, res) => {
 
     const distinctPooValues = await PooTable.aggregate([
       { $match: { userId: userId } },
-      { $group: { _id: null, poo: { $addToSet: "$poo" } } },
-      { $project: { _id: 0, poo: 1 } },
+      {
+        $group: {
+          _id: null,
+          poo: { $addToSet: "$poo" },
+          od: { $addToSet: "$od" },
+          odDI: { $addToSet: "$odDI" },
+          legDI: { $addToSet: "$legDI" },
+          identifier: { $addToSet: "$identifier" },
+          stops: { $addToSet: "$stops" },
+          al: { $addToSet: "$al" },
+        },
+      },
+      { $project: { _id: 0, poo: 1, od: 1, odDI: 1, legDI: 1, identifier: 1, stops: 1, al: 1 } },
     ]);
 
     const distinctSnValues = await Fleet.aggregate([
@@ -190,6 +203,21 @@ const populateDashboardDropDowns = async (req, res) => {
       { $group: { _id: null, sn: { $addToSet: "$sn" } } },
       { $project: { _id: 0, sn: 1 } },
     ]);
+
+    const rawStopValues = distinctPooValues?.[0]?.stops ?? [];
+    const stopOptions = normalizeDropdownValueList(
+      rawStopValues
+        .filter((value) => value !== null && value !== undefined && String(value).trim() !== "")
+        .map((value) => String(value))
+    ).map((value) => ({
+      value,
+      label: value,
+    }));
+
+    stopOptions.unshift({
+      value: BLANK_OPTION_VALUE,
+      label: "(blank)",
+    });
 
     const data = {
       flight: formatOptions(
@@ -201,6 +229,12 @@ const populateDashboardDropDowns = async (req, res) => {
       sector: formatOptions(filteredSectors),
       sn: formatOptions(distinctSnValues?.[0]?.sn ?? []),
       poo: formatOptions(distinctPooValues?.[0]?.poo ?? []),
+      od: formatOptions(distinctPooValues?.[0]?.od ?? []),
+      odDI: formatOptions(distinctPooValues?.[0]?.odDI ?? []),
+      legDI: formatOptions(distinctPooValues?.[0]?.legDI ?? []),
+      identifier: formatOptions(distinctPooValues?.[0]?.identifier ?? []),
+      stop: stopOptions,
+      al: formatOptions(distinctPooValues?.[0]?.al ?? []),
       userTag1: formatOptions(dataValues.userTag1 ?? []),
       userTag2: formatOptions(dataValues.userTag2 ?? []),
     };
