@@ -13,6 +13,13 @@ const normalizeSnKey = (value) => {
     const digitsOnly = raw.replace(/\D/g, "");
     return digitsOnly || raw;
 };
+const createAssignedMetricEntry = (metric = {}) => ({
+    status: "aircraft-assigned",
+    label: Number(metric.bh) > 0 ? Number(metric.bh).toFixed(2) : "0",
+    bh: Number(metric.bh) || 0,
+    fh: Number(metric.fh) || 0,
+    dep: Number(metric.dep) || 0
+});
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
@@ -84,7 +91,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
             if (!metricsMap[snKey][dateStr] || metricsMap[snKey][dateStr].status !== "maintenance") {
                 if (!metricsMap[snKey][dateStr]) {
-                    metricsMap[snKey][dateStr] = { status: "aircraft-assigned", label: "0", bh: 0, fh: 0, dep: 0 };
+                    metricsMap[snKey][dateStr] = createAssignedMetricEntry();
                 }
 
                 const matchedFlights = flightMap.get(fKey) || [];
@@ -125,26 +132,36 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 onwingIdx += 1;
             }
 
-            Object.keys(activeOnwingByMsn).forEach((acftSn) => {
-                if (groundMap[dDisp] && groundMap[dDisp][acftSn]) {
-                    const eventLabel = groundMap[dDisp][acftSn];
-                    const config = activeOnwingByMsn[acftSn];
-                    const attachedAssets = [config.pos1Esn, config.pos2Esn, config.apun].filter(Boolean);
+            const componentOwnerMap = {};
+            Object.entries(activeOnwingByMsn).forEach(([acftSn, config]) => {
+                [config.pos1Esn, config.pos2Esn, config.apun].forEach((assetSn) => {
+                    const componentSn = normalizeSnKey(assetSn);
+                    if (componentSn) componentOwnerMap[componentSn] = acftSn;
+                });
+            });
 
-                    attachedAssets.forEach((assetSn) => {
-                        const snKey = normalizeSnKey(assetSn);
-                        if (!snKey) return;
-                        if (!metricsMap[snKey]) metricsMap[snKey] = {};
+            Object.entries(componentOwnerMap).forEach(([componentSn, ownerAcftSn]) => {
+                if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
 
-                        metricsMap[snKey][dDisp] = {
-                            status: "maintenance",
-                            label: eventLabel || "Maintenance",
-                            bh: 0,
-                            fh: 0,
-                            dep: 0,
-                            event: eventLabel
-                        };
-                    });
+                const existingComponentMetric = metricsMap[componentSn][dDisp];
+                if (existingComponentMetric?.status === "maintenance") return;
+
+                const aircraftGroundEvent = groundMap[dDisp]?.[ownerAcftSn];
+                if (aircraftGroundEvent) {
+                    metricsMap[componentSn][dDisp] = {
+                        status: "maintenance",
+                        label: aircraftGroundEvent || "Maintenance",
+                        bh: 0,
+                        fh: 0,
+                        dep: 0,
+                        event: aircraftGroundEvent
+                    };
+                    return;
+                }
+
+                const aircraftMetric = metricsMap[ownerAcftSn]?.[dDisp];
+                if (aircraftMetric?.status === "aircraft-assigned") {
+                    metricsMap[componentSn][dDisp] = createAssignedMetricEntry(aircraftMetric);
                 }
             });
         }
@@ -166,29 +183,35 @@ exports.getFleetMonths = async (req, res) => {
             return res.status(400).json({ message: "User ID missing from token" });
         }
 
-        // Aggregate unique year-month combinations from the FLIGHT table
-        const distinctDates = await Flight.aggregate([
+        const dateBounds = await Flight.aggregate([
             { $match: { userId: String(userId), date: { $exists: true, $ne: null } } },
             {
                 $group: {
-                    _id: {
-                        year: { $year: "$date" },
-                        month: { $month: "$date" }
-                    }
+                    _id: null,
+                    minDate: { $min: "$date" },
+                    maxDate: { $max: "$date" }
                 }
-            },
-            { $sort: { "_id.year": 1, "_id.month": 1 } }
+            }
         ]);
+
+        if (!dateBounds.length || !dateBounds[0].minDate || !dateBounds[0].maxDate) {
+            return res.status(200).json({ months: [] });
+        }
 
         const monthNames = [
             "January", "February", "March", "April", "May", "June",
             "July", "August", "September", "October", "November", "December"
         ];
 
-        // Format to "Month Year" (e.g., "October 2025")
-        const formattedMonths = distinctDates.map(
-            d => `${monthNames[d._id.month - 1]} ${d._id.year}`
-        );
+        const startMonth = moment.utc(dateBounds[0].minDate).startOf("month");
+        const endMonth = moment.utc(dateBounds[0].maxDate).startOf("month");
+        const formattedMonths = [];
+        const cursor = moment.utc(startMonth);
+
+        while (cursor.isSameOrBefore(endMonth, "month")) {
+            formattedMonths.push(`${monthNames[cursor.month()]} ${cursor.year()}`);
+            cursor.add(1, "month");
+        }
 
         res.status(200).json({ months: formattedMonths });
     } catch (error) {

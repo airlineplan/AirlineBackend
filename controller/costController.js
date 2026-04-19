@@ -44,7 +44,7 @@ exports.getCostConfig = async (req, res) => {
 // Get Dashboard Data for CostPage
 exports.getCostPageData = async (req, res) => {
   try {
-    const { label, from, to, sector, variant, flight, poo, userTag1, userTag2 } = req.body;
+    const { label, from, to, sector, variant, sn, flight, userTag1, userTag2 } = req.body;
     const userId = req.user.id;
 
     // 1. Build Query for flights
@@ -61,10 +61,10 @@ exports.getCostPageData = async (req, res) => {
     applyArrayFilter("arrStn", to);
     applyArrayFilter("sector", sector);
     applyArrayFilter("variant", variant);
+    applyArrayFilter("aircraft.msn", sn);
     applyArrayFilter("flight", flight);
     applyArrayFilter("userTag1", userTag1);
     applyArrayFilter("userTag2", userTag2);
-    // Note: If POO maps to something specific in your flight schema, map it here. Or ignore if not present.
 
     // 2. Fetch Flights
     const flights = await Flights.find(matchQuery).lean();

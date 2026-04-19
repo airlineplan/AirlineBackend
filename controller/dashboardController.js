@@ -5,6 +5,7 @@ const DataHistory = require("../model/dataHistorySchema");
 const SectorHistory = require("../model/sectorHistorySchema");
 const Flights = require("../model/flight");
 const FlightHistory = require("../model/flightHistory")
+const Fleet = require("../model/fleet");
 const PooTable = require("../model/pooTable");
 const RotationSummary = require("../model/rotationSummary");
 const RotationDetails = require("../model/rotationDetails");
@@ -156,12 +157,19 @@ const populateDashboardDropDowns = async (req, res) => {
       { $project: { _id: 0, poo: 1 } },
     ]);
 
+    const distinctSnValues = await Fleet.aggregate([
+      { $match: { userId: userId, category: "Aircraft" } },
+      { $group: { _id: null, sn: { $addToSet: "$sn" } } },
+      { $project: { _id: 0, sn: 1 } },
+    ]);
+
     const data = {
       flight: formatOptions(dataValues.flight ?? []),
       from: formatOptions(dataValues.from ?? []),
       to: formatOptions(dataValues.to ?? []),
       variant: formatOptions(dataValues.variant ?? []),
       sector: formatOptions(filteredSectors),
+      sn: formatOptions(distinctSnValues?.[0]?.sn ?? []),
       poo: formatOptions(distinctPooValues?.[0]?.poo ?? []),
       userTag1: formatOptions(dataValues.userTag1 ?? []),
       userTag2: formatOptions(dataValues.userTag2 ?? []),
