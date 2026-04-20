@@ -115,6 +115,10 @@ const {
   convertTimeStringToMinutes,
   parseUTCOffsetToMinutes,
   generateQuarterlyDates,
+  startOfUtcDay,
+  endOfUtcDay,
+  addUtcDays,
+  getUtcDayOfWeek,
   roundToLastDateOfPresentYear,
   roundToLastDateOfNextQuarter,
   isValidDepStn
@@ -315,8 +319,8 @@ const getDashboardData = async (req, res) => {
 
       const datas = await Data.find(datequery);
       // Calculate the start and end dates based on the periodicity
-      let startDate = new Date(Math.min(...datas.map((data) => data.effFromDt)));
-      let endDate = new Date(Math.max(...datas.map((data) => data.effToDt)));
+      let startDate = startOfUtcDay(new Date(Math.min(...datas.map((data) => data.effFromDt))));
+      let endDate = startOfUtcDay(new Date(Math.max(...datas.map((data) => data.effToDt))));
 
       let timeZone;
       if (Array.isArray(datas) && datas.length > 0) {
@@ -327,10 +331,6 @@ const getDashboardData = async (req, res) => {
       //   startDate = timeZoneCorrectedDates(startDate, timeZone);
       //   endDate = timeZoneCorrectedDates(endDate, timeZone);
       // }
-
-      startDate.setUTCHours(0, 0, 0, 0)
-      endDate.setUTCHours(0, 0, 0, 0)
-
 
       // Calculate the periods based on the periodicity
       let periods = [];
@@ -357,37 +357,25 @@ const getDashboardData = async (req, res) => {
         for (const periodEndDate of periods) {
           let periodStartDate;
           if (periodicity === 'monthly') {
-
-            periodStartDate = new Date(periodEndDate.getFullYear(), periodEndDate.getMonth(), 1);
+            periodStartDate = new Date(Date.UTC(periodEndDate.getUTCFullYear(), periodEndDate.getUTCMonth(), 1));
 
           } else if (periodicity === 'quarterly') {
-
-            const quarterStartMonth = Math.floor(periodEndDate.getMonth() / 3) * 3;
-            periodStartDate = new Date(periodEndDate.getFullYear(), quarterStartMonth, 1);
+            const quarterStartMonth = Math.floor(periodEndDate.getUTCMonth() / 3) * 3;
+            periodStartDate = new Date(Date.UTC(periodEndDate.getUTCFullYear(), quarterStartMonth, 1));
 
           } else if (periodicity === 'annually') {
-
-            periodStartDate = new Date(periodEndDate.getFullYear(), 0, 1);
+            periodStartDate = new Date(Date.UTC(periodEndDate.getUTCFullYear(), 0, 1));
           } else if (periodicity === 'weekly') {
-
-            const dayOfWeek = periodEndDate.getDay();
-
-            // Calculate the difference in days to get to the previous Monday
+            const dayOfWeek = getUtcDayOfWeek(periodEndDate);
             const daysUntilMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-
-            // Clone the periodEndDate to avoid modifying the original date
-            const startDateis = new Date(periodEndDate);
-
-            // Subtract the days to get to the previous Monday
-            periodStartDate = startDateis.setDate(periodEndDate.getDate() - daysUntilMonday);
+            periodStartDate = addUtcDays(periodEndDate, -daysUntilMonday);
           } else if (periodicity === 'daily') {
-
-            periodStartDate = new Date(periodEndDate);
+            periodStartDate = startOfUtcDay(periodEndDate);
           }
 
           flightsQuery.date = {
-            $gte: periodStartDate,
-            $lte: periodEndDate
+            $gte: startOfUtcDay(periodStartDate),
+            $lte: endOfUtcDay(periodEndDate)
           }
 
 

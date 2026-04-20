@@ -168,6 +168,22 @@ function getTzMinutes(tzString) {
   return sign * ((hours * 60) + (minutes || 0));
 }
 
+function startOfUtcDay(date) {
+  const d = new Date(date);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+function addUtcDays(date, days) {
+  const d = startOfUtcDay(date);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+function getUtcDayOfWeek(date) {
+  return new Date(date).getUTCDay();
+}
+
 async function calculateSTA(doc) {
   if (!doc.std || !doc.bt || !doc.depStn || !doc.arrStn) return;
 
@@ -344,8 +360,8 @@ async function createStations(doc) {
 
 
 async function createFlgts(doc) {
-  const startDate = new Date(doc.effFromDt);
-  const endDate = new Date(doc.effToDt);
+  const startDate = startOfUtcDay(doc.effFromDt);
+  const endDate = startOfUtcDay(doc.effToDt);
   const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   // Fetch flight limit from .env
@@ -387,11 +403,16 @@ async function createFlgts(doc) {
     }
 
     // Check if the current date matches the specified days of the week
-    if (digitArray.includes(currentDate.getDay() !== 0 ? currentDate.getDay() : 7)) {
-      const dayOfWeek = daysOfWeek[currentDate.getDay()];
+    const currentDayOfWeek = getUtcDayOfWeek(currentDate);
+    const normalizedDow = currentDayOfWeek === 0 ? 7 : currentDayOfWeek;
+
+    if (digitArray.includes(normalizedDow)) {
+      const dayOfWeek = daysOfWeek[currentDayOfWeek];
+      const flightDate = new Date(currentDate);
+      flightDate.setUTCHours(0, 0, 0, 0);
 
       const newFlight = new FLIGHT({
-        date: currentDate,
+        date: flightDate,
         day: dayOfWeek,
         flight: doc.flight,
         depStn: doc.depStn,
@@ -433,7 +454,7 @@ async function createFlgts(doc) {
       }
     }
 
-    currentDate.setDate(currentDate.getDate() + 1);
+    currentDate = addUtcDays(currentDate, 1);
   }
 }
 
@@ -595,13 +616,10 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       return new Date((typeof date === "string" ? new Date(date) : date).toLocaleString("en-US", { timeZone: tzString }));
     }
 
-    let startDate = new Date(data.fromDt);
-    let endDate = new Date(data.toDt);
+    let startDate = startOfUtcDay(data.fromDt);
+    let endDate = startOfUtcDay(data.toDt);
 
     //set to midnight
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(0, 0, 0, 0);
-
     const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
     const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
@@ -632,14 +650,17 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
         break;
       }
 
-      const dayOfWeek = daysOfWeek[currentDate.getDay()];
+      const currentDow = getUtcDayOfWeek(currentDate);
+      const dayOfWeek = daysOfWeek[currentDow];
 
-      const currentDayOfWeek = currentDate.getDay() !== 0 ? currentDate.getDay() : 7;
+      const currentDayOfWeek = currentDow !== 0 ? currentDow : 7;
       const allowedDaysOfWeek = Array.from(data.dow).map(Number);
 
       if (allowedDaysOfWeek.includes(currentDayOfWeek)) {
+        const flightDate = new Date(currentDate);
+        flightDate.setUTCHours(0, 0, 0, 0);
         const newFlight = {
-          date: currentDate.setHours(0, 0, 0, 0),
+          date: flightDate,
           day: dayOfWeek,
           flight: doc.flight,
           depStn: data.sector1,
@@ -694,7 +715,7 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
         console.log("New flight entry created.");
       }
 
-      currentDate.setDate(currentDate.getDate() + 1);
+      currentDate = addUtcDays(currentDate, 1);
     }
 
     if (oldArrStn !== doc.arrStn) {

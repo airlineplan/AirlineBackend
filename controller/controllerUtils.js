@@ -242,7 +242,8 @@ function addTimeStrings(time1, time2, time3 = '00:00') {
 
 function addDays(date, days) {
   const result = new Date(date); // Create a new Date object to avoid modifying the original date
-  result.setDate(result.getDate() + days); // Set the date to be days days ahead
+  result.setUTCHours(0, 0, 0, 0);
+  result.setUTCDate(result.getUTCDate() + days); // Keep date math stable across server timezones
   return result; // Return the new date object
 }
 // Helper function to normalize date to UTC midnight
@@ -292,78 +293,85 @@ const binarySearchByStd = (arr, targetTime, findStart) => {
   return result;
 };
 function roundToLastDateOfNextQuarter(date) {
+  const workingDate = new Date(date);
+  workingDate.setUTCHours(0, 0, 0, 0);
 
   // Determine the current quarter
-  const currentMonth = date.getMonth();
+  const currentMonth = workingDate.getUTCMonth();
   const currentQuarter = Math.floor(currentMonth / 3); // Quarters are 0-based
 
   // Calculate the first month of the next quarter
   const firstMonthOfNextQuarter = (currentQuarter + 1) * 3;
 
   // Set the date to the first day of the next quarter and subtract one day to get the last day of the current quarter
-  date.setMonth(firstMonthOfNextQuarter, 1);
-  date.setDate(date.getDate() - 1);
+  workingDate.setUTCMonth(firstMonthOfNextQuarter, 1);
+  workingDate.setUTCDate(workingDate.getUTCDate() - 1);
 
-  return date;
+  return workingDate;
 }
 
 function generateQuarterlyDates(startDate, endDate) {
   const periods = [];
   let currentDate = new Date(startDate);
+  currentDate.setUTCHours(0, 0, 0, 0);
+  const boundaryEndDate = roundToLastDateOfNextQuarter(endDate);
 
-  while (currentDate <= endDate) {
-    const currentMonth = currentDate.getMonth();
+  while (currentDate <= boundaryEndDate) {
+    const currentMonth = currentDate.getUTCMonth();
 
     // Check the current quarter and add the last day accordingly
     if (currentMonth >= 0 && currentMonth < 3) {
       // First quarter, end date is March 31
-      currentDate = new Date(currentDate.getFullYear(), 2, 31);
+      currentDate = new Date(Date.UTC(currentDate.getUTCFullYear(), 2, 31));
     } else if (currentMonth >= 3 && currentMonth < 6) {
       // Second quarter, end date is June 30
-      currentDate = new Date(currentDate.getFullYear(), 5, 30);
+      currentDate = new Date(Date.UTC(currentDate.getUTCFullYear(), 5, 30));
     } else if (currentMonth >= 6 && currentMonth < 9) {
       // Third quarter, end date is September 30
-      currentDate = new Date(currentDate.getFullYear(), 8, 30);
+      currentDate = new Date(Date.UTC(currentDate.getUTCFullYear(), 8, 30));
     } else {
       // Fourth quarter, end date is December 31
-      currentDate = new Date(currentDate.getFullYear(), 11, 31);
+      currentDate = new Date(Date.UTC(currentDate.getUTCFullYear(), 11, 31));
     }
 
 
 
-    if (currentDate <= roundToLastDateOfNextQuarter(endDate)) {
+    if (currentDate <= boundaryEndDate) {
       periods.push(new Date(currentDate));
 
     }
 
     // Move to the next quarter's start date
-    currentDate.setMonth(currentDate.getMonth() + 1);
+    currentDate.setUTCMonth(currentDate.getUTCMonth() + 1);
   }
 
   return periods;
 }
 
 function roundToLastDateOfPresentYear(date) {
+  const workingDate = new Date(date);
+  workingDate.setUTCHours(0, 0, 0, 0);
 
   // Set the date to December 31st of the current year
-  date.setMonth(11, 31);
+  workingDate.setUTCMonth(11, 31);
 
-  return date;
+  return workingDate;
 }
 
 function generateAnnualDates(startDate, endDate) {
   const periods = [];
   let currentDate = new Date(startDate);
-  endDate = roundToLastDateOfPresentYear(endDate);
-  while (currentDate <= endDate) {
+  currentDate.setUTCHours(0, 0, 0, 0);
+  const boundaryEndDate = roundToLastDateOfPresentYear(endDate);
+  while (currentDate <= boundaryEndDate) {
     // Calculate the last day of the current year (December 31st)
-    const lastDayOfYear = new Date(currentDate.getFullYear(), 11, 31);
+    const lastDayOfYear = new Date(Date.UTC(currentDate.getUTCFullYear(), 11, 31));
 
     // Push the last day of the year to the periods array
     periods.push(new Date(lastDayOfYear));
 
     // Move to the next year's start date
-    currentDate.setFullYear(currentDate.getFullYear() + 1);
+    currentDate.setUTCFullYear(currentDate.getUTCFullYear() + 1);
   }
 
   return periods;
@@ -372,18 +380,21 @@ function generateAnnualDates(startDate, endDate) {
 function generateLastDayOfMonths(startDate, endDate) {
   const periods = [];
   let currentDate = new Date(startDate);
+  currentDate.setUTCHours(0, 0, 0, 0);
+  const boundaryEndDate = new Date(endDate);
+  boundaryEndDate.setUTCHours(0, 0, 0, 0);
 
-  while (currentDate <= endDate) {
-    const year = currentDate.getFullYear();
-    const month = currentDate.getMonth();
-    const lastDayOfMonth = new Date(year, month + 1, 0); // Set to the last day of the current month
+  while (currentDate <= boundaryEndDate) {
+    const year = currentDate.getUTCFullYear();
+    const month = currentDate.getUTCMonth();
+    const lastDayOfMonth = new Date(Date.UTC(year, month + 1, 0)); // Set to the last day of the current month
 
     // Push the last day of the month to the periods array
     periods.push(lastDayOfMonth);
 
     // Move to the next month's start date
-    currentDate.setMonth(month + 1);
-    currentDate.setDate(1);
+    currentDate.setUTCMonth(month + 1);
+    currentDate.setUTCDate(1);
   }
 
   return periods;
@@ -392,22 +403,24 @@ function generateLastDayOfMonths(startDate, endDate) {
 function generateWeeklyDates(startDate, endDate) {
   const start = new Date(startDate);
   const end = new Date(endDate);
+  start.setUTCHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
   const dates = [];
 
   // Loop through the dates from start to end
-  for (let current = start; current <= end; current.setDate(current.getDate() + 1)) {
+  for (let current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
     // Check if the current day is a Sunday (day 0)
-    if (current.getDay() === 0) {
+    if (current.getUTCDay() === 0) {
       // Push the current date to the array
       dates.push(new Date(current));
     }
   }
 
   // Check if the endDate is not a Sunday
-  if (end.getDay() !== 0) {
+  if (end.getUTCDay() !== 0) {
     // Find the next Sunday after endDate
     const nextSunday = new Date(end);
-    nextSunday.setDate(end.getDate() + (7 - end.getDay()));
+    nextSunday.setUTCDate(end.getUTCDate() + (7 - end.getUTCDay()));
     dates.push(nextSunday);
   }
 
@@ -418,10 +431,12 @@ function generateWeeklyDates(startDate, endDate) {
 function generateDailyDates(startDate, endDate) {
   const start = new Date(startDate);
   const end = new Date(endDate);
+  start.setUTCHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
   const dates = [];
 
   // Loop through the dates from start to end
-  for (let current = start; current <= end; current.setDate(current.getDate() + 1)) {
+  for (let current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
     // Push the current date to the array
     dates.push(new Date(current));
   }
@@ -545,6 +560,23 @@ module.exports = {
   convertTimeStringToMinutes,
   parseUTCOffsetToMinutes,
   generateQuarterlyDates,
+  startOfUtcDay: (date) => {
+    const d = new Date(date);
+    d.setUTCHours(0, 0, 0, 0);
+    return d;
+  },
+  endOfUtcDay: (date) => {
+    const d = new Date(date);
+    d.setUTCHours(23, 59, 59, 999);
+    return d;
+  },
+  addUtcDays: (date, days) => {
+    const d = new Date(date);
+    d.setUTCHours(0, 0, 0, 0);
+    d.setUTCDate(d.getUTCDate() + days);
+    return d;
+  },
+  getUtcDayOfWeek: (date) => new Date(date).getUTCDay(),
   roundToLastDateOfPresentYear,
   roundToLastDateOfNextQuarter,
   isValidDepStn
