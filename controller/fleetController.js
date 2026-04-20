@@ -18,6 +18,14 @@ const normalizeApuKey = (value) => {
     if (value === null || value === undefined) return "";
     return String(value).trim().toUpperCase();
 };
+const isSpareComponentAsset = (asset = {}) =>
+    ["Engine", "APU"].includes(asset.category) &&
+    String(asset.titled || "").toLowerCase().includes("spare");
+const isTitledComponentAsset = (asset = {}) =>
+    ["Engine", "APU"].includes(asset.category) &&
+    Boolean(String(asset.titled || "").trim());
+const shouldBlankOwnership = (asset = {}) =>
+    isTitledComponentAsset(asset);
 const createMetricKey = (category, value) => {
     const normalized =
         category === "APU" ? normalizeApuKey(value) : normalizeNumericAssetKey(value);
@@ -365,6 +373,11 @@ exports.bulkUpsertFleet = async (req, res) => {
             updateData.variant = updateData.variant ? String(updateData.variant).trim() : updateData.variant;
             updateData.titled = updateData.titled ? String(updateData.titled).trim() : updateData.titled;
             updateData.ownership = updateData.ownership ? String(updateData.ownership).trim() : updateData.ownership;
+            if (shouldBlankOwnership(updateData)) {
+                updateData.ownership = "";
+            } else if (isSpareComponentAsset(updateData) && updateData.ownership === "Wet lease") {
+                updateData.ownership = "";
+            }
 
             // Auto-uppercase registration
             if (updateData.regn) updateData.regn = updateData.regn.trim().toUpperCase();

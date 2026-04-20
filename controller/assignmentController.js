@@ -184,6 +184,7 @@ exports.uploadAssignments = async (req, res) => {
         }
 
         const processedRowsByFlightKey = new Map();
+        let duplicateComboCount = 0;
 
         // Diagnostic Counters
         let notFoundCount = 0;
@@ -264,6 +265,11 @@ exports.uploadAssignments = async (req, res) => {
             if (fleetRecord && assignedAcft && fleetRecord.sn) {
                 const strippedSn = String(fleetRecord.sn).replace(/\D/g, ''); // Keeps only numbers
                 if (strippedSn.length > 0) msnVal = Number(strippedSn);
+            }
+
+            if (processedRowsByFlightKey.has(flightKey)) {
+                duplicateComboCount++;
+                continue;
             }
 
             processedRowsByFlightKey.set(flightKey, {
@@ -349,12 +355,13 @@ exports.uploadAssignments = async (req, res) => {
 
         res.status(200).json({
             message: "Upload and Flight Sync complete",
-            diagnostics: {
-                totalValidRows: validRows.length,
-                uniqueFlightsProcessed: processedRowsByFlightKey.size,
-                successfullyAssigned: successfulAcftLinks,
-                rejections: {
-                    missingFromFleetDB: missingFleetDBCount,
+                diagnostics: {
+                    totalValidRows: validRows.length,
+                    uniqueFlightsProcessed: processedRowsByFlightKey.size,
+                    duplicateDateFlightCombosSkipped: duplicateComboCount,
+                    successfullyAssigned: successfulAcftLinks,
+                    rejections: {
+                        missingFromFleetDB: missingFleetDBCount,
                     preEntryDates: preEntryCount,
                     postExitDates: postExitCount,
                     groundConflicts: groundConflictCount
