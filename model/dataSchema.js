@@ -230,6 +230,11 @@ function normalizeFlightGenerationDoc(doc) {
     userTag2: source.userTag2,
     remarks1: source.remarks1,
     remarks2: source.remarks2,
+    gcd: source.gcd,
+    paxCapacity: source.paxCapacity,
+    CargoCapT: source.CargoCapT,
+    paxLF: source.paxLF,
+    cargoLF: source.cargoLF,
     userId: source.userId,
     networkId: source.networkId || (source._id ? String(source._id) : undefined),
     rotationNumber: source.rotationNumber,
@@ -418,6 +423,12 @@ async function createFlgts(doc) {
   const endDate = startOfUtcDay(doc.effToDt);
   const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+  const toFiniteNumber = (value, fallback = 0) => {
+    if (value === null || value === undefined || value === "") return fallback;
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
   // Fetch flight limit from .env
   const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
   let currentFlightCount;
@@ -448,6 +459,11 @@ async function createFlgts(doc) {
   let currentDate = new Date(startDate);
 
   const { bh, fh, ft } = await calculateBH_FH(doc.depStn, doc.arrStn, doc.bt, doc.userId);
+  const seats = toFiniteNumber(doc.paxCapacity);
+  const cargoCapT = toFiniteNumber(doc.CargoCapT);
+  const gcd = toFiniteNumber(doc.gcd);
+  const paxLF = toFiniteNumber(doc.paxLF);
+  const cargoLF = toFiniteNumber(doc.cargoLF);
 
   while (currentDate <= endDate) {
     // Stop if the overall flight limit is reached
@@ -476,6 +492,15 @@ async function createFlgts(doc) {
         arrStn: doc.arrStn,
         sector: `${doc.depStn}-${doc.arrStn}`,
         variant: doc.variant,
+        seats,
+        CargoCapT: cargoCapT,
+        dist: gcd,
+        pax: seats * (paxLF / 100),
+        CargoT: cargoCapT * (cargoLF / 100),
+        ask: seats * gcd,
+        rsk: seats * (paxLF / 100) * gcd,
+        cargoAtk: cargoCapT * gcd,
+        cargoRtk: cargoCapT * (cargoLF / 100) * gcd,
         domIntl: doc.domINTL.toLowerCase(),
         userTag1: doc.userTag1,
         userTag2: doc.userTag2,

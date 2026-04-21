@@ -309,6 +309,41 @@ test("schedule field updates regenerate the flight rows and delete existing assi
   assert.ok(!flights.some((flight) => formatDate(flight.date) === formatDate(originalFlights[0].date)));
 });
 
+test("schedule field updates keep sector-derived numeric values on regenerated flights", async () => {
+  const { data, networkId } = await seedNetwork({
+    paxCapacity: "180",
+    CargoCapT: "30",
+    gcd: "1200",
+    paxLF: "85",
+    cargoLF: "75",
+  });
+
+  await Data.findByIdAndUpdate(
+    data._id,
+    {
+      $set: {
+        effFromDt: utcDate(2026, 4, 7),
+        effToDt: utcDate(2026, 4, 11),
+        dow: "246",
+      },
+    },
+    { new: true, runValidators: true }
+  );
+
+  const flights = await Flight.find({ networkId }).sort({ date: 1 }).lean();
+
+  assert.ok(flights.length > 0);
+  assert.equal(flights[0].seats, 180);
+  assert.equal(flights[0].CargoCapT, 30);
+  assert.equal(flights[0].dist, 1200);
+  assert.equal(flights[0].pax, 153);
+  assert.equal(flights[0].CargoT, 22.5);
+  assert.equal(flights[0].ask, 216000);
+  assert.equal(flights[0].rsk, 183600);
+  assert.equal(flights[0].cargoAtk, 36000);
+  assert.equal(flights[0].cargoRtk, 32400);
+});
+
 test("non-schedule field updates keep the same flight rows and revalidate assignments", async () => {
   const { data, networkId } = await seedNetwork();
   const flightsBefore = await Flight.find({ networkId }).sort({ date: 1 }).lean();
