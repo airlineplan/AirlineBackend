@@ -797,8 +797,8 @@ const updateData = async (req, res) => {
       // -------------------------------
       // 3️⃣ Atomic Safe Update
       // -------------------------------
-      const updatedData = await Data.findByIdAndUpdate(
-        dataId,
+      const updatedData = await Data.findOneAndUpdate(
+        { _id: dataId, userId },
         { $set: updatePayload },
         { new: true, runValidators: true }
       );

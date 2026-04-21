@@ -25,6 +25,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
 const createConnections = require('../helper/createConnections');
 
@@ -547,6 +548,28 @@ const updateData = async (req, res) => {
     const idArray = id.split(",").map((item) => item.trim());
 
     const updatedFlights = [];
+    let shouldRevalidateAssignments = false;
+
+    const updatePayloadFromBody = {};
+    Object.entries(req.body).forEach(([key, value]) => {
+      if (
+        value !== undefined &&
+        value !== null &&
+        value !== "" &&
+        typeof value !== "function"
+      ) {
+        updatePayloadFromBody[key] = value;
+      }
+    });
+
+    shouldRevalidateAssignments = Object.keys(updatePayloadFromBody).some((key) => ![
+      "effFromDt",
+      "effFromDate",
+      "effToDt",
+      "effToDate",
+      "timeZone",
+      "timezone",
+    ].includes(key));
 
     for (const dataId of idArray) {
 
@@ -579,18 +602,7 @@ const updateData = async (req, res) => {
       // -------------------------------
       // 2️⃣ Build Safe Update Payload
       // -------------------------------
-      const updatePayload = {};
-
-      Object.entries(req.body).forEach(([key, value]) => {
-        if (
-          value !== undefined &&
-          value !== null &&
-          value !== "" &&
-          typeof value !== "function"
-        ) {
-          updatePayload[key] = value;
-        }
-      });
+      const updatePayload = { ...updatePayloadFromBody };
 
       // Normalize domINTL
       if (updatePayload.domINTL) {
@@ -609,10 +621,10 @@ const updateData = async (req, res) => {
       // -------------------------------
       // 3️⃣ Atomic Safe Update
       // -------------------------------
-      const updatedData = await Data.findByIdAndUpdate(
-        dataId,
+      const updatedData = await Data.findOneAndUpdate(
+        { _id: dataId, userId },
         { $set: updatePayload },
-        { new: true, runValidators: true }
+        { new: true, runValidators: true, skipAssignmentResync: shouldRevalidateAssignments }
       );
 
       if (!updatedData) {
@@ -620,6 +632,14 @@ const updateData = async (req, res) => {
       }
 
       updatedFlights.push(updatedData);
+    }
+
+    if (shouldRevalidateAssignments) {
+      try {
+        await revalidateAssignmentsForUser({ userId: req.user.id });
+      } catch (revalidationError) {
+        console.error("Assignment revalidation failed after master update:", revalidationError);
+      }
     }
 
     return res.json({

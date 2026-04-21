@@ -74,6 +74,8 @@ const assignmentSchema = new mongoose.Schema(
             enum: [
                 "OUTSIDE_FLEET_DATES",
                 "GROUND_DAY_CONFLICT",
+                "VARIANT_MISMATCH",
+                "ACFT_ASSIGNMENT_OVERLAP",
                 "MANUAL_REMOVAL"
             ],
             default: null

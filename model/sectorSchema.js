@@ -65,6 +65,13 @@ const timeStrToMinutes = (timeStr) => {
   return parseFloat(timeStr) * 60 || 0; 
 };
 
+const toFiniteNumber = (value, fallback = 0) => {
+  if (value === null || value === undefined || value === "") return fallback;
+
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 const syncFlightsForSector = async (doc) => {
   try {
     // 1. Fetch Taxi times from Station model
@@ -96,25 +103,29 @@ const syncFlightsForSector = async (doc) => {
     );
 
     // 6. Fields to push to FLGTs master table
+    const paxCapacity = toFiniteNumber(doc.paxCapacity);
+    const cargoCapT = toFiniteNumber(doc.CargoCapT);
+    const paxLF = toFiniteNumber(doc.paxLF);
+    const cargoLF = toFiniteNumber(doc.cargoLF);
+    const gcd = toFiniteNumber(doc.gcd);
+
     const updatedFields = {
-      seats: doc.paxCapacity,
-      pax: doc.paxCapacity * (doc.paxLF / 100),
-      dist: doc.gcd,
-      CargoCapT: doc.CargoCapT,
-      CargoT: doc.CargoCapT * (doc.cargoLF / 100),
-      ask: doc.paxCapacity * doc.gcd,
-      rsk: doc.paxCapacity * (doc.paxLF / 100) * doc.gcd,
-      cargoAtk: doc.CargoCapT * doc.gcd,
-      cargoRtk: doc.CargoCapT * (doc.cargoLF / 100) * doc.gcd,
+      seats: paxCapacity,
+      pax: paxCapacity * (paxLF / 100),
+      dist: gcd,
+      CargoCapT: cargoCapT,
+      CargoT: cargoCapT * (cargoLF / 100),
+      ask: paxCapacity * gcd,
+      rsk: paxCapacity * (paxLF / 100) * gcd,
+      cargoAtk: cargoCapT * gcd,
+      cargoRtk: cargoCapT * (cargoLF / 100) * gcd,
       acftType: doc.acftType || doc.variant, 
       fh: fh,                 
       bh: bh,
       ft: ft               
     };
 
-    const allFieldsValid = Object.entries(updatedFields).every(([key, value]) => (
-      key in updatedFields && (typeof value === 'string' || typeof value === 'number')
-    ));
+    const allFieldsValid = Object.values(updatedFields).every((value) => Number.isFinite(value) || typeof value === "string");
 
     updatedFields.isComplete = allFieldsValid;
 

@@ -1,10 +1,12 @@
 const mongoose = require("mongoose");
+const Assignment = require("../model/assignment");
 const FLIGHT = require("../model/flight");
 const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const userData = require("../model/userSchema");
 const { calculateBH_FH } = require('../utils/calculateFlightHours');
+const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
@@ -184,6 +186,57 @@ function getUtcDayOfWeek(date) {
   return new Date(date).getUTCDay();
 }
 
+function normalizeScheduleString(value) {
+  return value === null || value === undefined ? "" : String(value).trim();
+}
+
+function normalizeScheduleFlight(value) {
+  return normalizeScheduleString(value).toUpperCase();
+}
+
+function normalizeScheduleDate(value) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toISOString();
+}
+
+function hasScheduleChange(originalDoc, updatedDoc) {
+  return (
+    normalizeScheduleDate(originalDoc.effFromDt) !== normalizeScheduleDate(updatedDoc.effFromDt) ||
+    normalizeScheduleDate(originalDoc.effToDt) !== normalizeScheduleDate(updatedDoc.effToDt) ||
+    normalizeScheduleString(originalDoc.dow) !== normalizeScheduleString(updatedDoc.dow)
+  );
+}
+
+function normalizeFlightGenerationDoc(doc) {
+  const source = doc || {};
+
+  return {
+    flight: source.flight,
+    depStn: source.depStn || source.sector1,
+    arrStn: source.arrStn || source.sector2,
+    std: source.std,
+    bt: source.bt,
+    sta: source.sta,
+    variant: source.variant,
+    effFromDt: source.effFromDt || source.fromDt,
+    effToDt: source.effToDt || source.toDt,
+    dow: source.dow,
+    domINTL: source.domINTL || source.domIntl || "",
+    userTag1: source.userTag1,
+    userTag2: source.userTag2,
+    remarks1: source.remarks1,
+    remarks2: source.remarks2,
+    userId: source.userId,
+    networkId: source.networkId || (source._id ? String(source._id) : undefined),
+    rotationNumber: source.rotationNumber,
+    addedByRotation: source.addedByRotation,
+  };
+}
+
 async function calculateSTA(doc) {
   if (!doc.std || !doc.bt || !doc.depStn || !doc.arrStn) return;
 
@@ -360,6 +413,7 @@ async function createStations(doc) {
 
 
 async function createFlgts(doc) {
+  doc = normalizeFlightGenerationDoc(doc);
   const startDate = startOfUtcDay(doc.effFromDt);
   const endDate = startOfUtcDay(doc.effToDt);
   const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -428,7 +482,7 @@ async function createFlgts(doc) {
         remarks1: doc.remarks1,
         remarks2: doc.remarks2,
         userId: doc.userId,
-        networkId: doc._id,
+        networkId: doc.networkId,
         rotationNumber: doc.rotationNumber,
         isComplete: doc.addedByRotation ? true : !!doc.networkId,
         addedByRotation: doc.addedByRotation,
@@ -519,10 +573,17 @@ dataSchema.post('save', async function (doc) {
 
 dataSchema.post("findOneAndUpdate", async function (doc) {
   const networkId = doc._id;
+  const shouldSkipAssignmentResync = this.getOptions?.()?.skipAssignmentResync === true;
   try {
     const data = await Sector.findOne({ networkId: networkId });
-    const oldArrStn = data.sector2;
-    const oldDepStn = data.sector1;
+    if (!data) {
+      console.log(`No sector entry found for networkId: ${networkId}`);
+      return;
+    }
+
+    const originalData = data.toObject ? data.toObject() : { ...data._doc };
+    const oldArrStn = originalData.sector2;
+    const oldDepStn = originalData.sector1;
 
     if (!data.fromDt || !data.toDt) {
       return;
@@ -610,7 +671,10 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       console.log(`Updated fields [${updatedFields.join(', ')}] for networkId: ${networkId}`);
     } else {
       console.log(`No fields updated for networkId: ${networkId}`);
+      return;
     }
+
+    const hasNonEffectiveDateChanges = updatedFields.some((field) => !["fromDt", "toDt"].includes(field));
 
     const timeZoneCorrectedDates = (date, tzString) => {
       return new Date((typeof date === "string" ? new Date(date) : date).toLocaleString("en-US", { timeZone: tzString }));
@@ -727,6 +791,66 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       await updateStationFrequency(doc.depStn, 1);
       await updateStationFrequency(oldDepStn, -1);
     }
+
+    const originalScheduleDoc = {
+      effFromDt: originalData.fromDt,
+      effToDt: originalData.toDt,
+      dow: originalData.dow,
+      flight: originalData.flight,
+    };
+
+    const updatedScheduleDoc = {
+      effFromDt: doc.effFromDt,
+      effToDt: doc.effToDt,
+      dow: doc.dow,
+      flight: doc.flight,
+    };
+
+    const scheduleChanged = hasScheduleChange(originalScheduleDoc, updatedScheduleDoc);
+
+    if (scheduleChanged) {
+      const flightNumbersToDelete = [...new Set([
+        normalizeScheduleFlight(originalData.flight),
+        normalizeScheduleFlight(doc.flight)
+      ].filter(Boolean))];
+
+      const deletedFlights = await FLIGHT.deleteMany({ networkId: networkId });
+      console.log(`Deleted ${deletedFlights.deletedCount} existing flight rows for networkId: ${networkId}`);
+
+      if (flightNumbersToDelete.length > 0) {
+        const assignmentDeleteResult = await Assignment.deleteMany({
+          userId: doc.userId,
+          flightNumber: { $in: flightNumbersToDelete }
+        });
+
+        console.log(
+          `Deleted ${assignmentDeleteResult.deletedCount} assignment rows for networkId ${networkId} and flights [${flightNumbersToDelete.join(", ")}]`
+        );
+      }
+
+      await createFlgts({
+        ...originalData,
+        ...data.toObject(),
+        ...doc,
+        depStn: data.sector1,
+        arrStn: data.sector2,
+        effFromDt: doc.effFromDt,
+        effToDt: doc.effToDt,
+        dow: doc.dow,
+        domINTL: doc.domINTL,
+        userId: doc.userId
+      });
+      return;
+    }
+
+    if (hasNonEffectiveDateChanges) {
+      if (!shouldSkipAssignmentResync) {
+        await revalidateAssignmentsForUser({ userId: doc.userId });
+      }
+      return;
+    }
+
+    console.log(`Schedule fields unchanged for networkId ${networkId}; flights updated in place.`);
 
     // await createConnections(doc.userId);
     // console.log("createConnections completed successfully.");
