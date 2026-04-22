@@ -14,6 +14,28 @@ const moment = require('moment'); // <-- Added missing moment import
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const getFlightDateBounds = async ({ userId } = {}) => {
+    const buildPipeline = (match = {}) => [
+        { $match: { ...match, date: { $type: "date" } } },
+        {
+            $group: {
+                _id: null,
+                firstDate: { $min: "$date" },
+                lastDate: { $max: "$date" }
+            }
+        }
+    ];
+
+    const userMatch = userId ? { userId: String(userId) } : {};
+    const [userBounds] = await Flight.aggregate(buildPipeline(userMatch));
+    if (userBounds?.firstDate && userBounds?.lastDate) {
+        return userBounds;
+    }
+
+    const [globalBounds] = await Flight.aggregate(buildPipeline());
+    return globalBounds || null;
+};
+
 const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     const assetKey = String(msnEsn || "").trim();
     const lookupDate = date ? moment(date).endOf("day").toDate() : null;
@@ -159,62 +181,72 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 resetFilter.date = { $lte: endOfDay };
             }
 
-            const [fleetAssets, utils, resetRecords] = await Promise.all([
+            const [fleetAssets, utils, resetRecords, flightBounds] = await Promise.all([
                 Fleet.find(fleetFilter).lean(),
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
-                MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean()
+                MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
+                getFlightDateBounds({ userId })
             ]);
 
-            const fallbackFleetRows = msnEsn && fleetAssets.length === 0
-                ? [{
-                    _id: `fallback-${msnEsn.trim()}`,
-                    sn: msnEsn.trim(),
-                    titled: "",
-                    type: "",
-                    variant: ""
-                }]
-                : fleetAssets;
+            const selectedDate = moment(date, moment.ISO_8601, true);
+            const isOutsideRange = !selectedDate.isValid() || !flightBounds?.firstDate || !flightBounds?.lastDate ||
+                selectedDate.isBefore(moment(flightBounds.firstDate).startOf('day')) ||
+                selectedDate.isAfter(moment(flightBounds.lastDate).endOf('day'));
 
-            const utilByMsn = new Map();
-            utils.forEach(record => {
-                const key = String(record.msnEsn || "").trim().toUpperCase();
-                if (!utilByMsn.has(key)) {
-                    utilByMsn.set(key, record);
-                }
-            });
+            if (!isOutsideRange) {
+                const fallbackFleetRows = msnEsn && fleetAssets.length === 0
+                    ? [{
+                        _id: `fallback-${msnEsn.trim()}`,
+                        sn: msnEsn.trim(),
+                        titled: "",
+                        type: "",
+                        variant: ""
+                    }]
+                    : fleetAssets;
 
-            const resetByMsn = new Map();
-            resetRecords.forEach(record => {
-                const key = String(record.msnEsn || "").trim().toUpperCase();
-                if (!resetByMsn.has(key)) {
-                    resetByMsn.set(key, record);
-                }
-            });
+                const utilByMsn = new Map();
+                utils.forEach(record => {
+                    const key = String(record.msnEsn || "").trim().toUpperCase();
+                    if (!utilByMsn.has(key)) {
+                        utilByMsn.set(key, record);
+                    }
+                });
 
-            maintenanceData = fallbackFleetRows.map(f => {
-                const msn = String(f.sn || msnEsn || "").trim();
-                const lookupKey = msn.toUpperCase();
-                const util = utilByMsn.get(lookupKey);
-                const latestReset = resetByMsn.get(lookupKey);
+                const resetByMsn = new Map();
+                resetRecords.forEach(record => {
+                    const key = String(record.msnEsn || "").trim().toUpperCase();
+                    if (!resetByMsn.has(key)) {
+                        resetByMsn.set(key, record);
+                    }
+                });
 
-                return {
-                    id: f._id,
-                    msn,
-                    pn: latestReset?.pn || "",
-                    sn: latestReset?.snBn || "",
-                    titled: f.titled || "",
-                    tsn: util?.tsn ?? "",
-                    csn: util?.csn ?? "",
-                    dsn: util?.dsn ?? "",
-                    tso: util?.tsoTsr ?? "",
-                    cso: util?.csoCsr ?? "",
-                    dso: util?.dsoDsr ?? "",
-                    tsr: util?.tsRplmt ?? "",
-                    csr: util?.csRplmt ?? "",
-                    dsr: util?.dsRplmt ?? "",
-                    allDisplay: ""
-                };
-            });
+                maintenanceData = fallbackFleetRows.map(f => {
+                    const msn = String(f.sn || msnEsn || "").trim();
+                    const lookupKey = msn.toUpperCase();
+                    const util = utilByMsn.get(lookupKey);
+                    const latestReset = resetByMsn.get(lookupKey);
+
+                    return {
+                        id: f._id,
+                        msn,
+                        pn: latestReset?.pn || "",
+                        sn: latestReset?.snBn || "",
+                        titled: f.titled || "",
+                        tsn: util?.tsn ?? "",
+                        csn: util?.csn ?? "",
+                        dsn: util?.dsn ?? "",
+                        tso: util?.tsoTsr ?? "",
+                        cso: util?.csoCsr ?? "",
+                        dso: util?.dsoDsr ?? "",
+                        tsr: util?.tsRplmt ?? "",
+                        csr: util?.csRplmt ?? "",
+                        dsr: util?.dsRplmt ?? "",
+                        allDisplay: ""
+                    };
+                });
+            } else {
+                maintenanceData = [];
+            }
         }
 
         res.status(200).json({
