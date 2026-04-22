@@ -11,6 +11,8 @@ const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
 
+const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
+
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -28,12 +30,7 @@ const getFlightDateBounds = async ({ userId } = {}) => {
 
     const userMatch = userId ? { userId: String(userId) } : {};
     const [userBounds] = await Flight.aggregate(buildPipeline(userMatch));
-    if (userBounds?.firstDate && userBounds?.lastDate) {
-        return userBounds;
-    }
-
-    const [globalBounds] = await Flight.aggregate(buildPipeline());
-    return globalBounds || null;
+    return userBounds || null;
 };
 
 const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
@@ -74,7 +71,7 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     };
 };
 
-const getAssignmentUsageForDate = async ({ effectiveMsn, date, metric }) => {
+const getAssignmentUsageForDate = async ({ userId, effectiveMsn, date, metric }) => {
     if (!effectiveMsn) {
         return { timeUsage: 0, cycleUsage: 0 };
     }
@@ -85,6 +82,7 @@ const getAssignmentUsageForDate = async ({ effectiveMsn, date, metric }) => {
     }
 
     const assignments = await Assignment.find({
+        ...(userId ? { userId: String(userId) } : {}),
         date: {
             $gte: date.toDate(),
             $lt: moment(date).endOf("day").toDate()
@@ -126,7 +124,7 @@ const getUtilisationWindow = ({ masterStartDate, masterEndDate, fleet }) => {
 exports.getMaintenanceDashboard = async (req, res) => {
     try {
         // Assuming verifyToken middleware attaches the user to req.user
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
 
         // 1. Fetch Aircraft Owning
         // const aircraft = await Aircraft.find({ userId }).lean();
@@ -179,6 +177,9 @@ exports.getMaintenanceDashboard = async (req, res) => {
             }
             if (date) {
                 resetFilter.date = { $lte: endOfDay };
+            }
+            if (userId) {
+                resetFilter.userId = String(userId);
             }
 
             const [fleetAssets, utils, resetRecords, flightBounds] = await Promise.all([
@@ -270,6 +271,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
  */
 exports.getResetRecords = async (req, res) => {
     try {
+        const userId = getUserIdFromReq(req);
         const { date, msnEsn } = req.query;
         const filter = {};
 
@@ -284,6 +286,9 @@ exports.getResetRecords = async (req, res) => {
         if (msnEsn) {
             // Regex for partial matching in the search dropdown
             filter.msnEsn = { $regex: msnEsn, $options: 'i' };
+        }
+        if (userId) {
+            filter.userId = String(userId);
         }
 
         const records = await MaintenanceReset.find(filter).sort({ date: -1, msnEsn: 1 }).lean();
@@ -320,7 +325,7 @@ exports.getResetRecords = async (req, res) => {
  */
 exports.bulkSaveResetRecords = async (req, res) => {
     try {
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
         const resetData = Array.isArray(req.body) ? req.body : req.body?.resetData;
 
         if (!resetData || !Array.isArray(resetData)) {
@@ -364,6 +369,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
             bulkOperations.push({
                 updateOne: {
                     filter: {
+                        userId: String(userId),
                         msnEsn: updateFields.msnEsn,
                         pn: updateFields.pn,
                         snBn: updateFields.snBn
@@ -371,6 +377,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     update: {
                         $set: {
                             ...updateFields,
+                            userId: String(userId),
                             timeMetric: record.metric || "BH"
                         }
                     },
@@ -382,6 +389,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
             utilisationOps.push({
                 updateOne: {
                     filter: {
+                        userId: String(userId),
                         msnEsn: updateFields.msnEsn,
                         pn: updateFields.pn,
                         snBn: updateFields.snBn
@@ -389,6 +397,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     update: {
                         $set: {
                             ...updateFields,
+                            userId: String(userId),
                             timeMetric: record.metric || "BH",
                             setFlag: "Y",
                             remarks: "(end of day)"
@@ -400,8 +409,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
 
             // 3. Backfill Utilisation history to Master Table Start Date
             // First, find the starting date of the master table (Flight table)
-            const firstFlight = await Flight.findOne().sort({ date: 1 }).lean();
-            const masterStartDate = firstFlight && firstFlight.date ? moment(firstFlight.date).startOf('day') : false;
+            const flightBounds = await getFlightDateBounds({ userId });
+            const masterStartDate = flightBounds && flightBounds.firstDate ? moment(flightBounds.firstDate).startOf('day') : false;
 
             // Optional: check Fleet for safety, but primary boundary is masterStartDate
             const fleet = utilizationContext.fleet || await Fleet.findOne({
@@ -435,6 +444,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 // Loop backward until we reach the master start date
                 while (currDate.isAfter(startBoundaryDate)) {
                     const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
+                        userId,
                         effectiveMsn,
                         date: currDate,
                         metric: record.metric || "BH"
@@ -461,6 +471,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     utilisationOps.push({
                         updateOne: {
                             filter: {
+                                userId: String(userId),
                                 date: currDate.toDate(),
                                 msnEsn,
                                 pn,
@@ -468,6 +479,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                             },
                             update: {
                                 $set: {
+                                    userId: String(userId),
                                     date: currDate.toDate(),
                                     msnEsn,
                                     pn,
@@ -493,8 +505,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
             }
 
             // 4. Forward Calculation to Fleet Exit Date or Master End Date
-            const lastFlight = await Flight.findOne().sort({ date: -1 }).lean();
-            const masterEndDate = lastFlight && lastFlight.date ? moment(lastFlight.date).endOf('day') : false;
+            const masterEndDate = flightBounds && flightBounds.lastDate ? moment(flightBounds.lastDate).endOf('day') : false;
 
             // Determine the true end boundary (fleet exit or master table end)
             let endBoundaryDate = masterEndDate;
@@ -521,6 +532,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 // Loop forward until the boundary
                 while (currDate.isSameOrBefore(endBoundaryDate)) {
                     const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
+                        userId,
                         effectiveMsn,
                         date: currDate,
                         metric: record.metric || "BH"
@@ -544,6 +556,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     utilisationOps.push({
                         updateOne: {
                             filter: {
+                                userId: String(userId),
                                 date: currDate.toDate(),
                                 msnEsn,
                                 pn,
@@ -551,6 +564,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                             },
                             update: {
                                 $set: {
+                                    userId: String(userId),
                                     date: currDate.toDate(),
                                     msnEsn,
                                     pn,
@@ -602,23 +616,23 @@ exports.bulkSaveResetRecords = async (req, res) => {
  */
 exports.computeMaintenanceLogic = async (req, res) => {
     try {
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
         // 1. Determine Global Boundaries
-        const firstFlight = await Flight.findOne().sort({ date: 1 }).lean();
-        const lastFlight = await Flight.findOne().sort({ date: -1 }).lean();
+        const flightBounds = await getFlightDateBounds({ userId });
 
-        if (!firstFlight || !lastFlight) {
+        if (!flightBounds?.firstDate || !flightBounds?.lastDate) {
             return res.status(200).json({ success: true, message: "No flights found to compute." });
         }
 
-        const masterStartDate = moment(firstFlight.date).startOf('day');
-        const masterEndDate = moment(lastFlight.date).endOf('day');
+        const masterStartDate = moment(flightBounds.firstDate).startOf('day');
+        const masterEndDate = moment(flightBounds.lastDate).endOf('day');
 
         // Fetch calendar limits
-        const allCalendars = await MaintenanceCalendar.find({}).lean();
+        const allCalendars = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
 
         // 2. Identify all Assets and Parts needing recalculation
         const resetGroups = await MaintenanceReset.aggregate([
+            { $match: { userId: String(userId) } },
             { $group: { _id: { msnEsn: "$msnEsn", pn: "$pn", snBn: "$snBn" } } }
         ]);
 
@@ -634,7 +648,12 @@ exports.computeMaintenanceLogic = async (req, res) => {
             const effectiveMsn = utilizationContext.effectiveMsn || msnEsn;
             
             // Get all resets for this specific part/asset, sorted chronologically
-            const resets = await MaintenanceReset.find({ msnEsn, pn, snBn }).sort({ date: 1 }).lean();
+            const resets = await MaintenanceReset.find({
+                userId: String(userId),
+                msnEsn,
+                pn,
+                snBn
+            }).sort({ date: 1 }).lean();
             if (resets.length === 0) continue;
 
             const fleet = utilizationContext.fleet || await Fleet.findOne({
@@ -675,6 +694,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                     while (currDate.isAfter(startBoundaryDate)) {
                         const assignments = await Assignment.find({
+                            userId: String(userId),
                             date: {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
@@ -700,9 +720,10 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
+                                filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
+                                        userId: String(userId),
                                         date: currDate.toDate(),
                                         msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
@@ -721,9 +742,10 @@ exports.computeMaintenanceLogic = async (req, res) => {
                 // --- SAVE THE RESET POINT ITSELF ---
                 totalOps.push({
                     updateOne: {
-                        filter: { date: new Date(currentReset.date), msnEsn, pn, snBn },
+                        filter: { userId: String(userId), date: new Date(currentReset.date), msnEsn, pn, snBn },
                         update: {
                             $set: {
+                                userId: String(userId),
                                 date: new Date(currentReset.date),
                                 msnEsn, pn, snBn,
                                 tsn: currentReset.tsn, csn: currentReset.csn, dsn: currentReset.dsn,
@@ -759,6 +781,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                         // Aircraft in maintenance down-time
                         // Remove assignment for this day
                         await Assignment.updateMany({
+                            userId: String(userId),
                             date: {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
@@ -776,9 +799,10 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
+                                filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
+                                        userId: String(userId),
                                         date: currDate.toDate(),
                                         msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
@@ -797,6 +821,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                     }
 
                     const assignments = await Assignment.find({
+                        userId: String(userId),
                         date: {
                             $gte: currDate.toDate(),
                             $lt: moment(currDate).endOf('day').toDate()
@@ -843,6 +868,7 @@ exports.computeMaintenanceLogic = async (req, res) => {
                     if (triggerHit) {
                         // Assignment is removed
                         await Assignment.updateMany({
+                            userId: String(userId),
                             date: {
                                 $gte: currDate.toDate(),
                                 $lt: moment(currDate).endOf('day').toDate()
@@ -864,9 +890,10 @@ exports.computeMaintenanceLogic = async (req, res) => {
 
                         totalOps.push({
                             updateOne: {
-                                filter: { date: currDate.toDate(), msnEsn, pn, snBn },
+                                filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                                 update: {
                                     $set: {
+                                        userId: String(userId),
                                         date: currDate.toDate(),
                                         msnEsn, pn, snBn,
                                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
@@ -898,14 +925,15 @@ exports.computeMaintenanceLogic = async (req, res) => {
                     currentCsr = projectedCsr;
                     currentDsr = projectedDsr;
 
-                    totalOps.push({
-                        updateOne: {
-                            filter: { date: currDate.toDate(), msnEsn, pn, snBn },
-                            update: {
-                                $set: {
-                                    date: currDate.toDate(),
-                                    msnEsn, pn, snBn,
-                                    tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                        totalOps.push({
+                            updateOne: {
+                                filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
+                                update: {
+                                    $set: {
+                                        userId: String(userId),
+                                        date: currDate.toDate(),
+                                        msnEsn, pn, snBn,
+                                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                                     tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
                                     tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
                                     timeMetric: currentReset.timeMetric
@@ -942,7 +970,8 @@ exports.computeMaintenanceLogic = async (req, res) => {
  */
 exports.getRotables = async (req, res) => {
     try {
-        const records = await RotableMovement.find({}).sort({ date: -1 }).lean();
+        const userId = getUserIdFromReq(req);
+        const records = await RotableMovement.find({ userId: String(userId) }).sort({ date: -1 }).lean();
         const formattedRecords = records.map(record => ({
             id: record._id,
             label: record.label || "",
@@ -967,7 +996,7 @@ exports.getRotables = async (req, res) => {
 exports.bulkSaveRotables = async (req, res) => {
     try {
         const { rotablesData } = req.body;
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
 
         if (!rotablesData || !Array.isArray(rotablesData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
@@ -980,6 +1009,7 @@ exports.bulkSaveRotables = async (req, res) => {
             bulkOperations.push({
                 updateOne: {
                     filter: {
+                        userId: String(userId),
                         msn: record.msn,
                         pn: record.pn,
                         position: record.position,
@@ -1058,7 +1088,21 @@ exports.bulkSaveRotables = async (req, res) => {
  */
 exports.getTargets = async (req, res) => {
     try {
-        const records = await MaintenanceTarget.find({}).sort({ date: -1 }).lean();
+        const userId = getUserIdFromReq(req);
+        const { date } = req.query;
+        if (date) {
+            const selectedDate = moment(date, moment.ISO_8601, true);
+            const flightBounds = await getFlightDateBounds({ userId });
+            const outsideRange = !selectedDate.isValid() || !flightBounds?.firstDate || !flightBounds?.lastDate ||
+                selectedDate.isBefore(moment(flightBounds.firstDate).startOf("day")) ||
+                selectedDate.isAfter(moment(flightBounds.lastDate).endOf("day"));
+
+            if (outsideRange) {
+                return res.status(200).json({ success: true, data: [] });
+            }
+        }
+
+        const records = await MaintenanceTarget.find({ userId: String(userId) }).sort({ date: -1 }).lean();
         const formattedRecords = records.map(record => ({
             id: record._id,
             label: record.label || "",
@@ -1090,7 +1134,7 @@ exports.getTargets = async (req, res) => {
 exports.bulkSaveTargets = async (req, res) => {
     try {
         const { targetData } = req.body;
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
 
         if (!targetData || !Array.isArray(targetData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
@@ -1102,6 +1146,7 @@ exports.bulkSaveTargets = async (req, res) => {
             bulkOperations.push({
                 updateOne: {
                     filter: {
+                        userId: String(userId),
                         msnEsn: record.msnEsn,
                         pn: record.pn,
                         snBn: record.snBn
@@ -1144,7 +1189,8 @@ exports.bulkSaveTargets = async (req, res) => {
  */
 exports.getCalendar = async (req, res) => {
     try {
-        const records = await MaintenanceCalendar.find({}).lean();
+        const userId = getUserIdFromReq(req);
+        const records = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
         const formattedRecords = records.map(record => ({
             id: record._id,
             calLabel: record.calLabel || "",
@@ -1178,7 +1224,7 @@ exports.getCalendar = async (req, res) => {
 exports.bulkSaveCalendar = async (req, res) => {
     try {
         const { calendarData } = req.body;
-        const userId = req.user?.userId || req.user?._id;
+        const userId = getUserIdFromReq(req);
 
         if (!calendarData || !Array.isArray(calendarData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
@@ -1192,6 +1238,7 @@ exports.bulkSaveCalendar = async (req, res) => {
             bulkOperations.push({
                 updateOne: {
                     filter: {
+                        userId: String(userId),
                         calMsn: record.calMsn,
                         calPn: record.calPn,
                         snBn: record.snBn

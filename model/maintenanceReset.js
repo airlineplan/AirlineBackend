@@ -17,9 +17,14 @@ const maintenanceResetSchema = new mongoose.Schema(
             type: String,
             trim: true
         },
-        snBn: { // SN/BN (Serial Number / Batch Number) column
+    snBn: { // SN/BN (Serial Number / Batch Number) column
             type: String,
             trim: true,
+            index: true
+        },
+        userId: {
+            type: String,
+            required: true,
             index: true
         },
 
@@ -69,7 +74,7 @@ const maintenanceResetSchema = new mongoose.Schema(
     }
 );
 
-// One reset record per MSN/ESN + PN + SN/BN combination
-maintenanceResetSchema.index({ msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
+// One reset record per user + MSN/ESN + PN + SN/BN combination
+maintenanceResetSchema.index({ userId: 1, msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceReset", maintenanceResetSchema);

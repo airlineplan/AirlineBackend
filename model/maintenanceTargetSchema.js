@@ -21,6 +21,6 @@ const maintenanceTargetSchema = new Schema({
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true }
 }, { timestamps: true });
 
-maintenanceTargetSchema.index({ msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
+maintenanceTargetSchema.index({ userId: 1, msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceTarget", maintenanceTargetSchema);

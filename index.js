@@ -6,6 +6,9 @@ const exceljs = require("exceljs");
 const path = require("path");
 const mongoose = require("mongoose");
 const Fleet = require("./model/fleet");
+const MaintenanceReset = require("./model/maintenanceReset");
+const MaintenanceTarget = require("./model/maintenanceTargetSchema");
+const MaintenanceCalendar = require("./model/maintenanceCalendarSchema");
 const PORT = 3000;
 app.use(cors());
 
@@ -13,9 +16,15 @@ require("./config/db");
 
 mongoose.connection.once("open", async () => {
   try {
-    // Keep Fleet indexes aligned with the schema so old global SN indexes do not block other users.
+    // Keep tenant-aware indexes aligned with the schema so old global indexes do not block other users.
     await Fleet.syncIndexes();
     console.log("Fleet indexes synced successfully");
+    await MaintenanceReset.syncIndexes();
+    console.log("MaintenanceReset indexes synced successfully");
+    await MaintenanceTarget.syncIndexes();
+    console.log("MaintenanceTarget indexes synced successfully");
+    await MaintenanceCalendar.syncIndexes();
+    console.log("MaintenanceCalendar indexes synced successfully");
   } catch (error) {
     console.error("Failed to sync Fleet indexes:", error);
   }

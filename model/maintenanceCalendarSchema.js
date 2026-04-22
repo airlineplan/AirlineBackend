@@ -23,6 +23,6 @@ const maintenanceCalendarSchema = new Schema({
 }, { timestamps: true });
 
 // Ensure uniqueness per aircraft SN/BN
-maintenanceCalendarSchema.index({ calMsn: 1, calPn: 1, snBn: 1 }, { unique: true });
+maintenanceCalendarSchema.index({ userId: 1, calMsn: 1, calPn: 1, snBn: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceCalendar", maintenanceCalendarSchema);
