@@ -74,7 +74,7 @@ const maintenanceResetSchema = new mongoose.Schema(
     }
 );
 
-// One reset record per user + MSN/ESN + PN + SN/BN combination
-maintenanceResetSchema.index({ userId: 1, msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
+// One reset record per user + date + MSN/ESN + PN + SN/BN combination
+maintenanceResetSchema.index({ userId: 1, date: 1, msnEsn: 1, pn: 1, snBn: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceReset", maintenanceResetSchema);

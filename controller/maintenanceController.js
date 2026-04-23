@@ -126,8 +126,6 @@ exports.getMaintenanceDashboard = async (req, res) => {
         // Assuming verifyToken middleware attaches the user to req.user
         const userId = getUserIdFromReq(req);
 
-        // 1. Fetch Aircraft Owning
-        // const aircraft = await Aircraft.find({ userId }).lean();
         const aircraft = [];
 
         // 2. Fetch recent Utilisation
@@ -145,109 +143,98 @@ exports.getMaintenanceDashboard = async (req, res) => {
             .limit(10)
             .lean();
 
-        // 5. Build dynamically mapped Dashboard Status table Data
+        // 5. Build maintenance dashboard rows from the reset/status model
         let maintenanceData = [];
         const { date, msnEsn } = req.query;
 
         if (date) {
-            const startOfDay = moment(date).startOf('day').toDate();
             const endOfDay = moment(date).endOf('day').toDate();
-
-            const fleetFilter = {};
-            if (userId) {
-                fleetFilter.userId = String(userId);
-            }
-            if (msnEsn) {
-                fleetFilter.sn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
-            }
-
             const utilFilter = {
-                date: { $gte: startOfDay, $lte: endOfDay }
+                date: { $lte: endOfDay }
             };
             if (userId) {
-                utilFilter.userId = userId;
+                utilFilter.userId = String(userId);
             }
             if (msnEsn) {
                 utilFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
             }
 
-            const resetFilter = {};
+            const resetFilter = {
+                date: { $lte: endOfDay }
+            };
             if (msnEsn) {
                 resetFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
-            }
-            if (date) {
-                resetFilter.date = { $lte: endOfDay };
             }
             if (userId) {
                 resetFilter.userId = String(userId);
             }
 
-            const [fleetAssets, utils, resetRecords, flightBounds] = await Promise.all([
-                Fleet.find(fleetFilter).lean(),
+            const [utils, resetRecords] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
-                getFlightDateBounds({ userId })
             ]);
 
-            const selectedDate = moment(date, moment.ISO_8601, true);
-            const isOutsideRange = !selectedDate.isValid() || !flightBounds?.firstDate || !flightBounds?.lastDate ||
-                selectedDate.isBefore(moment(flightBounds.firstDate).startOf('day')) ||
-                selectedDate.isAfter(moment(flightBounds.lastDate).endOf('day'));
+            const utilByKey = new Map();
+            utils.forEach(record => {
+                const key = [
+                    String(record.msnEsn || "").trim().toUpperCase(),
+                    String(record.pn || "").trim().toUpperCase(),
+                    String(record.snBn || "").trim().toUpperCase()
+                ].join("|");
+                if (!utilByKey.has(key)) {
+                    utilByKey.set(key, record);
+                }
+            });
 
-            if (!isOutsideRange) {
-                const fallbackFleetRows = msnEsn && fleetAssets.length === 0
-                    ? [{
-                        _id: `fallback-${msnEsn.trim()}`,
-                        sn: msnEsn.trim(),
-                        titled: "",
-                        type: "",
-                        variant: ""
-                    }]
-                    : fleetAssets;
+            const latestResetByKey = new Map();
+            resetRecords.forEach(record => {
+                const key = [
+                    String(record.msnEsn || "").trim().toUpperCase(),
+                    String(record.pn || "").trim().toUpperCase(),
+                    String(record.snBn || "").trim().toUpperCase()
+                ].join("|");
+                if (!latestResetByKey.has(key)) {
+                    latestResetByKey.set(key, record);
+                }
+            });
 
-                const utilByMsn = new Map();
-                utils.forEach(record => {
-                    const key = String(record.msnEsn || "").trim().toUpperCase();
-                    if (!utilByMsn.has(key)) {
-                        utilByMsn.set(key, record);
-                    }
-                });
+            const selectedDate = moment(date).format("YYYY-MM-DD");
+            const rows = Array.from(latestResetByKey.values()).map((record) => {
+                const key = [
+                    String(record.msnEsn || "").trim().toUpperCase(),
+                    String(record.pn || "").trim().toUpperCase(),
+                    String(record.snBn || "").trim().toUpperCase()
+                ].join("|");
+                const util = utilByKey.get(key);
+                const savedResetDate = moment(record.date).format("YYYY-MM-DD");
 
-                const resetByMsn = new Map();
-                resetRecords.forEach(record => {
-                    const key = String(record.msnEsn || "").trim().toUpperCase();
-                    if (!resetByMsn.has(key)) {
-                        resetByMsn.set(key, record);
-                    }
-                });
+                return {
+                    id: record._id,
+                    msn: record.msnEsn || "",
+                    msnEsn: record.msnEsn || "",
+                    pn: record.pn || "",
+                    sn: record.snBn || "",
+                    snBn: record.snBn || "",
+                    titled: "",
+                    date: savedResetDate,
+                    savedResetDate,
+                    asOnDate: selectedDate,
+                    resetDate: savedResetDate,
+                    timeMetric: record.timeMetric || "BH",
+                    tsn: util?.tsn ?? record.tsn ?? "",
+                    csn: util?.csn ?? record.csn ?? "",
+                    dsn: util?.dsn ?? record.dsn ?? "",
+                    tso: util?.tsoTsr ?? record.tsoTsr ?? "",
+                    cso: util?.csoCsr ?? record.csoCsr ?? "",
+                    dso: util?.dsoDsr ?? record.dsoDsr ?? "",
+                    tsr: util?.tsRplmt ?? record.tsRplmt ?? "",
+                    csr: util?.csRplmt ?? record.csRplmt ?? "",
+                    dsr: util?.dsRplmt ?? record.dsRplmt ?? "",
+                    allDisplay: ""
+                };
+            });
 
-                maintenanceData = fallbackFleetRows.map(f => {
-                    const msn = String(f.sn || msnEsn || "").trim();
-                    const lookupKey = msn.toUpperCase();
-                    const util = utilByMsn.get(lookupKey);
-                    const latestReset = resetByMsn.get(lookupKey);
-
-                    return {
-                        id: f._id,
-                        msn,
-                        pn: latestReset?.pn || "",
-                        sn: latestReset?.snBn || "",
-                        titled: f.titled || "",
-                        tsn: util?.tsn ?? "",
-                        csn: util?.csn ?? "",
-                        dsn: util?.dsn ?? "",
-                        tso: util?.tsoTsr ?? "",
-                        cso: util?.csoCsr ?? "",
-                        dso: util?.dsoDsr ?? "",
-                        tsr: util?.tsRplmt ?? "",
-                        csr: util?.csRplmt ?? "",
-                        dsr: util?.dsRplmt ?? "",
-                        allDisplay: ""
-                    };
-                });
-            } else {
-                maintenanceData = [];
-            }
+            maintenanceData = rows;
         }
 
         res.status(200).json({
@@ -370,6 +357,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 updateOne: {
                     filter: {
                         userId: String(userId),
+                        date: updateFields.date,
                         msnEsn: updateFields.msnEsn,
                         pn: updateFields.pn,
                         snBn: updateFields.snBn
@@ -390,6 +378,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 updateOne: {
                     filter: {
                         userId: String(userId),
+                        date: updateFields.date,
                         msnEsn: updateFields.msnEsn,
                         pn: updateFields.pn,
                         snBn: updateFields.snBn
