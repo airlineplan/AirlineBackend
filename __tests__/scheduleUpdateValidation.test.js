@@ -12,6 +12,7 @@ const Sector = require("../model/sectorSchema");
 const Flight = require("../model/flight");
 const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
+const { buildAssignmentSyncPlan } = require("../utils/assignmentSync");
 
 const USER_ID = "test-user";
 const BASE_FLIGHT = "AB123";
@@ -369,6 +370,112 @@ test("non-schedule field updates keep the same flight rows and revalidate assign
   assert.equal(assignment?.isValid, true);
   assert.equal(flightsAfter[1].aircraft?.registration, "VT-ABC");
   assert.equal(flightsAfter[1].aircraft?.msn, 4120);
+});
+
+test("assignment sync rejects ACFT values that are not fleet registrations", async () => {
+  await seedNetwork();
+  await Fleet.create({
+    userId: USER_ID,
+    category: "Aircraft",
+    type: BASE_VARIANT,
+    variant: BASE_VARIANT,
+    sn: "4120",
+    regn: "VT-AAB",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 6, 30),
+  });
+
+  const result = await buildAssignmentSyncPlan({
+    userId: USER_ID,
+    rows: [
+      {
+        assignDate: BASE_FROM,
+        dateKey: formatDate(BASE_FROM),
+        flight: BASE_FLIGHT,
+        acft: "A320",
+      },
+    ],
+  });
+
+  assert.equal(result.assignmentBulkOps.length, 1);
+  assert.equal(result.flightBulkOps.length, 1);
+  assert.equal(result.diagnostics.rejections.missingFromFleetDB, 1);
+  assert.equal(result.diagnostics.rejectedRows[0].acft, "A320");
+  assert.match(result.diagnostics.rejectedRows[0].errors[0], /not found in Fleet master/i);
+});
+
+test("assignment sync treats base variant before hyphen as a match", async () => {
+  await seedNetwork({ variant: "A320" });
+  await Fleet.create({
+    userId: USER_ID,
+    category: "Aircraft",
+    type: "A320ceo",
+    variant: "A320-214",
+    sn: "4120",
+    regn: "VT-AAB",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 6, 30),
+  });
+
+  const result = await buildAssignmentSyncPlan({
+    userId: USER_ID,
+    rows: [
+      {
+        assignDate: BASE_FROM,
+        dateKey: formatDate(BASE_FROM),
+        flight: BASE_FLIGHT,
+        acft: "VT-AAB",
+      },
+    ],
+  });
+
+  assert.equal(result.diagnostics.rejections.variantMismatches, 0);
+  assert.equal(result.assignmentBulkOps.length, 1);
+  assert.equal(result.flightBulkOps.length, 1);
+  assert.equal(result.assignmentBulkOps[0].updateOne.update.$set.isValid, true);
+});
+
+test("assignment and flight tenant indexes reject duplicate rows for the same user scope", async () => {
+  await Assignment.syncIndexes();
+  await Flight.syncIndexes();
+
+  const sharedDate = utcDate(2026, 4, 6);
+
+  await Assignment.create({
+    userId: USER_ID,
+    date: sharedDate,
+    flightNumber: BASE_FLIGHT,
+    aircraft: { registration: "VT-AAB", msn: 4120 },
+  });
+
+  await assert.rejects(
+    () =>
+      Assignment.create({
+        userId: USER_ID,
+        date: sharedDate,
+        flightNumber: BASE_FLIGHT,
+        aircraft: { registration: "VT-AAB", msn: 4120 },
+      }),
+    /duplicate key/i
+  );
+
+  await Flight.create({
+    userId: USER_ID,
+    networkId: "network-1",
+    date: sharedDate,
+    flight: BASE_FLIGHT,
+  });
+
+  await assert.rejects(
+    () =>
+      Flight.create({
+        userId: USER_ID,
+        networkId: "network-1",
+        date: sharedDate,
+        flight: BASE_FLIGHT,
+      }),
+    /duplicate key/i
+  );
 });
 
 test("mixed schedule and non-schedule updates follow the schedule branch and regenerate from the new values", async () => {

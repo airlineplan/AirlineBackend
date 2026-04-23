@@ -17,6 +17,22 @@ const normalizeVariantForCompare = (value) => {
   return String(value).trim().toUpperCase();
 };
 
+const normalizeVariantBase = (value) => {
+  const normalized = normalizeVariantForCompare(value);
+  if (!normalized) return "";
+  return normalized.split("-")[0].trim();
+};
+
+const variantsMatch = (flightVariant, fleetVariant) => {
+  const flightBase = normalizeVariantBase(flightVariant);
+  const fleetBase = normalizeVariantBase(fleetVariant);
+
+  if (!flightBase || !fleetBase) return false;
+  if (flightBase === fleetBase) return true;
+
+  return normalizeVariantForCompare(flightVariant) === normalizeVariantForCompare(fleetVariant);
+};
+
 const parseTimeToMinutes = (value) => {
   if (value === null || value === undefined) return null;
 
@@ -90,6 +106,17 @@ const pickFleetRecordForDate = (fleetRecordsForRegn, assignDate) => {
   }
 
   return fleetRecordsForRegn[0];
+};
+
+const buildRejectionSummary = (row, errors) => {
+  const rejection = {
+    date: row?.dateKey || null,
+    flight: row?.flight || null,
+    acft: row?.acft || null,
+    errors: Array.isArray(errors) ? errors.slice(0, 3) : [],
+  };
+
+  return rejection;
 };
 
 const normalizeAssignmentRow = (row) => {
@@ -238,6 +265,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
 
   const processedRowsByFlightKey = new Map();
   const acceptedIntervalsByAcftDate = new Map();
+  const rejectedRows = [];
 
   let notFoundCount = 0;
   let missingFleetDBCount = 0;
@@ -292,12 +320,14 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
         const flightVariant = normalizeVariantForCompare(flightRecord?.variant);
         const fleetVariant = normalizeVariantForCompare(fleetRecord?.variant);
 
-        if (!flightVariant || !fleetVariant || flightVariant !== fleetVariant) {
+        if (!variantsMatch(flightVariant, fleetVariant)) {
           isValid = false;
           assignedAcft = null;
           removedReason = "VARIANT_MISMATCH";
           variantMismatchCount++;
-          errors.push(`Aircraft variant ${fleetVariant || "N/A"} does not match flight variant ${flightVariant || "N/A"}`);
+          errors.push(
+            `Aircraft variant ${fleetVariant || "N/A"} does not match flight variant ${flightVariant || "N/A"}`
+          );
         } else {
           const groundKey = `${row.dateKey}_${msn}`;
           const groundRecord = groundDayMap.get(groundKey);
@@ -332,6 +362,9 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
     }
 
     if (assignedAcft) successfulAcftLinks++;
+    if (errors.length > 0 && rejectedRows.length < 10) {
+      rejectedRows.push(buildRejectionSummary(row, errors));
+    }
 
     let rotationNum = null;
     if (flightRecord?.rotationNumber) {
@@ -427,6 +460,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
         acftOverlaps: overlapConflictCount,
         flightNotFound: notFoundCount,
       },
+      rejectedRows,
     },
   };
 };

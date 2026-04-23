@@ -4,6 +4,57 @@ const Flight = require('../model/flight');
 const moment = require('moment');
 const { buildAssignmentSyncPlan } = require('../utils/assignmentSync');
 
+const buildUploadMessage = (diagnostics) => {
+    const missingFleet = diagnostics?.rejections?.missingFromFleetDB || 0;
+    const preEntryDates = diagnostics?.rejections?.preEntryDates || 0;
+    const postExitDates = diagnostics?.rejections?.postExitDates || 0;
+    const flightNotFound = diagnostics?.rejections?.flightNotFound || 0;
+    const variantMismatches = diagnostics?.rejections?.variantMismatches || 0;
+    const groundConflicts = diagnostics?.rejections?.groundConflicts || 0;
+    const overlaps = diagnostics?.rejections?.acftOverlaps || 0;
+    const rejectedRows = Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : [];
+
+    if (!missingFleet && !flightNotFound && !variantMismatches && !overlaps) {
+        return "Assignments uploaded successfully!";
+    }
+
+    const parts = [];
+
+    if (missingFleet) {
+        parts.push(
+            `${missingFleet} row(s) used ACFT values that did not match a fleet registration for this user. Use a registration like VT-AAB, not an aircraft type.`
+        );
+    }
+    if (preEntryDates) {
+        parts.push(`${preEntryDates} row(s) were before the aircraft entry date.`);
+    }
+    if (postExitDates) {
+        parts.push(`${postExitDates} row(s) were after the aircraft exit date.`);
+    }
+    if (flightNotFound) {
+        parts.push(`${flightNotFound} row(s) referenced flights that were not found in the master schedule.`);
+    }
+    if (variantMismatches) {
+        parts.push(`${variantMismatches} row(s) failed aircraft-variant validation.`);
+    }
+    if (groundConflicts) {
+        parts.push(`${groundConflicts} row(s) conflicted with ground-day records.`);
+    }
+    if (overlaps) {
+        parts.push(`${overlaps} row(s) overlapped another assignment for the same aircraft.`);
+    }
+
+    if (rejectedRows.length > 0) {
+        const sample = rejectedRows[0];
+        const sampleLabel = [sample.date, sample.flight, sample.acft].filter(Boolean).join(" / ");
+        if (sampleLabel) {
+            parts.push(`Example rejected row: ${sampleLabel}.`);
+        }
+    }
+
+    return `Assignments uploaded with warnings. ${parts.join(" ")}`.trim();
+};
+
 // 🛠️ FIX 1: Enforce UTC to prevent dates drifting by 1 day based on server timezone
 const parseExcelDate = (value) => {
     if (!value) return null;
@@ -86,8 +137,23 @@ exports.uploadAssignments = async (req, res) => {
 
         await Promise.all(dbPromises);
 
+        const hasRejections = Boolean(
+            diagnostics?.rejections &&
+            Object.values(diagnostics.rejections).some((count) => Number(count) > 0)
+        );
+        const message = buildUploadMessage(diagnostics);
+
+        if (assignmentBulkOps.length === 0 && hasRejections) {
+            return res.status(422).json({
+                success: false,
+                message,
+                diagnostics,
+            });
+        }
+
         res.status(200).json({
-            message: "Upload and Flight Sync complete",
+            message,
+            success: true,
             diagnostics,
         });
 

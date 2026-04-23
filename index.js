@@ -6,6 +6,8 @@ const exceljs = require("exceljs");
 const path = require("path");
 const mongoose = require("mongoose");
 const Fleet = require("./model/fleet");
+const Flight = require("./model/flight");
+const Assignment = require("./model/assignment");
 const MaintenanceReset = require("./model/maintenanceReset");
 const MaintenanceTarget = require("./model/maintenanceTargetSchema");
 const MaintenanceCalendar = require("./model/maintenanceCalendarSchema");
@@ -19,6 +21,10 @@ mongoose.connection.once("open", async () => {
     // Keep tenant-aware indexes aligned with the schema so old global indexes do not block other users.
     await Fleet.syncIndexes();
     console.log("Fleet indexes synced successfully");
+    await Flight.syncIndexes();
+    console.log("Flight indexes synced successfully");
+    await Assignment.syncIndexes();
+    console.log("Assignment indexes synced successfully");
     await MaintenanceReset.syncIndexes();
     console.log("MaintenanceReset indexes synced successfully");
     await MaintenanceTarget.syncIndexes();

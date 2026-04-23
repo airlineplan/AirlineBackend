@@ -86,6 +86,6 @@ const assignmentSchema = new mongoose.Schema(
     }
 );
 
-assignmentSchema.index({ userId: 1, date: 1, flightNumber: 1 });
+assignmentSchema.index({ userId: 1, date: 1, flightNumber: 1 }, { unique: true });
 
 module.exports = mongoose.model("Assignment", assignmentSchema);

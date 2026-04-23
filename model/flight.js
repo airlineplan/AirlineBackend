@@ -123,4 +123,13 @@ const flightSchema = new mongoose.Schema(
 
 flightSchema.index({ userId: 1, depStn: 1, arrStn: 1, domIntl: 1, std: 1, date: 1 });
 flightSchema.index({ userId: 1, date: 1, flight: 1 });
+flightSchema.index(
+  { userId: 1, networkId: 1, date: 1, flight: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      networkId: { $exists: true, $type: "string" },
+    },
+  }
+);
 module.exports = mongoose.model("FLIGHT", flightSchema);

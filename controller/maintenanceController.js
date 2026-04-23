@@ -314,6 +314,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
     try {
         const userId = getUserIdFromReq(req);
         const resetData = Array.isArray(req.body) ? req.body : req.body?.resetData;
+        const fallbackResetDate = req.body?.resetDate || req.body?.date || req.body?.asOnDate || "";
 
         if (!resetData || !Array.isArray(resetData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
@@ -321,6 +322,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
 
         const bulkOperations = [];
         const utilisationOps = [];
+        const saveDateStrings = new Set();
 
         // Use a for...of loop to handle async Await calls
         for (const record of resetData) {
@@ -329,15 +331,19 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const msnEsn = String(record.msnEsn || "").trim();
             const pn = String(record.pn || "").trim();
             const snBn = String(record.snBn || "").trim();
-            const utilizationContext = await getEffectiveUtilisationContext({
-                userId,
-                msnEsn,
-                date: record.date
-            });
-            const effectiveMsn = utilizationContext.effectiveMsn || msnEsn;
+            const rawDate = record.date || fallbackResetDate;
+            const parsedDate = moment(rawDate);
 
+            if (!parsedDate.isValid()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid reset date. Please select a valid date before saving."
+                });
+            }
+
+            const normalizedDate = parsedDate.startOf("day").toDate();
             const updateFields = {
-                date: new Date(record.date),
+                date: normalizedDate,
                 msnEsn,
                 pn,
                 snBn,
@@ -351,6 +357,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 csRplmt: parseNum(record.csr),
                 dsRplmt: parseNum(record.dsr),
             };
+            saveDateStrings.add(moment(normalizedDate).format("YYYY-MM-DD"));
 
             // 1. MaintenanceReset mapping (for the explicit reset date)
             bulkOperations.push({
@@ -395,190 +402,6 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     upsert: true
                 }
             });
-
-            // 3. Backfill Utilisation history to Master Table Start Date
-            // First, find the starting date of the master table (Flight table)
-            const flightBounds = await getFlightDateBounds({ userId });
-            const masterStartDate = flightBounds && flightBounds.firstDate ? moment(flightBounds.firstDate).startOf('day') : false;
-
-            // Optional: check Fleet for safety, but primary boundary is masterStartDate
-            const fleet = utilizationContext.fleet || await Fleet.findOne({
-                ...(userId ? { userId: String(userId) } : {}),
-                sn: effectiveMsn
-            }).lean();
-            const utilisationWindow = getUtilisationWindow({
-                masterStartDate,
-                masterEndDate: false,
-                fleet
-            });
-            const startBoundaryDate = utilisationWindow.startBoundaryDate;
-
-            // Proceed to backfill ONLY if we have a valid boundary date
-            if (startBoundaryDate) {
-                let currDate = moment(record.date).startOf('day');
-
-                // Keep running totals that we will decrement
-                let currentTsn = updateFields.tsn;
-                let currentCsn = updateFields.csn;
-                let currentDsn = updateFields.dsn;
-
-                let currentTso = updateFields.tsoTsr;
-                let currentCso = updateFields.csoCsr;
-                let currentDso = updateFields.dsoDsr;
-
-                let currentTsr = updateFields.tsRplmt;
-                let currentCsr = updateFields.csRplmt;
-                let currentDsr = updateFields.dsRplmt;
-
-                // Loop backward until we reach the master start date
-                while (currDate.isAfter(startBoundaryDate)) {
-                    const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
-                        userId,
-                        effectiveMsn,
-                        date: currDate,
-                        metric: record.metric || "BH"
-                    });
-
-                    // Decrement running totals based on the usage FOR that day
-                    // Subtract timeUsage from hours, cycleUsage from cycles, 1 from days
-                    if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
-                    if (currentCsn !== null) currentCsn -= cycleUsage;
-                    if (currentDsn !== null) currentDsn -= 1;
-
-                    if (currentTso !== null) currentTso = Number((currentTso - timeUsage).toFixed(2));
-                    if (currentCso !== null) currentCso -= cycleUsage;
-                    if (currentDso !== null) currentDso -= 1;
-
-                    if (currentTsr !== null) currentTsr = Number((currentTsr - timeUsage).toFixed(2));
-                    if (currentCsr !== null) currentCsr -= cycleUsage;
-                    if (currentDsr !== null) currentDsr -= 1;
-
-                    // Step back to the prior day
-                    currDate.subtract(1, 'days');
-
-                    // Push the backfilled record for the prior day
-                    utilisationOps.push({
-                        updateOne: {
-                            filter: {
-                                userId: String(userId),
-                                date: currDate.toDate(),
-                                msnEsn,
-                                pn,
-                                snBn
-                            },
-                            update: {
-                                $set: {
-                                    userId: String(userId),
-                                    date: currDate.toDate(),
-                                    msnEsn,
-                                    pn,
-                                    snBn,
-                                    tsn: currentTsn,
-                                    csn: currentCsn,
-                                    dsn: currentDsn,
-                                    tsoTsr: currentTso,
-                                    csoCsr: currentCso,
-                                    dsoDsr: currentDso,
-                                    tsRplmt: currentTsr,
-                                    csRplmt: currentCsr,
-                                    dsRplmt: currentDsr,
-                                    timeMetric: record.metric || "BH"
-                                    // Notice: no setFlag or remarks for backfilled dates
-                                },
-                                $unset: { setFlag: "", remarks: "" }
-                            },
-                            upsert: true
-                        }
-                    });
-                }
-            }
-
-            // 4. Forward Calculation to Fleet Exit Date or Master End Date
-            const masterEndDate = flightBounds && flightBounds.lastDate ? moment(flightBounds.lastDate).endOf('day') : false;
-
-            // Determine the true end boundary (fleet exit or master table end)
-            let endBoundaryDate = masterEndDate;
-            if (fleet && fleet.exit && moment(fleet.exit).isBefore(masterEndDate)) {
-                endBoundaryDate = moment(fleet.exit).endOf('day');
-            }
-
-            if (endBoundaryDate) {
-                // Reset tracking variables to the explicitly entered reset record values
-                let currDate = moment(record.date).add(1, 'days').startOf('day');
-
-                let currentTsn = updateFields.tsn;
-                let currentCsn = updateFields.csn;
-                let currentDsn = updateFields.dsn;
-
-                let currentTso = updateFields.tsoTsr;
-                let currentCso = updateFields.csoCsr;
-                let currentDso = updateFields.dsoDsr;
-
-                let currentTsr = updateFields.tsRplmt;
-                let currentCsr = updateFields.csRplmt;
-                let currentDsr = updateFields.dsRplmt;
-
-                // Loop forward until the boundary
-                while (currDate.isSameOrBefore(endBoundaryDate)) {
-                    const { timeUsage, cycleUsage } = await getAssignmentUsageForDate({
-                        userId,
-                        effectiveMsn,
-                        date: currDate,
-                        metric: record.metric || "BH"
-                    });
-
-                    // Increment running totals based on usage
-                    // Add timeUsage to hours, cycleUsage to cycles, 1 to days
-                    if (currentTsn !== null) currentTsn = Number((currentTsn + timeUsage).toFixed(2));
-                    if (currentCsn !== null) currentCsn += cycleUsage;
-                    if (currentDsn !== null) currentDsn += 1;
-
-                    if (currentTso !== null) currentTso = Number((currentTso + timeUsage).toFixed(2));
-                    if (currentCso !== null) currentCso += cycleUsage;
-                    if (currentDso !== null) currentDso += 1;
-
-                    if (currentTsr !== null) currentTsr = Number((currentTsr + timeUsage).toFixed(2));
-                    if (currentCsr !== null) currentCsr += cycleUsage;
-                    if (currentDsr !== null) currentDsr += 1;
-
-                    // Push the forward record for the current day
-                    utilisationOps.push({
-                        updateOne: {
-                            filter: {
-                                userId: String(userId),
-                                date: currDate.toDate(),
-                                msnEsn,
-                                pn,
-                                snBn
-                            },
-                            update: {
-                                $set: {
-                                    userId: String(userId),
-                                    date: currDate.toDate(),
-                                    msnEsn,
-                                    pn,
-                                    snBn,
-                                    tsn: currentTsn,
-                                    csn: currentCsn,
-                                    dsn: currentDsn,
-                                    tsoTsr: currentTso,
-                                    csoCsr: currentCso,
-                                    dsoDsr: currentDso,
-                                    tsRplmt: currentTsr,
-                                    csRplmt: currentCsr,
-                                    dsRplmt: currentDsr,
-                                    timeMetric: record.metric || "BH"
-                                },
-                                $unset: { setFlag: "", remarks: "" }
-                            },
-                            upsert: true
-                        }
-                    });
-
-                    // Step forward to the next day
-                    currDate.add(1, 'days');
-                }
-            }
         }
 
         if (bulkOperations.length > 0) {
@@ -589,6 +412,24 @@ exports.bulkSaveResetRecords = async (req, res) => {
         }
 
         res.status(200).json({ success: true, message: "Maintenance reset records updated successfully!" });
+
+        if (saveDateStrings.size > 0) {
+            setImmediate(() => {
+                const backgroundRes = {
+                    status: () => backgroundRes,
+                    json: () => backgroundRes
+                };
+
+                const backgroundReq = {
+                    user: req.user,
+                    userId: req.userId
+                };
+
+                exports.computeMaintenanceLogic(backgroundReq, backgroundRes).catch((error) => {
+                    console.error("🔥 Background maintenance recompute failed:", error);
+                });
+            });
+        }
     } catch (error) {
         console.error("🔥 Error saving reset records:", error);
         res.status(500).json({ message: "Failed to save records", error: error.message });
