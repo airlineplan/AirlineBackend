@@ -1,16 +1,36 @@
 const CostConfig = require("../model/costConfigSchema");
 const Flights = require("../model/flight");
-const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const {
+  normalizeCostConfig,
+  computeFlightCostsBatch,
+  flattenFuelConsumRows,
+  flattenFuelConsumIndexRows,
+  flattenPlfEffectRows,
+  flattenFuelPriceRows,
+  normalizeApuUsage,
+  groupFuelConsumRows,
+  groupFuelConsumIndexRows,
+  groupPlfEffectRows,
+  groupFuelPriceRows,
+} = require("../utils/costLogic");
 
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
   try {
     const userId = req.user.id;
     const configData = req.body;
+    const nextConfig = {
+      ...configData,
+      fuelConsum: flattenFuelConsumRows(configData.fuelConsum || []),
+      fuelConsumIndex: flattenFuelConsumIndexRows(configData.fuelConsumIndex || []),
+      plfEffect: flattenPlfEffectRows(configData.plfEffect || []),
+      ccyFuel: flattenFuelPriceRows(configData.ccyFuel || []),
+      apuUsage: normalizeApuUsage(configData.apuUsage || []),
+    };
 
     const updatedConfig = await CostConfig.findOneAndUpdate(
       { userId },
-      { $set: configData },
+      { $set: nextConfig },
       { new: true, upsert: true }
     );
 
@@ -33,6 +53,12 @@ exports.getCostConfig = async (req, res) => {
         leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], otherDoc: []
       };
+    } else {
+      config.fuelConsum = groupFuelConsumRows(config.fuelConsum || []);
+      config.fuelConsumIndex = groupFuelConsumIndexRows(config.fuelConsumIndex || []);
+      config.plfEffect = groupPlfEffectRows(config.plfEffect || []);
+      config.ccyFuel = groupFuelPriceRows(config.ccyFuel || []);
+      config.apuUsage = normalizeApuUsage(config.apuUsage || []);
     }
     res.status(200).json({ success: true, data: config });
   } catch (error) {

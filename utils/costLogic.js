@@ -192,40 +192,404 @@ const buildThresholdMap = (row) => {
     .sort((a, b) => a.threshold - b.threshold);
 };
 
-const normalizeFuelConsum = (rows = []) => {
-  const normalized = [];
+const PLF_POINT_KEYS = ["p80", "p90", "p95", "p98", "p100"];
+
+const getPlfCarryForwardValue = (row) => {
+  let lastValue = null;
+  for (const key of PLF_POINT_KEYS) {
+    const raw = row?.[key];
+    if (raw === "" || raw === null || raw === undefined) continue;
+    lastValue = round2(toNumber(raw));
+  }
+  return lastValue ?? 1;
+};
+
+const extractPlfEffectRecords = (rows = []) => {
+  const records = [];
+  let currentSectorOrGcd = "";
+  let currentGcd = "";
+
   rows.forEach((row) => {
-    const base = {
-      sectorOrGcd: normalize(pick(row, ["sectorOrGcd", "sector", "type", "gcd", "fuelBasis"])),
-      acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft", "regn"])),
-      ccy: normalize(pick(row, ["ccy"])),
-      reportingAmount: toNumber(pick(row, ["reportingAmount", "costRCCY"])),
+    if (!row) return;
+
+    const sectorOrGcd = normalizeFuelValue(pick(row, ["sectorOrGcd", "sector", "type"]));
+    const gcd = normalizeFuelValue(pick(row, ["gcd"]));
+    const acftRegn = normalizeFuelValue(pick(row, ["acftRegn", "acftReg", "acft", "regn"]));
+
+    if (row.rowType === "sector" || (!acftRegn && (sectorOrGcd || gcd))) {
+      if (sectorOrGcd) currentSectorOrGcd = sectorOrGcd;
+      if (gcd) currentGcd = gcd;
+      return;
+    }
+
+    const effectiveSector = sectorOrGcd || currentSectorOrGcd;
+    const effectiveGcd = gcd || currentGcd;
+    if (!effectiveSector && !acftRegn) return;
+
+    const p80 = pick(row, ["p80", "t80", "threshold80"]);
+    const p90 = pick(row, ["p90", "t90", "threshold90"]);
+    const p95 = pick(row, ["p95", "t95", "threshold95"]);
+    const p98 = pick(row, ["p98", "t98", "threshold98"]);
+    const p100 = getPlfCarryForwardValue(row);
+
+    records.push({
+      sectorOrGcd: effectiveSector,
+      gcd: effectiveGcd,
+      acftRegn,
+      p80: p80 === "" ? "" : toNumber(p80),
+      p90: p90 === "" ? "" : toNumber(p90),
+      p95: p95 === "" ? "" : toNumber(p95),
+      p98: p98 === "" ? "" : toNumber(p98),
+      p100,
+    });
+  });
+
+  return records;
+};
+
+const flattenPlfEffectRows = (rows = []) => extractPlfEffectRecords(rows);
+
+const groupPlfEffectRows = (rows = []) => {
+  const grouped = [];
+  const sectors = new Map();
+
+  rows.forEach((row) => {
+    const sectorKey = normalizeFuelValue(row?.sectorOrGcd);
+    const acftRegn = normalizeFuelValue(row?.acftRegn);
+    if (!sectorKey && !acftRegn) return;
+
+    if (!sectors.has(sectorKey)) {
+      const sectorRow = {
+        rowType: "sector",
+        sectorOrGcd: sectorKey,
+        gcd: normalizeFuelValue(row?.gcd),
+      };
+      sectors.set(sectorKey, {
+        sectorRow,
+        aircraft: new Map(),
+        order: [],
+      });
+      grouped.push(sectorRow);
+    }
+
+    const group = sectors.get(sectorKey);
+    if (!acftRegn) return;
+
+    const p80 = row?.p80 ?? row?.t80 ?? row?.threshold80 ?? "";
+    const p90 = row?.p90 ?? row?.t90 ?? row?.threshold90 ?? "";
+    const p95 = row?.p95 ?? row?.t95 ?? row?.threshold95 ?? "";
+    const p98 = row?.p98 ?? row?.t98 ?? row?.threshold98 ?? "";
+    const p100 = getPlfCarryForwardValue(row);
+
+    const aircraftRow = {
+      rowType: "aircraft",
+      sectorOrGcd: sectorKey,
+      gcd: normalizeFuelValue(row?.gcd || group.sectorRow.gcd),
+      acftRegn,
+      p80: p80 === "" ? "" : toNumber(p80),
+      p90: p90 === "" ? "" : toNumber(p90),
+      p95: p95 === "" ? "" : toNumber(p95),
+      p98: p98 === "" ? "" : toNumber(p98),
+      p100,
     };
 
-    const reg1 = normalize(pick(row, ["acft1"]));
-    const reg2 = normalize(pick(row, ["acft2"]));
-    const monthRecords = buildLegacyMonthRecords(row, ["fuelConsumptionKg", "fuelConsumption", "consumption", "fuelKg", "value", "rate"]);
+    group.aircraft.set(acftRegn, aircraftRow);
+    group.order.push(acftRegn);
+    grouped.push(aircraftRow);
+  });
 
+  sectors.forEach((group) => {
+    if (!group.sectorRow.gcd) {
+      const firstAircraft = group.order.length ? group.aircraft.get(group.order[0]) : null;
+      group.sectorRow.gcd = firstAircraft?.gcd || "";
+    }
+    group.order.forEach((acftRegn) => {
+      const aircraftRow = group.aircraft.get(acftRegn);
+      if (aircraftRow && !aircraftRow.p100) aircraftRow.p100 = getPlfCarryForwardValue(aircraftRow);
+    });
+  });
+
+  return grouped;
+};
+
+const normalizeFuelValue = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+const FUEL_MONTH_LABEL_KEYS = ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"];
+const FUEL_CONSUMPTION_KEYS = ["fuelConsumptionKg", "fuelConsumption", "consumption", "fuelKg", "value", "rate"];
+const FUEL_INDEX_MONTH_LABEL_KEYS = ["month1", "month2", "month3", "month4", "month5", "m1Label", "m2Label", "m3Label", "m4Label", "m5Label"];
+const FUEL_INDEX_VALUE_KEYS = ["m1", "m2", "m3", "m4", "m5", "value1", "value2", "value3", "value4", "value5", "fuelConsumptionIndex", "index"];
+
+const extractFuelConsumptionRecords = (rows = []) => {
+  const records = [];
+  let currentSectorOrGcd = "";
+  let currentGcd = "";
+
+  rows.forEach((row) => {
+    if (!row) return;
+
+    const sectorOrGcd = normalizeFuelValue(pick(row, ["sectorOrGcd", "sector", "type", "fuelBasis"]));
+    const gcd = normalizeFuelValue(pick(row, ["gcd"]));
+    const acftRegn = normalizeFuelValue(pick(row, ["acftRegn", "acftReg", "acft", "regn"]));
+    const ccy = normalizeFuelValue(pick(row, ["ccy"]));
+    const reportingAmount = toNumber(pick(row, ["reportingAmount", "costRCCY"]));
+
+    if (row.rowType === "sector" || (!acftRegn && (sectorOrGcd || gcd))) {
+      if (sectorOrGcd) currentSectorOrGcd = sectorOrGcd;
+      if (gcd) currentGcd = gcd;
+      return;
+    }
+
+    const effectiveSector = sectorOrGcd || currentSectorOrGcd;
+    const effectiveGcd = gcd || currentGcd;
+    const monthRecords = buildLegacyMonthRecords(row, FUEL_CONSUMPTION_KEYS);
     if (monthRecords.length > 0) {
-      monthRecords.forEach((record, index) => {
-        normalized.push({
-          ...base,
-          acftRegn: base.acftRegn || (index === 0 ? reg1 : reg2),
-          month: record.month,
+      monthRecords.forEach((record) => {
+        records.push({
+          sectorOrGcd: effectiveSector,
+          gcd: effectiveGcd,
+          acftRegn,
+          ccy,
+          reportingAmount,
+          month: normalizeFuelValue(record.month),
           fuelConsumptionKg: round2(record.amount),
           fuelPrice: toNumber(pick(record, ["fuelPrice", "price"])),
         });
       });
-    } else {
-      normalized.push({
-        ...base,
-        month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
-        fuelConsumptionKg: round2(pick(row, ["fuelConsumptionKg", "fuelConsumption", "consumption", "fuelKg", "value", "rate"])),
-        fuelPrice: toNumber(pick(row, ["fuelPrice", "price"])),
+      return;
+    }
+
+    const month = normalizeMonthKey(pick(row, FUEL_MONTH_LABEL_KEYS));
+    const fuelConsumptionKg = round2(pick(row, FUEL_CONSUMPTION_KEYS));
+
+    if (!effectiveSector && !acftRegn && !month && fuelConsumptionKg === 0) return;
+    if (!acftRegn && !fuelConsumptionKg && !month) return;
+
+    records.push({
+      sectorOrGcd: effectiveSector,
+      gcd: effectiveGcd,
+      acftRegn,
+      ccy,
+      reportingAmount,
+      month,
+      fuelConsumptionKg,
+      fuelPrice: toNumber(pick(row, ["fuelPrice", "price"])),
+    });
+  });
+
+  return records.filter((row) => row.sectorOrGcd || row.acftRegn || row.month || row.fuelConsumptionKg);
+};
+
+const normalizeFuelConsum = (rows = []) => extractFuelConsumptionRecords(rows).map((row) => ({
+  sectorOrGcd: normalize(row.sectorOrGcd),
+  gcd: normalize(row.gcd),
+  acftRegn: normalize(row.acftRegn),
+  ccy: normalize(row.ccy),
+  reportingAmount: toNumber(row.reportingAmount),
+  month: normalizeMonthKey(row.month),
+  fuelConsumptionKg: round2(row.fuelConsumptionKg),
+  fuelPrice: toNumber(row.fuelPrice),
+}));
+
+const flattenFuelConsumRows = (rows = []) => extractFuelConsumptionRecords(rows);
+
+const extractFuelConsumIndexRecords = (rows = []) => {
+  const records = [];
+  let currentMonths = [];
+
+  rows.forEach((row) => {
+    if (!row) return;
+
+    const acftRegn = normalizeFuelValue(pick(row, ["acftRegn", "acftReg", "acft", "regn"]));
+    const labels = [
+      normalizeMonthKey(pick(row, ["month1"])),
+      normalizeMonthKey(pick(row, ["month2"])),
+      normalizeMonthKey(pick(row, ["month3"])),
+      normalizeMonthKey(pick(row, ["month4"])),
+      normalizeMonthKey(pick(row, ["month5"])),
+    ];
+    const values = [
+      row.m1,
+      row.m2,
+      row.m3,
+      row.m4,
+      row.m5,
+    ];
+
+    const hasLabelOnly = labels.some(Boolean) && !acftRegn && values.every((value) => value === "" || value === null || value === undefined);
+    if (hasLabelOnly) {
+      currentMonths = labels.filter(Boolean);
+      return;
+    }
+
+    const monthLabels = labels.some(Boolean) ? labels.filter(Boolean) : currentMonths;
+    if (monthLabels.length === 0 && !acftRegn) return;
+
+    let carry = "";
+    monthLabels.forEach((month, index) => {
+      const raw = values[index];
+      const parsed = raw === "" || raw === null || raw === undefined ? "" : toNumber(raw);
+      if (parsed !== "") carry = parsed;
+      if (carry === "") return;
+      records.push({
+        acftRegn,
+        month1: labels[0] || "",
+        month2: labels[1] || "",
+        month3: labels[2] || "",
+        month4: labels[3] || "",
+        month5: labels[4] || "",
+        month,
+        fuelConsumptionIndex: round2(carry),
       });
+    });
+  });
+
+  return records.filter((row) => row.acftRegn || row.month);
+};
+
+const normalizeFuelConsumIndex = (rows = []) => extractFuelConsumIndexRecords(rows).map((row) => ({
+  acftRegn: normalize(row.acftRegn),
+  month1: normalizeMonthKey(row.month1),
+  month2: normalizeMonthKey(row.month2),
+  month3: normalizeMonthKey(row.month3),
+  month4: normalizeMonthKey(row.month4),
+  month5: normalizeMonthKey(row.month5),
+  month: normalizeMonthKey(row.month),
+  fuelConsumptionIndex: round2(row.fuelConsumptionIndex),
+}));
+
+const flattenFuelConsumIndexRows = (rows = []) => extractFuelConsumIndexRecords(rows);
+
+const groupFuelConsumIndexRows = (rows = []) => {
+  const grouped = [];
+  const aircraftMap = new Map();
+  const monthOrder = [];
+  let headerLabels = [];
+
+  rows.forEach((row) => {
+    const acftRegn = normalizeFuelValue(row?.acftRegn);
+    const month = normalizeMonthKey(row?.month);
+    const value = toNumber(row?.fuelConsumptionIndex ?? row?.value ?? row?.m1 ?? row?.m2 ?? row?.m3 ?? row?.m4 ?? row?.m5);
+    if (!acftRegn || !month) return;
+
+    if (headerLabels.length === 0) {
+      headerLabels = [
+        normalizeMonthKey(row?.month1),
+        normalizeMonthKey(row?.month2),
+        normalizeMonthKey(row?.month3),
+        normalizeMonthKey(row?.month4),
+        normalizeMonthKey(row?.month5),
+      ].filter(Boolean);
+    }
+    if (!monthOrder.includes(month)) monthOrder.push(month);
+    if (!aircraftMap.has(acftRegn)) {
+      aircraftMap.set(acftRegn, {});
+    }
+    aircraftMap.get(acftRegn)[month] = value;
+  });
+
+  const monthLabels = headerLabels.length ? headerLabels.slice(0, 5) : monthOrder.slice(0, 5);
+  aircraftMap.forEach((monthValues, acftRegn) => {
+    const row = {
+      acftRegn,
+      month1: monthLabels[0] || "",
+      month2: monthLabels[1] || "",
+      month3: monthLabels[2] || "",
+      month4: monthLabels[3] || "",
+      month5: monthLabels[4] || "",
+      m1: "",
+      m2: "",
+      m3: "",
+      m4: "",
+      m5: "",
+    };
+
+    monthLabels.forEach((month, index) => {
+      row[`m${index + 1}`] = monthValues[month] !== undefined ? monthValues[month] : "";
+    });
+    grouped.push(row);
+  });
+
+  return grouped;
+};
+
+const groupFuelConsumRows = (rows = []) => {
+  const grouped = [];
+  const sectorMap = new Map();
+
+  rows.forEach((row) => {
+    const sectorKey = normalizeFuelValue(row?.sectorOrGcd);
+    const acftRegn = normalizeFuelValue(row?.acftRegn);
+    const month = normalizeFuelValue(row?.month || row?.mmmYy || row?.mmmYY || row?.period || row?.mth || row?.mmYY);
+    const fuelConsumptionKg = row?.fuelConsumptionKg ?? row?.fuelConsumption ?? row?.consumption ?? row?.fuelKg ?? row?.value ?? row?.rate;
+    const numericFuel = toNumber(fuelConsumptionKg);
+
+    if (!sectorKey && !acftRegn && !month && numericFuel === 0) return;
+
+    if (!sectorMap.has(sectorKey)) {
+      const sectorRow = {
+        rowType: "sector",
+        sectorOrGcd: sectorKey,
+        gcd: normalizeFuelValue(row?.gcd),
+      };
+      sectorMap.set(sectorKey, {
+        sectorRow,
+        months: [],
+        aircraft: new Map(),
+        order: [],
+      });
+      grouped.push(sectorRow);
+    }
+
+    const group = sectorMap.get(sectorKey);
+
+    if (month && !group.months.includes(month)) {
+      group.months.push(month);
+    }
+
+    if (!acftRegn) return;
+
+    if (!group.aircraft.has(acftRegn)) {
+      const aircraftRow = {
+        rowType: "aircraft",
+        sectorOrGcd: sectorKey,
+        gcd: normalizeFuelValue(row?.gcd || group.sectorRow.gcd),
+        acftRegn,
+        m1: "",
+        m2: "",
+      };
+      group.aircraft.set(acftRegn, aircraftRow);
+      group.order.push(acftRegn);
+      grouped.push(aircraftRow);
+    }
+
+    const aircraftRow = group.aircraft.get(acftRegn);
+    const monthIndex = group.months.indexOf(month);
+    if (monthIndex >= 0 && monthIndex < 2) {
+      aircraftRow[monthIndex === 0 ? "m1" : "m2"] = row?.fuelConsumptionKg !== undefined && row?.fuelConsumptionKg !== null
+        ? row.fuelConsumptionKg
+        : numericFuel;
     }
   });
-  return normalized;
+
+  sectorMap.forEach((group) => {
+    group.sectorRow.month1 = group.months[0] || "";
+    group.sectorRow.month2 = group.months[1] || "";
+    if (!group.sectorRow.gcd) {
+      const firstAircraft = group.order.length ? group.aircraft.get(group.order[0]) : null;
+      group.sectorRow.gcd = firstAircraft?.gcd || "";
+    }
+    group.order.forEach((acftRegn) => {
+      const aircraftRow = group.aircraft.get(acftRegn);
+      aircraftRow.month1 = group.sectorRow.month1;
+      aircraftRow.month2 = group.sectorRow.month2;
+      if (!aircraftRow.gcd) aircraftRow.gcd = group.sectorRow.gcd || "";
+    });
+  });
+
+  return grouped;
 };
 
 const normalizeApuUsage = (rows = []) => rows.map((row) => ({
@@ -238,8 +602,21 @@ const normalizeApuUsage = (rows = []) => rows.map((row) => ({
   consumptionPerApuHour: toNumber(pick(row, ["consumptionPerApuHour", "consumption", "apuFuel", "cost", "value"])),
   basis: normalizeMetric(pick(row, ["basis"])),
   ccy: normalize(pick(row, ["ccy"])),
+  addlnUse: normalize(pick(row, ["addlnUse", "addln", "additionalUse", "addlnUsage"])) || "N",
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).filter((row) => row.arrStn || row.variant || row.acftRegn);
+})).map((row) => {
+  if (row.addlnUse === "Y") {
+    return {
+      ...row,
+      arrStn: "",
+      toDate: row.fromDate || row.toDate,
+    };
+  }
+  return {
+    ...row,
+    addlnUse: row.addlnUse || "N",
+  };
+}).filter((row) => row.variant || row.acftRegn || row.fromDate || row.toDate || row.apuHours || row.consumptionPerApuHour);
 
 const normalizePlfEffect = (rows = []) => rows.map((row) => ({
   sectorOrGcd: normalize(pick(row, ["sectorOrGcd", "sector", "type", "gcd"])),
@@ -275,6 +652,124 @@ const normalizeFuelPrice = (rows = []) => {
     }
   });
   return normalized.filter((row) => row.station || row.month || row.intoPlaneRate);
+};
+
+const FUEL_PRICE_MONTH_KEYS = ["m1", "m2"];
+const FUEL_PRICE_HEADER_KEYS = ["month1", "month2"];
+
+const extractFuelPriceRecords = (rows = []) => {
+  const records = [];
+  let currentMonth1 = "";
+  let currentMonth2 = "";
+  const parseMaybeNumber = (value) => {
+    if (value === "" || value === null || value === undefined) return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const parsed = Number(String(value).replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  rows.forEach((row) => {
+    if (!row) return;
+
+    const station = normalizeFuelValue(pick(row, ["station", "intoPlane", "stn"]));
+    const ccy = normalizeFuelValue(pick(row, ["ccy", "currency"]));
+    const kgPerLtr = pick(row, ["kgPerLtr", "kgLtr", "density"]);
+    const costRCCY = toNumber(pick(row, ["costRCCY", "reportingAmount"]));
+    const month1 = normalizeMonthKey(pick(row, ["month1", "m1Label"]));
+    const month2 = normalizeMonthKey(pick(row, ["month2", "m2Label"]));
+    const m1 = pick(row, ["m1", "value1", "apr"]);
+    const m2 = pick(row, ["m2", "value2", "may"]);
+
+    if (row.rowType === "header" || (!station && (month1 || month2))) {
+      if (month1) currentMonth1 = month1;
+      if (month2) currentMonth2 = month2;
+      return;
+    }
+
+    const header1 = month1 || currentMonth1;
+    const header2 = month2 || currentMonth2;
+    const firstValue = parseMaybeNumber(m1);
+    const secondValue = parseMaybeNumber(m2);
+    const carryFirst = firstValue ?? secondValue;
+    const carrySecond = secondValue ?? firstValue;
+
+    if (!station && !header1 && !header2 && carryFirst === null && carrySecond === null) return;
+
+    if (header1 && carryFirst !== null) {
+      records.push({
+        station,
+        ccy,
+        kgPerLtr: toNumber(kgPerLtr),
+        costRCCY,
+        month: header1,
+        intoPlaneRate: round2(carryFirst),
+        month1: header1,
+        month2: header2,
+      });
+    }
+
+    if (header2 && carrySecond !== null) {
+      records.push({
+        station,
+        ccy,
+        kgPerLtr: toNumber(kgPerLtr),
+        costRCCY,
+        month: header2,
+        intoPlaneRate: round2(carrySecond),
+        month1: header1,
+        month2: header2,
+      });
+    }
+  });
+
+  return records.filter((row) => row.station || row.month || row.intoPlaneRate);
+};
+
+const flattenFuelPriceRows = (rows = []) => extractFuelPriceRecords(rows);
+
+const groupFuelPriceRows = (rows = []) => {
+  const grouped = [];
+  const stationMap = new Map();
+  const monthOrder = [];
+
+  rows.forEach((row) => {
+    const station = normalizeFuelValue(row?.station);
+    const month = normalizeMonthKey(row?.month);
+    if (!station || !month) return;
+
+    if (!monthOrder.includes(month)) monthOrder.push(month);
+    if (!stationMap.has(station)) {
+      stationMap.set(station, {
+        station,
+        ccy: normalizeFuelValue(row?.ccy),
+        kgPerLtr: row?.kgPerLtr !== undefined ? row.kgPerLtr : "",
+        costRCCY: toNumber(row?.costRCCY),
+        values: {},
+      });
+    }
+    const group = stationMap.get(station);
+    if (!group.ccy) group.ccy = normalizeFuelValue(row?.ccy);
+    if (!group.kgPerLtr && row?.kgPerLtr !== undefined) group.kgPerLtr = row.kgPerLtr;
+    if (!group.costRCCY && row?.costRCCY !== undefined) group.costRCCY = row.costRCCY;
+    group.values[month] = row?.intoPlaneRate !== undefined && row?.intoPlaneRate !== null ? row.intoPlaneRate : "";
+  });
+
+  stationMap.forEach((group) => {
+    const month1 = monthOrder[0] || "";
+    const month2 = monthOrder[1] || "";
+    grouped.push({
+      station: group.station,
+      ccy: group.ccy,
+      kgPerLtr: group.kgPerLtr,
+      costRCCY: group.costRCCY,
+      month1,
+      month2,
+      m1: month1 ? group.values[month1] ?? "" : "",
+      m2: month2 ? group.values[month2] ?? "" : "",
+    });
+  });
+
+  return grouped;
 };
 
 const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
@@ -929,6 +1424,15 @@ const computeFlightCosts = (flight, rawConfig = {}) => computeFlightCostsBatch([
 
 module.exports = {
   normalizeCostConfig,
+  flattenFuelConsumRows,
+  flattenFuelConsumIndexRows,
+  flattenPlfEffectRows,
+  flattenFuelPriceRows,
+  normalizeApuUsage,
+  groupFuelConsumRows,
+  groupFuelConsumIndexRows,
+  groupPlfEffectRows,
+  groupFuelPriceRows,
   computeFlightCostsBatch,
   computeFlightCosts,
 };
