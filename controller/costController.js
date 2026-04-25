@@ -13,6 +13,8 @@ const {
   normalizeApuUsage,
   normalizeOtherMx,
   normalizeTransitMx,
+  normalizeNavMtowTiers,
+  serializeNavigationCostRows,
   hydrateSchMxEvents,
   groupFuelConsumRows,
   groupFuelConsumIndexRows,
@@ -60,6 +62,15 @@ const hydrateSchMxEventsForUser = async (userId, schMxEvents = []) => {
   });
 };
 
+const normalizeNavigationTablesForStorage = (configData = {}) => {
+  const navMtowTiers = normalizeNavMtowTiers(configData.navMtowTiers);
+  return {
+    navMtowTiers,
+    navEnr: serializeNavigationCostRows(configData.navEnr || [], "sector", navMtowTiers),
+    navTerm: serializeNavigationCostRows(configData.navTerm || [], "arrStn", navMtowTiers),
+  };
+};
+
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
   try {
@@ -69,6 +80,7 @@ exports.saveCostConfig = async (req, res) => {
       userId,
       Array.isArray(configData.schMxEvents) ? configData.schMxEvents : []
     );
+    const navigationTables = normalizeNavigationTablesForStorage(configData);
 
     const nextConfig = {
       ...configData,
@@ -81,6 +93,7 @@ exports.saveCostConfig = async (req, res) => {
       otherMx: normalizeOtherMx(configData.otherMx || []),
       transitMx: normalizeTransitMx(configData.transitMx || []),
       schMxEvents: hydratedSchMxEvents,
+      ...navigationTables,
     };
 
     const updatedConfig = await CostConfig.findOneAndUpdate(
@@ -107,6 +120,7 @@ exports.getCostConfig = async (req, res) => {
         allocationTable: [],
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
         leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
+        navMtowTiers: [73000, 77000, 78000, 79000],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], otherDoc: []
       };
     } else {
@@ -119,6 +133,9 @@ exports.getCostConfig = async (req, res) => {
       config.otherMx = normalizeOtherMx(config.otherMx || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);
       config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || []);
+      config.navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
+      config.navEnr = serializeNavigationCostRows(config.navEnr || [], "sector", config.navMtowTiers);
+      config.navTerm = serializeNavigationCostRows(config.navTerm || [], "arrStn", config.navMtowTiers);
     }
     res.status(200).json({ success: true, data: config });
   } catch (error) {

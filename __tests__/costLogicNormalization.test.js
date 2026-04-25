@@ -1,7 +1,12 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
-const { normalizeCostConfig, computeFlightCosts, computeFlightCostsBatch } = require("../utils/costLogic");
+const {
+  normalizeCostConfig,
+  computeFlightCosts,
+  computeFlightCostsBatch,
+  serializeNavigationCostRows,
+} = require("../utils/costLogic");
 const { __private__: apuFuelPrivate } = require("../controller/apuFuelController");
 
 test("normalizeCostConfig preserves maintenance UI fields for round-trip save/load", () => {
@@ -129,6 +134,65 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherMx[0].ccy, "USD");
 });
 
+test("normalizeCostConfig preserves airport landing mtow rows", () => {
+  const normalized = normalizeCostConfig({
+    airportLanding: [
+      {
+        arrStn: "BOM",
+        mtow: "77000",
+        variant: "A320",
+        month: "04/26",
+        cost: "1090",
+        ccy: "USD",
+      },
+    ],
+  });
+
+  assert.equal(normalized.airportLanding[0].arrStn, "BOM");
+  assert.equal(normalized.airportLanding[0].mtow, 77000);
+  assert.equal(normalized.airportLanding[0].cost, 1090);
+  assert.equal(normalized.airportLanding[0].ccy, "USD");
+});
+
+test("normalizeCostConfig preserves airport handling mtow rows", () => {
+  const normalized = normalizeCostConfig({
+    airportDom: [
+      {
+        arrStn: "BOM",
+        mtow: "77000",
+        variant: "A320",
+        month: "04/26",
+        cost: "118",
+        ccy: "USD",
+      },
+    ],
+  });
+
+  assert.equal(normalized.airportDom[0].arrStn, "BOM");
+  assert.equal(normalized.airportDom[0].mtow, 77000);
+  assert.equal(normalized.airportDom[0].cost, 118);
+  assert.equal(normalized.airportDom[0].ccy, "USD");
+});
+
+test("normalizeCostConfig preserves custom navigation mtow tiers", () => {
+  const normalized = normalizeCostConfig({
+    navMtowTiers: ["71000", "76000", "81000"],
+    navEnr: [
+      {
+        sector: "DEL-BOM",
+        "71000": 100,
+        "76000": 110,
+        "81000": 120,
+      },
+    ],
+  });
+
+  assert.deepEqual(normalized.navMtowTiers, [71000, 76000, 81000]);
+  assert.equal(normalized.navEnr[0]["71000"], 100);
+  assert.equal(normalized.navEnr[0]["76000"], 110);
+  assert.equal(normalized.navEnr[0]["81000"], 120);
+});
+
 test("transit maintenance prefers aircraft rows over variant rows", () => {
   const flight = {
     date: "2026-04-12",
@@ -201,6 +265,75 @@ test("transit maintenance prefers aircraft rows over variant rows and keeps the 
 
   assert.equal(enriched.transitMaintenance, 15600);
   assert.equal(enriched.transitMaintenanceCCY, "INR");
+});
+
+test("airport landing matches the row by arrival station and mtow", () => {
+  const flight = {
+    date: "2026-04-20",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320ceo",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "USD",
+    fleet: [
+      {
+        regn: "VT-ABC",
+        mtow: 77000,
+        entry: "2026-01-01",
+        exit: "2026-12-31",
+      },
+    ],
+    airportLanding: [
+      { arrStn: "BOM", mtow: 73000, cost: 982.6, ccy: "USD" },
+      { arrStn: "BOM", mtow: 77000, cost: 1090, ccy: "USD" },
+      { arrStn: "BOM", cost: 1200, ccy: "USD" },
+    ],
+  });
+
+  assert.equal(enriched.aptLandingCost, 1090);
+  assert.equal(enriched.airport, 1090);
+  assert.equal(enriched.airportCCY, "USD");
+});
+
+test("airport handling matches the row by arrival station and mtow", () => {
+  const flight = {
+    date: "2026-04-20",
+    domIntl: "DOM",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320ceo",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "USD",
+    fleet: [
+      {
+        regn: "VT-ABC",
+        mtow: 77000,
+        entry: "2026-01-01",
+        exit: "2026-12-31",
+      },
+    ],
+    airportDom: [
+      { arrStn: "BOM", mtow: 73000, cost: 102, ccy: "USD" },
+      { arrStn: "BOM", mtow: 77000, cost: 118, ccy: "USD" },
+      { arrStn: "BOM", cost: 125, ccy: "USD" },
+    ],
+  });
+
+  assert.equal(enriched.aptHandlingCost, 118);
+  assert.equal(enriched.airport, 118);
+  assert.equal(enriched.airportCCY, "USD");
 });
 
 test("other maintenance sums all matching rows and keeps monthly charges additive", () => {
@@ -654,6 +787,37 @@ test("navigation costs use the aircraft MTOW tier from fleet data", () => {
   assert.equal(enriched.navTrml, 86.02);
   assert.equal(enriched.navigation, 24236.02);
   assert.equal(enriched.navigationCCY, "INR");
+});
+
+test("navigation tables serialize to the exact frontend shape", () => {
+  const serialized = serializeNavigationCostRows(
+    [
+      {
+        sector: "DEL-BOM",
+        variant: "A320",
+        month: "04/26",
+        cost: 23500,
+        costRCCY: 23500,
+        ccy: "INR",
+        "73000": 23500,
+        "77000": 24150,
+        "78000": 24225,
+        "79000": 24300,
+      },
+    ],
+    "sector"
+  );
+
+  assert.deepEqual(serialized, [
+    {
+      sector: "DEL-BOM",
+      ccy: "INR",
+      "73000": 23500,
+      "77000": 24150,
+      "78000": 24225,
+      "79000": 24300,
+    },
+  ]);
 });
 
 test("APU fuel allocation follows the configured basis", () => {

@@ -21,6 +21,7 @@ const CostConfigSchema = new mongoose.Schema({
   
   navEnr: { type: Array, default: [] },
   navTerm: { type: Array, default: [] },
+  navMtowTiers: { type: Array, default: [73000, 77000, 78000, 79000] },
   airportLanding: { type: Array, default: [] },
   airportDom: { type: Array, default: [] },
   airportIntl: { type: Array, default: [] },

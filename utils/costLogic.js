@@ -126,7 +126,17 @@ const normalizeMetric = (value) => {
 
 const normalizeCostCodeId = (value) => normalize(value).replace(/[^A-Z0-9]/g, "");
 
-const NAV_MTOW_TIERS = [73000, 77000, 78000, 79000];
+const DEFAULT_NAV_MTOW_TIERS = [73000, 77000, 78000, 79000];
+
+const normalizeNavMtowTiers = (value = []) => {
+  const source = Array.isArray(value) && value.length > 0 ? value : DEFAULT_NAV_MTOW_TIERS;
+  const tiers = [];
+  source.forEach((tier) => {
+    const numeric = toNumber(tier);
+    if (numeric > 0 && !tiers.includes(numeric)) tiers.push(numeric);
+  });
+  return tiers.length > 0 ? tiers : [...DEFAULT_NAV_MTOW_TIERS];
+};
 
 const inferAllocationCostCode = (row = {}) => {
   const explicit = normalizeCostCodeId(pick(row, ["costCode", "cost"]));
@@ -1133,6 +1143,7 @@ const normalizeStationCost = (rows = [], stationKey) => {
   rows.forEach((row) => {
     const base = {
       [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn"])),
+      mtow: toNumber(pick(row, ["mtow"])),
       variant: normalize(pick(row, ["variant", "var"])),
       fromDate: pick(row, ["fromDate"]),
       toDate: pick(row, ["toDate"]),
@@ -1160,24 +1171,48 @@ const normalizeStationCost = (rows = [], stationKey) => {
   return normalized.filter((row) => row[stationKey] || row.cost);
 };
 
-const normalizeNavigationCost = (rows = [], stationKey) => rows.map((row) => {
+const normalizeNavigationCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => rows.map((row) => {
   const tierRates = {};
-  NAV_MTOW_TIERS.forEach((tier) => {
-    const value = pick(row, [String(tier), `mtow${tier}`, `mtow_${tier}`, `tier${tier}`]);
+  const navTiers = normalizeNavMtowTiers(tiers);
+  navTiers.forEach((tier) => {
+    let value = pick(row, [
+      String(tier),
+      `mtow${tier}`,
+      `mtow_${tier}`,
+      `tier${tier}`,
+    ]);
+    if ((value === "" || value === undefined || value === null) && row?.tierRates?.[tier] !== undefined && row?.tierRates?.[tier] !== null && row?.tierRates?.[tier] !== "") {
+      value = row.tierRates[tier];
+    }
     if (value !== "") tierRates[tier] = round2(value);
   });
 
   return {
-    ...row,
     [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn", "sector"])),
-    variant: normalize(pick(row, ["variant", "var"])),
-    month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
     cost: round2(pick(row, ["cost", "value"])),
     ccy: normalize(pick(row, ["ccy", "currency"])),
     costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+    ...Object.fromEntries(
+      navTiers.map((tier) => [String(tier), tierRates[tier] !== undefined ? tierRates[tier] : ""])
+    ),
     tierRates,
   };
-}).filter((row) => row[stationKey] || row.cost || Object.keys(row.tierRates || {}).length > 0);
+}).filter((row) => row[stationKey] || row.ccy || row.cost || Object.keys(row.tierRates || {}).length > 0);
+
+const serializeNavigationCostRows = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => normalizeNavigationCost(rows, stationKey, tiers).map((row) => {
+  const serialized = {
+    [stationKey]: row[stationKey] || "",
+    ccy: row.ccy || "",
+  };
+
+  normalizeNavMtowTiers(tiers).forEach((tier) => {
+    if (row[String(tier)] !== undefined && row[String(tier)] !== "") {
+      serialized[String(tier)] = row[String(tier)];
+    }
+  });
+
+  return serialized;
+}).filter((row) => row[stationKey] || row.ccy || normalizeNavMtowTiers(tiers).some((tier) => row[String(tier)] !== undefined && row[String(tier)] !== ""));
 
 const normalizeFleetRows = (rows = []) => rows.map((row) => ({
   ...row,
@@ -1229,32 +1264,36 @@ const normalizeAllocationTable = (rows = []) => rows.map((row) => ({
   scope: normalize(pick(row, ["scope"])),
 })).filter((row) => row.costCode || row.basis);
 
-const normalizeCostConfig = (config = {}) => ({
-  __normalized: true,
-  reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "USD",
-  fxRates: Array.isArray(config.fxRates) ? config.fxRates : [],
-  allocationTable: normalizeAllocationTable(config.allocationTable || config.costAllocation || []),
-  fuelConsum: normalizeFuelConsum(config.fuelConsum || []),
-  fuelConsumIndex: normalizeFuelConsumIndex(config.fuelConsumIndex || []),
-  apuUsage: normalizeApuUsage(config.apuUsage || []),
-  plfEffect: normalizePlfEffect(config.plfEffect || []),
-  ccyFuel: normalizeFuelPrice(config.ccyFuel || []),
-  leasedReserve: normalizeLeasedReserve(config.leasedReserve || []),
-  schMxEvents: normalizeSchMxEvents(config.schMxEvents || []),
-  transitMx: normalizeTransitMx(config.transitMx || []),
-  otherMx: normalizeOtherMx(config.otherMx || []),
-  rotableChanges: normalizeRotableChanges(config.rotableChanges || []),
-  navEnr: normalizeNavigationCost(config.navEnr || [], "sector"),
-  navTerm: normalizeNavigationCost(config.navTerm || [], "arrStn"),
-  airportLanding: normalizeStationCost(config.airportLanding || [], "arrStn"),
-  airportAvsec: normalizeStationCost(config.airportAvsec || [], "arrStn"),
-  airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
-  airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
-  otherDoc: normalizeOtherDoc(config.otherDoc || []),
-  aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
-  maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
-  fleet: normalizeFleetRows(config.fleet || []),
-});
+const normalizeCostConfig = (config = {}) => {
+  const navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
+  return {
+    __normalized: true,
+    reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "USD",
+    fxRates: Array.isArray(config.fxRates) ? config.fxRates : [],
+    allocationTable: normalizeAllocationTable(config.allocationTable || config.costAllocation || []),
+    fuelConsum: normalizeFuelConsum(config.fuelConsum || []),
+    fuelConsumIndex: normalizeFuelConsumIndex(config.fuelConsumIndex || []),
+    apuUsage: normalizeApuUsage(config.apuUsage || []),
+    plfEffect: normalizePlfEffect(config.plfEffect || []),
+    ccyFuel: normalizeFuelPrice(config.ccyFuel || []),
+    leasedReserve: normalizeLeasedReserve(config.leasedReserve || []),
+    schMxEvents: normalizeSchMxEvents(config.schMxEvents || []),
+    transitMx: normalizeTransitMx(config.transitMx || []),
+    otherMx: normalizeOtherMx(config.otherMx || []),
+    rotableChanges: normalizeRotableChanges(config.rotableChanges || []),
+    navMtowTiers,
+    navEnr: normalizeNavigationCost(config.navEnr || [], "sector", navMtowTiers),
+    navTerm: normalizeNavigationCost(config.navTerm || [], "arrStn", navMtowTiers),
+    airportLanding: normalizeStationCost(config.airportLanding || [], "arrStn"),
+    airportAvsec: normalizeStationCost(config.airportAvsec || [], "arrStn"),
+    airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
+    airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
+    otherDoc: normalizeOtherDoc(config.otherDoc || []),
+    aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
+    maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
+    fleet: normalizeFleetRows(config.fleet || []),
+  };
+};
 
 const getBasisValue = (flight, basis) => {
   switch (normalizeMetric(basis)) {
@@ -1318,6 +1357,10 @@ const convertToRccy = (amount, currency, reportingCurrency, explicitRccy) => {
 const scoreSpecificity = (pairs) => pairs.reduce((sum, entry) => sum + (entry ? 1 : 0), 0);
 
 const matchesOptional = (target, actual) => !target || target === actual;
+const matchesOptionalNumber = (target, actual) => {
+  if (target === undefined || target === null || target === "") return true;
+  return toNumber(target) === toNumber(actual);
+};
 
 const isAdditionalApuUseRow = (row = {}) => normalize(row.addlnUse) === "Y";
 
@@ -1791,10 +1834,11 @@ const enrichDirectCosts = (flights, config) => {
 
     const landingRule = pickBest(config.airportLanding, (row) => {
       if (!matchesOptional(row.arrStn, arrStn)) return -1;
+      if (!matchesOptionalNumber(row.mtow, mtow)) return -1;
       if (!matchesOptional(row.variant, variant)) return -1;
       if (row.month && row.month !== flightMonthKey) return -1;
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-      return scoreSpecificity([row.arrStn, row.variant, row.month, row.fromDate || row.toDate]) * 10;
+      return scoreSpecificity([row.arrStn, row.mtow, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
     const avsecRule = pickBest(config.airportAvsec, (row) => {
       if (!matchesOptional(row.arrStn, arrStn)) return -1;
@@ -1806,10 +1850,11 @@ const enrichDirectCosts = (flights, config) => {
     const handlingSource = domIntl === "INTL" ? config.airportIntl : config.airportDom;
     const handlingRule = pickBest(handlingSource, (row) => {
       if (!matchesOptional(row.arrStn, arrStn)) return -1;
+      if (!matchesOptionalNumber(row.mtow, mtow)) return -1;
       if (!matchesOptional(row.variant, variant)) return -1;
       if (row.month && row.month !== flightMonthKey) return -1;
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-      return scoreSpecificity([row.arrStn, row.variant, row.month, row.fromDate || row.toDate]) * 10;
+      return scoreSpecificity([row.arrStn, row.mtow, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
     flight.aptLandingCost = round2(landingRule?.cost || 0);
     flight.aptOtherCost = round2(avsecRule?.cost || 0);
@@ -2092,6 +2137,8 @@ module.exports = {
   normalizeTransitMx,
   normalizeAircraftOnwing,
   normalizeMaintenanceReserveSchedule,
+  normalizeNavMtowTiers,
+  serializeNavigationCostRows,
   hydrateSchMxEvents,
   getLatestFlightForAircraft,
   getApuFuelPriceSourceFlight,
