@@ -24,6 +24,7 @@ const flightSchema = new mongoose.Schema(
     variant: { type: String },
     acftType: { type: String },
     ft: { type: String },
+    paxLF: { type: Number },
 
     // Numbers
     seats: { type: Number },

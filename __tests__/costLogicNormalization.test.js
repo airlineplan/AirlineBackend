@@ -128,7 +128,7 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherMx[0].ccy, "USD");
 });
 
-test("transit maintenance prefers the most specific matching identifier", () => {
+test("transit maintenance prefers aircraft rows over variant rows", () => {
   const flight = {
     date: "2026-04-12",
     depStn: "DEL",
@@ -150,7 +150,55 @@ test("transit maintenance prefers the most specific matching identifier", () => 
     ],
   });
 
-  assert.equal(enriched.transitMaintenance, 40);
+  assert.equal(enriched.transitMaintenance, 20);
+  assert.equal(enriched.transitMaintenanceCCY, "INR");
+});
+
+test("transit maintenance returns zero when the flight date is outside the matching date range", () => {
+  const flight = {
+    date: "2026-06-01",
+    depStn: "DEL",
+    variant: "A320",
+    acftType: "A320ceo",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    transitMx: [
+      { depStn: "DEL", variant: "A320", costPerDeparture: 15400, ccy: "INR", fromDate: "2026-04-01", toDate: "2026-05-31" },
+    ],
+  });
+
+  assert.equal(enriched.transitMaintenance, 0);
+  assert.equal(enriched.transitMaintenanceCCY, "");
+});
+
+test("transit maintenance prefers aircraft rows over variant rows and keeps the latest matching row", () => {
+  const flight = {
+    date: "2026-04-20",
+    depStn: "DEL",
+    variant: "A320",
+    acftType: "A320ceo",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    transitMx: [
+      { depStn: "DEL", variant: "A320", costPerDeparture: 14000, ccy: "INR", fromDate: "2026-04-01", toDate: "2026-05-31" },
+      { depStn: "DEL", acftRegn: "VT-ABC", costPerDeparture: 15400, ccy: "INR", fromDate: "2026-04-01", toDate: "2026-05-31" },
+      { depStn: "DEL", acftRegn: "VT-ABC", costPerDeparture: 15600, ccy: "INR", fromDate: "2026-04-15", toDate: "2026-05-31" },
+    ],
+  });
+
+  assert.equal(enriched.transitMaintenance, 15600);
   assert.equal(enriched.transitMaintenanceCCY, "INR");
 });
 
@@ -184,4 +232,105 @@ test("other maintenance sums all matching rows and keeps monthly charges additiv
   assert.equal(enriched.otherMaintenance2, 60);
   assert.equal(enriched.otherMxExpenses, 1000);
   assert.equal(enriched.otherMxExpensesCCY, "USD");
+});
+
+test("engine fuel consumption multiplies fuel consumption, fuel index, and the matched PLF band", () => {
+  const flight = {
+    date: "2026-04-16",
+    sector: "CCU-BOM",
+    depStn: "CCU",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320",
+    aircraft: {
+      registration: "VT-ABC",
+    },
+    ask: 306000,
+    rsk: 290700,
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    fuelConsum: [
+      { sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 8275, ccy: "INR" },
+    ],
+    fuelConsumIndex: [
+      { acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1.0 },
+    ],
+    plfEffect: [
+      { sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p80: 1.0, p90: 1.0, p95: 1.0, p98: 1.0, p100: 1.0 },
+    ],
+  });
+
+  assert.equal(enriched.engineFuelConsumption, 8275);
+  assert.equal(enriched.engineFuelCost, 8275);
+  assert.equal(enriched.engineFuelCostCCY, "");
+});
+
+test("engine fuel consumption picks the next available PLF threshold when load factor is between bands", () => {
+  const flight = {
+    date: "2026-04-16",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320",
+    aircraft: {
+      registration: "VT-ABC",
+    },
+    ask: 100,
+    rsk: 87,
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    fuelConsum: [
+      { sectorOrGcd: "DEL-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 1000, ccy: "INR" },
+    ],
+    fuelConsumIndex: [
+      { acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1.0 },
+    ],
+    plfEffect: [
+      { sectorOrGcd: "DEL-BOM", acftRegn: "VT-ABC", p80: 0.96, p90: 0.98, p95: 1.0, p98: 1.01, p100: 1.01 },
+    ],
+  });
+
+  assert.equal(enriched.engineFuelConsumption, 980);
+  assert.equal(enriched.engineFuelCost, 980);
+});
+
+test("engine fuel cost uses departure-station fuel price and month-specific per-kLtr rate", () => {
+  const flight = {
+    date: "2026-04-16",
+    sector: "CCU-BOM",
+    depStn: "CCU",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320",
+    aircraft: {
+      registration: "VT-ABC",
+    },
+    ask: 306000,
+    rsk: 290700,
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    fuelConsum: [
+      { sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 8275, ccy: "INR" },
+    ],
+    fuelConsumIndex: [
+      { acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1.0 },
+    ],
+    ccyFuel: [
+      { station: "CCU", ccy: "INR", kgPerLtr: 0.782, month: "04/26", intoPlaneRate: 92500 },
+    ],
+    plfEffect: [
+      { sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p80: 1.0, p90: 1.0, p95: 1.0, p98: 1.0, p100: 1.0 },
+    ],
+  });
+
+  assert.equal(enriched.engineFuelConsumption, 8275);
+  assert.equal(enriched.engineFuelCost, 978820.33);
+  assert.equal(enriched.engineFuelCostCCY, "INR");
 });

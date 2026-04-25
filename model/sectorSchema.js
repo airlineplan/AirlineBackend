@@ -112,6 +112,7 @@ const syncFlightsForSector = async (doc) => {
     const updatedFields = {
       seats: paxCapacity,
       pax: paxCapacity * (paxLF / 100),
+      paxLF: paxLF,
       dist: gcd,
       CargoCapT: cargoCapT,
       CargoT: cargoCapT * (cargoLF / 100),

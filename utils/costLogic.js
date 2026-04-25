@@ -134,6 +134,26 @@ const getFlightSector = (flight) => normalize(flight?.sector);
 const getFlightDep = (flight) => normalize(flight?.depStn);
 const getFlightArr = (flight) => normalize(flight?.arrStn);
 const getFlightDomIntl = (flight) => normalize(flight?.domIntl);
+const getFlightLoadFactor = (flight) => {
+  const explicit =
+    flight?.paxLF ??
+    flight?.plf ??
+    flight?.loadFactor ??
+    flight?.loadFactorPct;
+
+  const explicitValue = toNumber(explicit);
+  if (explicitValue > 0) return explicitValue;
+
+  const rsk = toNumber(flight?.rsk);
+  const ask = toNumber(flight?.ask);
+  if (ask > 0 && rsk >= 0) return round2((rsk / ask) * 100);
+
+  const pax = toNumber(flight?.pax);
+  const seats = toNumber(flight?.seats);
+  if (seats > 0 && pax >= 0) return round2((pax / seats) * 100);
+
+  return 0;
+};
 
 const scoreTransitRule = (row) => (
   (row?.depStn ? 10000 : 0) +
@@ -1055,6 +1075,7 @@ const normalizeCostConfig = (config = {}) => ({
   fxRates: Array.isArray(config.fxRates) ? config.fxRates : [],
   allocationTable: normalizeAllocationTable(config.allocationTable || config.costAllocation || []),
   fuelConsum: normalizeFuelConsum(config.fuelConsum || []),
+  fuelConsumIndex: normalizeFuelConsumIndex(config.fuelConsumIndex || []),
   apuUsage: normalizeApuUsage(config.apuUsage || []),
   plfEffect: normalizePlfEffect(config.plfEffect || []),
   ccyFuel: normalizeFuelPrice(config.ccyFuel || []),
@@ -1112,6 +1133,16 @@ const getPricePerKg = (row) => {
   if (rate <= 0) return 0;
   if (kgPerLtr > 0) return rate / (kgPerLtr * 1000);
   return rate;
+};
+
+const calculateFuelCost = (fuelConsumptionKg, fuelPriceRow) => {
+  const consumption = toNumber(fuelConsumptionKg);
+  const kgPerLtr = toNumber(fuelPriceRow?.kgPerLtr);
+  const intoPlanePerKLtr = toNumber(fuelPriceRow?.intoPlaneRate);
+
+  if (consumption <= 0 || kgPerLtr <= 0 || intoPlanePerKLtr <= 0) return 0;
+
+  return round2((consumption / kgPerLtr) * (intoPlanePerKLtr / 1000));
 };
 
 const convertToRccy = (amount, currency, reportingCurrency, explicitRccy) => {
@@ -1208,11 +1239,55 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
 const selectPlfFactor = (rule, paxLf) => {
   if (!rule?.thresholds?.length) return 1;
   const pct = toNumber(paxLf);
-  let factor = 1;
-  rule.thresholds.forEach((entry) => {
-    if (pct >= entry.threshold) factor = entry.factor || factor;
+  if (pct <= 0) return 1;
+
+  const sorted = [...rule.thresholds].sort((a, b) => a.threshold - b.threshold);
+  const nextThreshold = sorted.find((entry) => pct <= entry.threshold);
+  const selected = nextThreshold || sorted[sorted.length - 1];
+  return selected?.factor || 1;
+};
+
+const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg }) => {
+  const candidates = [];
+
+  rows.forEach((row, index) => {
+    if (!row) return;
+    if (!matchesOptional(row.depStn, depStn)) return;
+    if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return;
+
+    const matchesAcft = matchesOptional(row.acftRegn, acftReg);
+    const matchesVariant = matchesOptional(row.variant, variant);
+    let priority = 0;
+
+    if (row.acftRegn && matchesAcft) {
+      priority = 2;
+    } else if (row.variant && matchesVariant) {
+      priority = 1;
+    } else if (!row.acftRegn && !row.variant) {
+      priority = 1;
+    }
+
+    if (priority === 0) return;
+
+    candidates.push({
+      row,
+      priority,
+      effectiveFrom: parseDate(row.fromDate)?.getTime() || 0,
+      effectiveTo: parseDate(row.toDate)?.getTime() || 0,
+      index,
+    });
   });
-  return factor || 1;
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => (
+    b.priority - a.priority ||
+    b.effectiveFrom - a.effectiveFrom ||
+    b.effectiveTo - a.effectiveTo ||
+    b.index - a.index
+  ));
+
+  return candidates[0].row;
 };
 
 const enrichDirectCosts = (flights, config) => {
@@ -1238,6 +1313,12 @@ const enrichDirectCosts = (flights, config) => {
       return scoreSpecificity([row.sectorOrGcd, row.acftRegn, row.month]) * 10;
     });
 
+    const fuelIndexRule = pickBest(config.fuelConsumIndex, (row) => {
+      if (!matchesOptional(row.acftRegn, acftReg)) return -1;
+      if (row.month && row.month !== flightMonthKey) return -1;
+      return scoreSpecificity([row.acftRegn, row.month]) * 10;
+    });
+
     const plfRule = pickBest(config.plfEffect, (row) => {
       if (!matchesOptional(row.sectorOrGcd, sector) && !matchesOptional(row.sectorOrGcd, normalize(flight.dist))) return -1;
       if (!matchesOptional(row.acftRegn, acftReg)) return -1;
@@ -1250,10 +1331,12 @@ const enrichDirectCosts = (flights, config) => {
       return scoreSpecificity([row.station, row.month]);
     });
 
-    const plfFactor = selectPlfFactor(plfRule, flight.paxLF || flight.plf);
-    const baseFuelConsumption = round2((fuelRule?.fuelConsumptionKg || 0) * plfFactor);
-    const pricePerKg = getPricePerKg(fuelPriceRule) || toNumber(fuelRule?.fuelPrice);
-    const engineFuelCost = round2(pricePerKg > 0 ? baseFuelConsumption * pricePerKg : baseFuelConsumption);
+    const plfFactor = selectPlfFactor(plfRule, getFlightLoadFactor(flight));
+    const fuelIndexFactor = toNumber(fuelIndexRule?.fuelConsumptionIndex) || 1;
+    const baseFuelConsumption = round2((fuelRule?.fuelConsumptionKg || 0) * fuelIndexFactor * plfFactor);
+    const engineFuelCost = fuelPriceRule
+      ? calculateFuelCost(baseFuelConsumption, fuelPriceRule)
+      : baseFuelConsumption;
 
     flight.engineFuelConsumption = baseFuelConsumption;
     flight.engineFuel = baseFuelConsumption;
@@ -1261,9 +1344,9 @@ const enrichDirectCosts = (flights, config) => {
       flight,
       "engineFuelCost",
       engineFuelCost,
-      fuelPriceRule?.ccy || fuelRule?.ccy || "",
+      fuelPriceRule?.ccy || "",
       config.reportingCurrency,
-      fuelPriceRule?.costRCCY || fuelRule?.reportingAmount
+      fuelPriceRule?.costRCCY || 0
     );
 
     const mrDirectRule = pickBest(config.leasedReserve, (row) => {
@@ -1288,14 +1371,11 @@ const enrichDirectCosts = (flights, config) => {
       );
     }
 
-    const transitRule = pickBest(config.transitMx, (row) => {
-      if (!matchesOptional(row.depStn, depStn)) return -1;
-      if (!matchesOptional(row.variant, variant)) return -1;
-      if (!matchesOptional(row.acftRegn, acftReg)) return -1;
-      if (!matchesOptional(row.pn, pn)) return -1;
-      if (!matchesOptional(row.sn, msn)) return -1;
-      if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-      return scoreTransitRule(row);
+    const transitRule = selectTransitRule(config.transitMx, {
+      flightDate,
+      depStn,
+      variant,
+      acftReg,
     });
     if (transitRule) {
       applyCostField(

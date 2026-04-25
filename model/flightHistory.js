@@ -41,6 +41,9 @@ const flightHistorySchema = new mongoose.Schema(
     ft: {
       type: String,
     },
+    paxLF: {
+      type: Number,
+    },
     bh: {
       type: Number,
     },
