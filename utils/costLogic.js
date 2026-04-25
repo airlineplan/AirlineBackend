@@ -129,10 +129,36 @@ const getFlightMonthKey = (flight) => normalizeMonthKey(flight?.date);
 const getFlightRegistration = (flight) => normalize(flight?.aircraft?.registration || flight?.acftRegn || flight?.registration);
 const getFlightMsn = (flight) => normalize(flight?.aircraft?.msn ?? flight?.msn);
 const getFlightVariant = (flight) => normalize(flight?.variant);
+const getFlightPartNumber = (flight) => normalize(flight?.acftType || flight?.variant);
 const getFlightSector = (flight) => normalize(flight?.sector);
 const getFlightDep = (flight) => normalize(flight?.depStn);
 const getFlightArr = (flight) => normalize(flight?.arrStn);
 const getFlightDomIntl = (flight) => normalize(flight?.domIntl);
+
+const scoreTransitRule = (row) => (
+  (row?.depStn ? 10000 : 0) +
+  (row?.sn ? 1000 : 0) +
+  (row?.acftRegn ? 400 : 0) +
+  (row?.pn ? 250 : 0) +
+  (row?.variant ? 100 : 0) +
+  (row?.fromDate || row?.toDate ? 10 : 0)
+);
+
+const matchesOtherMxRow = (row, {
+  flightDate,
+  depStn,
+  variant,
+  acftReg,
+  pn,
+  msn,
+}) => {
+  if (!matchesOptional(row.depStn, depStn)) return false;
+  if (!matchesOptional(row.variant, variant)) return false;
+  if (!matchesOptional(row.acftRegn, acftReg)) return false;
+  if (!matchesOptional(row.pn, pn)) return false;
+  if (!matchesOptional(row.sn, msn)) return false;
+  return isWithinRange(flightDate, row.fromDate, row.toDate);
+};
 
 const buildLegacyMonthRecords = (row, valueKeys = []) => {
   const records = [];
@@ -773,35 +799,157 @@ const groupFuelPriceRows = (rows = []) => {
 };
 
 const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
+  ...row,
   mrAccId: pick(row, ["mrAccId"]),
+  schMxEvent: pick(row, ["schMxEvent", "schEvent", "event"]),
   acftRegn: normalize(pick(row, ["acftRegn", "acftReg"])),
   pn: normalize(pick(row, ["pn"])),
   sn: normalize(pick(row, ["sn", "esn", "apun", "msn"])),
-  driver: normalizeMetric(pick(row, ["driver"])),
-  setRate: toNumber(pick(row, ["setRate", "rate", "contribution"])),
   setBalance: toNumber(pick(row, ["setBalance"])),
-  endDate: pick(row, ["endDate", "toDate"]),
+  setRate: toNumber(pick(row, ["setRate", "rate", "contribution"])),
+  asOnDate: pick(row, ["asOnDate", "date", "fromDate"]),
   ccy: normalize(pick(row, ["ccy", "currency"])),
+  driver: normalizeMetric(pick(row, ["driver"])),
+  annualEscl: toNumber(pick(row, ["annualEscl", "annualEscalation", "escl"])),
+  anniversary: pick(row, ["anniversary", "anniversaryDt"]),
+  endDate: pick(row, ["endDate", "toDate"]),
   basis: normalizeMetric(pick(row, ["basis"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).filter((row) => row.acftRegn || row.pn || row.sn || row.driver);
+})).filter((row) => row.acftRegn || row.pn || row.sn || row.driver || row.schMxEvent);
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
+  ...row,
   date: pick(row, ["date"]),
   event: normalize(pick(row, ["event", "schMxEvent", "schEvent", "label"])),
   msnEsnApun: normalize(pick(row, ["msnEsnApun", "msn", "msnEsn", "acftRegn"])),
   pn: normalize(pick(row, ["pn"])),
   snBn: normalize(pick(row, ["snBn", "sn", "bn"])),
+  hours: toNumber(pick(row, ["hours"])),
+  cycles: toNumber(pick(row, ["cycles"])),
+  days: toNumber(pick(row, ["days"])),
   cost: toNumber(pick(row, ["cost", "eventTotalCost"])),
-  capitalisation: normalize(pick(row, ["capitalisation", "capitalization", "cap"])),
+  ccy: normalize(pick(row, ["ccy", "currency"])),
   mrAccId: pick(row, ["mrAccId"]),
   drawdownDate: pick(row, ["drawdownDate", "mrDrawdownDate"]),
+  mrDrawdown: toNumber(pick(row, ["mrDrawdown"])),
+  mrDrawdownCcy: normalize(pick(row, ["mrDrawdownCcy"])),
   openingBal: toNumber(pick(row, ["openingBal", "openBal"])),
-  ccy: normalize(pick(row, ["ccy", "currency"])),
+  remaining: toNumber(pick(row, ["remaining"])),
+  capitalisation: normalize(pick(row, ["capitalisation", "capitalization", "cap"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
 })).filter((row) => row.date || row.event || row.msnEsnApun);
 
+const isBlankValue = (value) => value === "" || value === null || value === undefined;
+
+const toDayKey = (value) => {
+  const date = parseDate(value);
+  if (!date) return "";
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+};
+
+const buildUtilisationLookupKeys = (row = {}) => {
+  const day = toDayKey(pick(row, ["date"]));
+  const msn = normalize(pick(row, ["msnEsnApun", "msnEsn", "msn", "acftRegn"]));
+  const pn = normalize(pick(row, ["pn"]));
+  const sn = normalize(pick(row, ["snBn", "sn", "bn"]));
+  return [
+    [day, msn, pn, sn].join("|"),
+    [day, msn, "", sn].join("|"),
+    [day, msn, "", ""].join("|"),
+  ];
+};
+
+const buildReserveLookupKeys = (row = {}) => {
+  const day = toDayKey(pick(row, ["date", "drawdownDate", "mrDrawdownDate"]));
+  const mrAccId = normalize(pick(row, ["mrAccId"]));
+  const asset = normalize(pick(row, ["msn", "msnEsnApun", "acftReg", "acftRegn"]));
+  return [
+    [day, mrAccId, asset].join("|"),
+    [day, mrAccId, ""].join("|"),
+  ];
+};
+
+const buildUtilisationLookupKey = (row = {}) => [
+  toDayKey(pick(row, ["date"])),
+  normalize(pick(row, ["msnEsnApun", "msnEsn", "msn", "acftRegn"])),
+  normalize(pick(row, ["pn"])),
+  normalize(pick(row, ["snBn", "sn", "bn"])),
+].join("|");
+
+const hydrateSchMxEvents = (rows = [], {
+  utilisationRows = [],
+  maintenanceReserveRows = [],
+} = {}) => {
+  const utilisationLookup = new Map();
+  utilisationRows.forEach((row) => {
+    buildUtilisationLookupKeys(row).forEach((key) => {
+      if (key && !utilisationLookup.has(key)) {
+        utilisationLookup.set(key, row);
+      }
+    });
+  });
+
+  const reserveLookup = new Map();
+  maintenanceReserveRows.forEach((row) => {
+    buildReserveLookupKeys(row).forEach((key) => {
+      if (key && !reserveLookup.has(key)) {
+        reserveLookup.set(key, row);
+      }
+    });
+  });
+
+  return rows.map((row) => {
+    const next = { ...row };
+    const hydratedFields = new Set(Array.isArray(next._hydratedFields) ? next._hydratedFields : []);
+    const utilKey = buildUtilisationLookupKey(next);
+    const utilisation = utilisationLookup.get(utilKey);
+
+    if (utilisation) {
+      if (isBlankValue(next.hours) && !isBlankValue(utilisation.tsn)) {
+        next.hours = toNumber(utilisation.tsn);
+        hydratedFields.add("hours");
+      }
+      if (isBlankValue(next.cycles) && !isBlankValue(utilisation.csn)) {
+        next.cycles = toNumber(utilisation.csn);
+        hydratedFields.add("cycles");
+      }
+      if (isBlankValue(next.days) && !isBlankValue(utilisation.dsn)) {
+        next.days = toNumber(utilisation.dsn);
+        hydratedFields.add("days");
+      }
+    }
+
+    const drawdownDateKey = toDayKey(next.drawdownDate);
+    if (isBlankValue(next.openingBal) && drawdownDateKey && !isBlankValue(next.mrAccId)) {
+      const reserveKeys = buildReserveLookupKeys({
+        date: next.drawdownDate,
+        mrAccId: next.mrAccId,
+        msn: next.msnEsnApun,
+        acftReg: next.acftRegn,
+      });
+      const reserve = reserveKeys.map((key) => reserveLookup.get(key)).find(Boolean);
+      if (reserve && !isBlankValue(reserve.closingBal)) {
+        next.openingBal = toNumber(reserve.closingBal);
+        hydratedFields.add("openingBal");
+      }
+    }
+
+    if (isBlankValue(next.remaining) && !isBlankValue(next.openingBal) && !isBlankValue(next.mrDrawdown)) {
+      next.remaining = round2(toNumber(next.openingBal) - toNumber(next.mrDrawdown));
+      hydratedFields.add("remaining");
+    }
+
+    next._hydratedFields = Array.from(hydratedFields);
+    return next;
+  });
+};
+
 const normalizeTransitMx = (rows = []) => rows.map((row) => ({
+  ...row,
   depStn: normalize(pick(row, ["depStn", "stn", "station"])),
   variant: normalize(pick(row, ["variant", "var"])),
   acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft"])),
@@ -815,6 +963,7 @@ const normalizeTransitMx = (rows = []) => rows.map((row) => ({
 })).filter((row) => row.depStn || row.variant || row.acftRegn || row.pn || row.sn);
 
 const normalizeOtherMx = (rows = []) => rows.map((row) => ({
+  ...row,
   depStn: normalize(pick(row, ["depStn", "stn", "station"])),
   variant: normalize(pick(row, ["variant", "var"])),
   acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft"])),
@@ -879,12 +1028,16 @@ const normalizeOtherDoc = (rows = []) => rows.map((row) => ({
 })).filter((row) => row.label || row.sector || row.depStn || row.arrStn || row.variant || row.acftRegn || row.pn || row.sn);
 
 const normalizeRotableChanges = (rows = []) => rows.map((row) => ({
+  ...row,
   label: pick(row, ["label", "lbl"]),
   date: pick(row, ["date"]),
-  month: normalizeMonthKey(pick(row, ["month"] || [])),
+  month: normalizeMonthKey(pick(row, ["month"])),
   pn: normalize(pick(row, ["pn"])),
   msn: normalize(pick(row, ["msn"])),
   acftRegn: normalize(pick(row, ["acftRegn", "acft"])),
+  position: pick(row, ["position"]),
+  removedSN: pick(row, ["removedSN"]),
+  installedSN: pick(row, ["installedSN"]),
   cost: toNumber(pick(row, ["cost"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
@@ -1068,6 +1221,7 @@ const enrichDirectCosts = (flights, config) => {
     const flightMonthKey = getFlightMonthKey(flight);
     const acftReg = getFlightRegistration(flight);
     const msn = getFlightMsn(flight);
+    const pn = getFlightPartNumber(flight);
     const sector = getFlightSector(flight);
     const depStn = getFlightDep(flight);
     const arrStn = getFlightArr(flight);
@@ -1138,9 +1292,10 @@ const enrichDirectCosts = (flights, config) => {
       if (!matchesOptional(row.depStn, depStn)) return -1;
       if (!matchesOptional(row.variant, variant)) return -1;
       if (!matchesOptional(row.acftRegn, acftReg)) return -1;
+      if (!matchesOptional(row.pn, pn)) return -1;
       if (!matchesOptional(row.sn, msn)) return -1;
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-      return scoreSpecificity([row.depStn, row.variant, row.acftRegn, row.pn, row.sn, row.fromDate || row.toDate]) * 10;
+      return scoreTransitRule(row);
     });
     if (transitRule) {
       applyCostField(
@@ -1153,27 +1308,25 @@ const enrichDirectCosts = (flights, config) => {
       );
     }
 
-    const otherMxRule = pickBest(config.otherMx, (row) => {
-      if (!matchesOptional(row.depStn, depStn)) return -1;
-      if (!matchesOptional(row.variant, variant)) return -1;
-      if (!matchesOptional(row.acftRegn, acftReg)) return -1;
-      if (!matchesOptional(row.sn, msn)) return -1;
-      if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-      if (!row.costPerBh && !row.costPerDeparture) return -1;
-      return scoreSpecificity([row.depStn, row.variant, row.acftRegn, row.pn, row.sn, row.fromDate || row.toDate]) * 10;
-    });
-    if (otherMxRule) {
-      const perBh = otherMxRule.costPerBh * bh;
-      const perDep = otherMxRule.costPerDeparture * departures;
-      flight.otherMaintenance1 = round2(perBh);
-      flight.otherMaintenance2 = round2(perDep);
+    const matchingOtherMxRows = (config.otherMx || []).filter((row) => (
+      matchesOtherMxRow(row, { flightDate, depStn, variant, acftReg, pn, msn }) &&
+      (row.costPerBh || row.costPerDeparture)
+    ));
+    if (matchingOtherMxRows.length > 0) {
+      const perBhTotal = matchingOtherMxRows.reduce((sum, row) => sum + (row.costPerBh * bh), 0);
+      const perDepTotal = matchingOtherMxRows.reduce((sum, row) => sum + (row.costPerDeparture * departures), 0);
+      const ccy = matchingOtherMxRows.find((row) => row.ccy)?.ccy || "";
+      const costRCCY = matchingOtherMxRows.find((row) => row.costRCCY)?.costRCCY || 0;
+      flight.otherMaintenance1 = round2(perBhTotal);
+      flight.otherMaintenance2 = round2(perDepTotal);
+      flight.otherMaintenance3 = 0;
       applyCostField(
         flight,
         "otherMaintenance",
-        perBh + perDep,
-        otherMxRule.ccy,
+        perBhTotal + perDepTotal,
+        ccy,
         config.reportingCurrency,
-        otherMxRule.costRCCY
+        costRCCY
       );
     }
 
@@ -1364,11 +1517,14 @@ const enrichAllocatedCosts = (flights, config) => {
     if (!row.costPerMonth) return;
     const eligibleFlights = flights.filter((flight) => {
       const flightDate = getFlightDate(flight);
-      return matchesOptional(row.depStn, getFlightDep(flight)) &&
-        matchesOptional(row.variant, getFlightVariant(flight)) &&
-        matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
-        matchesOptional(row.sn, getFlightMsn(flight)) &&
-        isWithinRange(flightDate, row.fromDate, row.toDate);
+      return matchesOtherMxRow(row, {
+        flightDate,
+        depStn: getFlightDep(flight),
+        variant: getFlightVariant(flight),
+        acftReg: getFlightRegistration(flight),
+        pn: getFlightPartNumber(flight),
+        msn: getFlightMsn(flight),
+      });
     });
     distributePool(
       eligibleFlights,
@@ -1429,10 +1585,13 @@ module.exports = {
   flattenPlfEffectRows,
   flattenFuelPriceRows,
   normalizeApuUsage,
+  normalizeOtherMx,
   groupFuelConsumRows,
   groupFuelConsumIndexRows,
   groupPlfEffectRows,
   groupFuelPriceRows,
+  normalizeTransitMx,
+  hydrateSchMxEvents,
   computeFlightCostsBatch,
   computeFlightCosts,
 };

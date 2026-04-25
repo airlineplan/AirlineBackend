@@ -1,5 +1,7 @@
 const CostConfig = require("../model/costConfigSchema");
 const Flights = require("../model/flight");
+const Utilisation = require("../model/utilisation");
+const MaintenanceReserve = require("../model/maintenanceReserveSchema");
 const {
   normalizeCostConfig,
   computeFlightCostsBatch,
@@ -8,17 +10,64 @@ const {
   flattenPlfEffectRows,
   flattenFuelPriceRows,
   normalizeApuUsage,
+  normalizeOtherMx,
+  normalizeTransitMx,
+  hydrateSchMxEvents,
   groupFuelConsumRows,
   groupFuelConsumIndexRows,
   groupPlfEffectRows,
   groupFuelPriceRows,
 } = require("../utils/costLogic");
+const moment = require("moment");
+
+const buildExactDayDates = (schMxEvents = []) => {
+  const exactDates = new Map();
+  const toExactDay = (value) => {
+    const parsed = moment.utc(value);
+    return parsed.isValid() ? parsed.startOf("day").toDate() : null;
+  };
+
+  schMxEvents.forEach((row) => {
+    const eventDate = toExactDay(row?.date);
+    if (eventDate) exactDates.set(eventDate.toISOString(), eventDate);
+    const drawdownDate = toExactDay(row?.drawdownDate || row?.mrDrawdownDate);
+    if (drawdownDate) exactDates.set(drawdownDate.toISOString(), drawdownDate);
+  });
+
+  return Array.from(exactDates.values());
+};
+
+const hydrateSchMxEventsForUser = async (userId, schMxEvents = []) => {
+  if (!Array.isArray(schMxEvents) || schMxEvents.length === 0) {
+    return [];
+  }
+
+  const exactDayDates = buildExactDayDates(schMxEvents);
+  if (exactDayDates.length === 0) {
+    return hydrateSchMxEvents(schMxEvents);
+  }
+
+  const [utilisationRows, maintenanceReserveRows] = await Promise.all([
+    Utilisation.find({ userId, date: { $in: exactDayDates } }).lean(),
+    MaintenanceReserve.find({ userId, date: { $in: exactDayDates } }).lean(),
+  ]);
+
+  return hydrateSchMxEvents(schMxEvents, {
+    utilisationRows,
+    maintenanceReserveRows,
+  });
+};
 
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
   try {
     const userId = req.user.id;
     const configData = req.body;
+    const hydratedSchMxEvents = await hydrateSchMxEventsForUser(
+      userId,
+      Array.isArray(configData.schMxEvents) ? configData.schMxEvents : []
+    );
+
     const nextConfig = {
       ...configData,
       fuelConsum: flattenFuelConsumRows(configData.fuelConsum || []),
@@ -26,6 +75,9 @@ exports.saveCostConfig = async (req, res) => {
       plfEffect: flattenPlfEffectRows(configData.plfEffect || []),
       ccyFuel: flattenFuelPriceRows(configData.ccyFuel || []),
       apuUsage: normalizeApuUsage(configData.apuUsage || []),
+      otherMx: normalizeOtherMx(configData.otherMx || []),
+      transitMx: normalizeTransitMx(configData.transitMx || []),
+      schMxEvents: hydratedSchMxEvents,
     };
 
     const updatedConfig = await CostConfig.findOneAndUpdate(
@@ -59,6 +111,9 @@ exports.getCostConfig = async (req, res) => {
       config.plfEffect = groupPlfEffectRows(config.plfEffect || []);
       config.ccyFuel = groupFuelPriceRows(config.ccyFuel || []);
       config.apuUsage = normalizeApuUsage(config.apuUsage || []);
+      config.otherMx = normalizeOtherMx(config.otherMx || []);
+      config.transitMx = normalizeTransitMx(config.transitMx || []);
+      config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || []);
     }
     res.status(200).json({ success: true, data: config });
   } catch (error) {
