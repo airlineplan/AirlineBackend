@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
-const { normalizeCostConfig, computeFlightCosts } = require("../utils/costLogic");
+const { normalizeCostConfig, computeFlightCosts, computeFlightCostsBatch } = require("../utils/costLogic");
+const { __private__: apuFuelPrivate } = require("../controller/apuFuelController");
 
 test("normalizeCostConfig preserves maintenance UI fields for round-trip save/load", () => {
   const normalized = normalizeCostConfig({
@@ -230,8 +231,100 @@ test("other maintenance sums all matching rows and keeps monthly charges additiv
   assert.equal(enriched.otherMaintenance, 1310);
   assert.equal(enriched.otherMaintenance1, 1250);
   assert.equal(enriched.otherMaintenance2, 60);
+  assert.equal(enriched.otherMaintenance3, 1000);
   assert.equal(enriched.otherMxExpenses, 1000);
   assert.equal(enriched.otherMxExpensesCCY, "USD");
+});
+
+test("other mx monthly expenses follow the allocation-table basis within the aircraft-month group", () => {
+  const flights = [
+    {
+      date: "2026-04-05",
+      bh: 2,
+      fh: 1,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+    {
+      date: "2026-04-18",
+      bh: 3,
+      fh: 3,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+    {
+      date: "2026-04-20",
+      bh: 4,
+      fh: 6,
+      aircraft: {
+        registration: "VT-XYZ",
+      },
+    },
+    {
+      date: "2026-05-01",
+      bh: 2,
+      fh: 2,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+  ];
+
+  const baseConfig = {
+    reportingCurrency: "EUR",
+    otherMx: [
+      {
+        acftRegn: "VT-IJK",
+        costPerMonth: 1000,
+        ccy: "EUR",
+        fromDate: "2026-04-01",
+        toDate: "2026-04-30",
+      },
+    ],
+  };
+
+  const fhEnriched = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    costAllocation: [
+      {
+        label: "Other maintenance expences based on Variant/ACFT Regn/PN/SN performing the flight when such cost is on per Month basis",
+        basisOfAllocation: "FH",
+      },
+    ],
+  });
+  assert.equal(fhEnriched[0].otherMxExpenses, 250);
+  assert.equal(fhEnriched[1].otherMxExpenses, 750);
+
+  const bhEnriched = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    costAllocation: [
+      {
+        label: "Other maintenance expences based on Variant/ACFT Regn/PN/SN performing the flight when such cost is on per Month basis",
+        basisOfAllocation: "BH",
+      },
+    ],
+  });
+  assert.equal(bhEnriched[0].otherMxExpenses, 400);
+  assert.equal(bhEnriched[1].otherMxExpenses, 600);
+
+  const departuresEnriched = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    costAllocation: [
+      {
+        label: "Other maintenance expences based on Variant/ACFT Regn/PN/SN performing the flight when such cost is on per Month basis",
+        basisOfAllocation: "Departures",
+      },
+    ],
+  });
+  assert.equal(departuresEnriched[0].otherMxExpenses, 500);
+  assert.equal(departuresEnriched[1].otherMxExpenses, 500);
+
+  assert.equal(fhEnriched[0].otherMxExpensesCCY, "EUR");
+  assert.equal(fhEnriched[1].otherMxExpensesCCY, "EUR");
+  assert.equal(fhEnriched[2].otherMxExpenses, 0);
+  assert.equal(fhEnriched[3].otherMxExpenses, 0);
 });
 
 test("engine fuel consumption multiplies fuel consumption, fuel index, and the matched PLF band", () => {
@@ -333,4 +426,77 @@ test("engine fuel cost uses departure-station fuel price and month-specific per-
   assert.equal(enriched.engineFuelConsumption, 8275);
   assert.equal(enriched.engineFuelCost, 978820.33);
   assert.equal(enriched.engineFuelCostCCY, "INR");
+});
+
+test("navigation ENR prefers the converted amount for the flight master field", () => {
+  const flight = {
+    date: "2026-04-20",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    variant: "A320",
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    navEnr: [
+      {
+        sector: "DEL-BOM",
+        variant: "A320",
+        cost: 73000,
+        costRCCY: 23500,
+        ccy: "ENR",
+        fromDate: "2026-04-01",
+        toDate: "2026-04-30",
+      },
+    ],
+  });
+
+  assert.equal(enriched.navEnr, 23500);
+  assert.equal(enriched.navigation, 23500);
+  assert.equal(enriched.navigationCCY, "ENR");
+});
+
+test("generated APU fuel rows use arrival-based APU usage and departure-month fuel price", () => {
+  const row = apuFuelPrivate.buildGeneratedApuFuelRow(
+    {
+      _id: "flight-1",
+      date: "2026-04-16",
+      depStn: "CCU",
+      arrStn: "BOM",
+      variant: "A320",
+      aircraft: {
+        registration: "VT-ABC",
+      },
+    },
+    {
+      apuUsage: [
+        {
+          arrStn: "BOM",
+          variant: "A320",
+          acftRegn: "VT-ABC",
+          apuHours: 0.75,
+          consumptionPerApuHour: 255,
+        },
+      ],
+      ccyFuel: [
+        {
+          station: "CCU",
+          month: "04/26",
+          kgPerLtr: 0.78,
+          intoPlaneRate: 92500,
+          ccy: "INR",
+        },
+      ],
+    }
+  );
+
+  assert.equal(row.arrStn, "BOM");
+  assert.equal(row.acftRegn, "VT-ABC");
+  assert.equal(row.apuHr, 0.75);
+  assert.equal(row.consumptionKgPerApuHr, 255);
+  assert.equal(row.consumptionKg, 191.25);
+  assert.equal(row.costPerLtr, 92.5);
+  assert.equal(row.consumptionLitres, 191.25 / 0.78);
+  assert.ok(Math.abs(row.totalFuelCost - 22680.28846153846) < 1e-9);
 });

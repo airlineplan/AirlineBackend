@@ -33,6 +33,7 @@ const maintenanceController = require("../controller/maintenanceController");
 const assignmentController = require("../controller/assignmentController");
 const fleetController = require("../controller/fleetController");
 const costController = require("../controller/costController");
+const apuFuelController = require("../controller/apuFuelController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -97,6 +98,10 @@ user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
 user.get("/cost-config", verifyToken, costController.getCostConfig);
 user.post("/cost-config", verifyToken, jsonParser, costController.saveCostConfig);
 user.post("/cost-page-data", verifyToken, jsonParser, costController.getCostPageData);
+
+user.get("/apu-fuel-costs", verifyToken, apuFuelController.getApuFuelCosts);
+user.post("/apu-fuel-costs", verifyToken, jsonParser, apuFuelController.bulkSaveApuFuelCosts);
+user.post("/apu-fuel-costs/rebuild", verifyToken, jsonParser, apuFuelController.rebuildApuFuelCosts);
 
 // Add this alongside your existing routes
 user.get("/maintenance-dashboard", verifyToken, maintenanceController.getMaintenanceDashboard);

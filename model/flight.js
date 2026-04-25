@@ -87,9 +87,9 @@ const flightSchema = new mongoose.Schema(
     rotableChanges: costField,
     rotableChangesCCY: costCurrencyField,
     rotableChangesRCCY: costField,
-    otherMaintenance1: costField,
-    otherMaintenance2: costField,
-    otherMaintenance3: costField,
+    otherMaintenance1: costField, // Cost-per-BH subtotal for the flight
+    otherMaintenance2: costField, // Cost-per-departure subtotal for the flight
+    otherMaintenance3: costField, // Cost-per-month subtotal for the flight
     navEnr: costField,
     navTrml: costField,
     aptLandingCost: costField,

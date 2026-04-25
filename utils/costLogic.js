@@ -124,11 +124,32 @@ const normalizeMetric = (value) => {
   return raw;
 };
 
+const normalizeCostCodeId = (value) => normalize(value).replace(/[^A-Z0-9]/g, "");
+
+const inferAllocationCostCode = (row = {}) => {
+  const explicit = normalizeCostCodeId(pick(row, ["costCode", "cost"]));
+  if (explicit) return explicit;
+
+  const label = normalize(pick(row, ["label", "basisOfAllocation", "description"]));
+  if (!label) return "";
+  if (label.includes("APU") && label.includes("FUEL")) return "APUFUELCOST";
+  if (label.includes("MAINTENANCE RESERVE")) return "MRMONTHLY";
+  if (label.includes("OTHER MAINTENANCE") || label.includes("OTHER MX")) return "OTHERMXEXPENSES";
+  if (label.includes("ROTABLE")) return "ROTABLECHANGES";
+  if (label.includes("SCHEDULE") && label.includes("MX")) return "QUALIFYINGSCHMXEVENTS";
+  return normalizeCostCodeId(label);
+};
+
 const getFlightDate = (flight) => parseDate(flight?.date);
 const getFlightMonthKey = (flight) => normalizeMonthKey(flight?.date);
 const getFlightRegistration = (flight) => normalize(flight?.aircraft?.registration || flight?.acftRegn || flight?.registration);
 const getFlightMsn = (flight) => normalize(flight?.aircraft?.msn ?? flight?.msn);
 const getFlightVariant = (flight) => normalize(flight?.variant);
+const getFlightAircraftKey = (flight) => (
+  getFlightRegistration(flight) ||
+  getFlightMsn(flight) ||
+  getFlightVariant(flight)
+);
 const getFlightPartNumber = (flight) => normalize(flight?.acftType || flight?.variant);
 const getFlightSector = (flight) => normalize(flight?.sector);
 const getFlightDep = (flight) => normalize(flight?.depStn);
@@ -153,6 +174,11 @@ const getFlightLoadFactor = (flight) => {
   if (seats > 0 && pax >= 0) return round2((pax / seats) * 100);
 
   return 0;
+};
+
+const getConvertedRuleAmount = (rule) => {
+  if (!rule) return 0;
+  return toNumber(rule.costRCCY) > 0 ? toNumber(rule.costRCCY) : toNumber(rule.cost || 0);
 };
 
 const scoreTransitRule = (row) => (
@@ -1064,7 +1090,7 @@ const normalizeRotableChanges = (rows = []) => rows.map((row) => ({
 })).filter((row) => row.acftRegn || row.date || row.month);
 
 const normalizeAllocationTable = (rows = []) => rows.map((row) => ({
-  costCode: normalize(pick(row, ["costCode", "cost", "label"])),
+  costCode: inferAllocationCostCode(row),
   basis: normalizeMetric(pick(row, ["basis", "basisOfAllocation"])),
   scope: normalize(pick(row, ["scope"])),
 })).filter((row) => row.costCode || row.basis);
@@ -1123,7 +1149,7 @@ const getDefaultAllocationBasis = (costCode) => {
 };
 
 const getAllocationBasis = (config, costCode) => {
-  const match = (config.allocationTable || []).find((row) => row.costCode === normalize(costCode));
+  const match = (config.allocationTable || []).find((row) => row.costCode === normalizeCostCodeId(costCode));
   return match?.basis || getDefaultAllocationBasis(normalize(costCode));
 };
 
@@ -1233,6 +1259,37 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
       : round2((amount * safeWeights[index]) / safeTotal);
     allocated = round2(allocated + share);
     addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy);
+  });
+};
+
+const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy) => {
+  const amount = round2(totalAmount);
+  if (!eligibleFlights.length || amount === 0) return;
+
+  const groupedFlights = new Map();
+  eligibleFlights.forEach((flight) => {
+    const monthKey = getFlightMonthKey(flight);
+    const aircraftKey = getFlightAircraftKey(flight);
+    if (!monthKey || !aircraftKey) return;
+    const groupKey = `${aircraftKey}|${monthKey}`;
+    if (!groupedFlights.has(groupKey)) groupedFlights.set(groupKey, []);
+    groupedFlights.get(groupKey).push(flight);
+  });
+
+  groupedFlights.forEach((flightsInGroup) => {
+    const weights = flightsInGroup.map((flight) => Math.max(getBasisValue(flight, basis), 0));
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    const safeWeights = totalWeight > 0 ? weights : flightsInGroup.map(() => 1);
+    const safeTotal = safeWeights.reduce((sum, value) => sum + value, 0);
+
+    let allocated = 0;
+    flightsInGroup.forEach((flight, index) => {
+      const share = index === flightsInGroup.length - 1
+        ? round2(amount - allocated)
+        : round2((amount * safeWeights[index]) / safeTotal);
+      allocated = round2(allocated + share);
+      addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy);
+    });
   });
 };
 
@@ -1390,16 +1447,26 @@ const enrichDirectCosts = (flights, config) => {
 
     const matchingOtherMxRows = (config.otherMx || []).filter((row) => (
       matchesOtherMxRow(row, { flightDate, depStn, variant, acftReg, pn, msn }) &&
-      (row.costPerBh || row.costPerDeparture)
+      (row.costPerBh || row.costPerDeparture || row.costPerMonth)
     ));
     if (matchingOtherMxRows.length > 0) {
-      const perBhTotal = matchingOtherMxRows.reduce((sum, row) => sum + (row.costPerBh * bh), 0);
-      const perDepTotal = matchingOtherMxRows.reduce((sum, row) => sum + (row.costPerDeparture * departures), 0);
+      const perBhTotal = matchingOtherMxRows.reduce(
+        (sum, row) => sum + ((row.costPerBh || 0) * bh),
+        0
+      );
+      const perDepTotal = matchingOtherMxRows.reduce(
+        (sum, row) => sum + ((row.costPerDeparture || 0) * departures),
+        0
+      );
+      const perMonthTotal = matchingOtherMxRows.reduce(
+        (sum, row) => sum + (row.costPerMonth || 0),
+        0
+      );
       const ccy = matchingOtherMxRows.find((row) => row.ccy)?.ccy || "";
       const costRCCY = matchingOtherMxRows.find((row) => row.costRCCY)?.costRCCY || 0;
       flight.otherMaintenance1 = round2(perBhTotal);
       flight.otherMaintenance2 = round2(perDepTotal);
-      flight.otherMaintenance3 = 0;
+      flight.otherMaintenance3 = round2(perMonthTotal);
       applyCostField(
         flight,
         "otherMaintenance",
@@ -1424,7 +1491,7 @@ const enrichDirectCosts = (flights, config) => {
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
       return scoreSpecificity([row.arrStn, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
-    flight.navEnr = round2(enrRule?.cost || 0);
+    flight.navEnr = round2(getConvertedRuleAmount(enrRule));
     flight.navTrml = round2(termRule?.cost || 0);
     applyCostField(
       flight,
@@ -1606,7 +1673,7 @@ const enrichAllocatedCosts = (flights, config) => {
         msn: getFlightMsn(flight),
       });
     });
-    distributePool(
+    distributeMonthlyPoolByBasis(
       eligibleFlights,
       "otherMxExpenses",
       row.costPerMonth,
