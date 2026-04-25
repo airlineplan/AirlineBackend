@@ -457,6 +457,57 @@ test("navigation ENR prefers the converted amount for the flight master field", 
   assert.equal(enriched.navigationCCY, "ENR");
 });
 
+test("APU fuel allocation follows the configured basis", () => {
+  const flights = [
+    {
+      date: "2026-04-20",
+      flight: "F1001",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      bh: 2,
+      fh: 3,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+    {
+      date: "2026-04-20",
+      flight: "F1002",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      bh: 1,
+      fh: 5,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+  ];
+
+  const enriched = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    allocationTable: [
+      { costCode: "APUFUELCOST", basis: "BH" },
+    ],
+    apuUsage: [
+      {
+        arrStn: "BOM",
+        variant: "737",
+        acftRegn: "VT-IJK",
+        apuHours: 1,
+        consumptionPerApuHour: 300,
+        ccy: "INR",
+      },
+    ],
+  });
+
+  assert.equal(enriched[0].apuFuelCost, 200);
+  assert.equal(enriched[1].apuFuelCost, 100);
+  assert.equal(enriched[0].apuFuelCostCCY, "INR");
+  assert.equal(enriched[1].apuFuelCostCCY, "INR");
+});
+
 test("generated APU fuel rows use arrival-based APU usage and departure-month fuel price", () => {
   const row = apuFuelPrivate.buildGeneratedApuFuelRow(
     {

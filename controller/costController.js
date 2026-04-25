@@ -9,6 +9,7 @@ const {
   flattenFuelConsumIndexRows,
   flattenPlfEffectRows,
   flattenFuelPriceRows,
+  normalizeAllocationTable,
   normalizeApuUsage,
   normalizeOtherMx,
   normalizeTransitMx,
@@ -70,6 +71,7 @@ exports.saveCostConfig = async (req, res) => {
 
     const nextConfig = {
       ...configData,
+      allocationTable: normalizeAllocationTable(configData.allocationTable || configData.costAllocation || []),
       fuelConsum: flattenFuelConsumRows(configData.fuelConsum || []),
       fuelConsumIndex: flattenFuelConsumIndexRows(configData.fuelConsumIndex || []),
       plfEffect: flattenPlfEffectRows(configData.plfEffect || []),
@@ -101,6 +103,7 @@ exports.getCostConfig = async (req, res) => {
     if (!config) {
       // Return empty sets if not found
       config = {
+        allocationTable: [],
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
         leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], otherDoc: []
@@ -110,6 +113,7 @@ exports.getCostConfig = async (req, res) => {
       config.fuelConsumIndex = groupFuelConsumIndexRows(config.fuelConsumIndex || []);
       config.plfEffect = groupPlfEffectRows(config.plfEffect || []);
       config.ccyFuel = groupFuelPriceRows(config.ccyFuel || []);
+      config.allocationTable = normalizeAllocationTable(config.allocationTable || config.costAllocation || []);
       config.apuUsage = normalizeApuUsage(config.apuUsage || []);
       config.otherMx = normalizeOtherMx(config.otherMx || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);

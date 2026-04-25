@@ -6,6 +6,7 @@ const CostConfigSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
+  allocationTable: { type: Array, default: [] },
   fuelConsum: { type: Array, default: [] },
   fuelConsumIndex: { type: Array, default: [] },
   apuUsage: { type: Array, default: [] },

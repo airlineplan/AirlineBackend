@@ -1782,6 +1782,7 @@ const computeFlightCosts = (flight, rawConfig = {}) => computeFlightCostsBatch([
 
 module.exports = {
   normalizeCostConfig,
+  normalizeAllocationTable,
   flattenFuelConsumRows,
   flattenFuelConsumIndexRows,
   flattenPlfEffectRows,
