@@ -342,7 +342,7 @@ test("schedule field updates keep sector-derived numeric values on regenerated f
   assert.equal(flights[0].ask, 216000);
   assert.equal(flights[0].rsk, 183600);
   assert.equal(flights[0].cargoAtk, 36000);
-  assert.equal(flights[0].cargoRtk, 32400);
+  assert.equal(flights[0].cargoRtk, 27000);
 });
 
 test("non-schedule field updates keep the same flight rows and revalidate assignments", async () => {

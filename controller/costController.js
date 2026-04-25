@@ -29,7 +29,7 @@ exports.getCostConfig = async (req, res) => {
     if (!config) {
       // Return empty sets if not found
       config = {
-        fuelConsum: [], apuUsage: [], plfEffect: [], ccyFuel: [],
+        fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
         leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], otherDoc: []
       };

@@ -76,7 +76,8 @@ const assignmentSchema = new mongoose.Schema(
                 "GROUND_DAY_CONFLICT",
                 "VARIANT_MISMATCH",
                 "ACFT_ASSIGNMENT_OVERLAP",
-                "MANUAL_REMOVAL"
+                "MANUAL_REMOVAL",
+                null
             ],
             default: null
         }

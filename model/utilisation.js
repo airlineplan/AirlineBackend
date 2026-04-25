@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const utilisationSchema = new mongoose.Schema(
     {
+        userId: {
+            type: String,
+            required: true,
+            index: true
+        },
         date: {
             type: Date,
             required: true,
