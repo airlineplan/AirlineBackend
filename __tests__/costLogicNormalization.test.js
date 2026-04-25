@@ -600,6 +600,62 @@ test("navigation ENR prefers the converted amount for the flight master field", 
   assert.equal(enriched.navigationCCY, "ENR");
 });
 
+test("navigation costs use the aircraft MTOW tier from fleet data", () => {
+  const flight = {
+    date: "2026-04-20",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    variant: "A320",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    fleet: [
+      {
+        regn: "VT-ABC",
+        sn: "5825",
+        mtow: 77000,
+        entry: "2026-03-10",
+        exit: "2026-06-15",
+      },
+    ],
+    navEnr: [
+      {
+        sector: "DEL-BOM",
+        variant: "A320",
+        ccy: "INR",
+        month: "04/26",
+        "73000": 23500,
+        "77000": 24150,
+        "78000": 24225,
+        "79000": 24300,
+      },
+    ],
+    navTerm: [
+      {
+        arrStn: "BOM",
+        variant: "A320",
+        ccy: "USD",
+        month: "04/26",
+        "73000": 86.02,
+        "77000": 86.02,
+        "78000": 86.02,
+        "79000": 86.02,
+      },
+    ],
+  });
+
+  assert.equal(enriched.navEnr, 24150);
+  assert.equal(enriched.navTrml, 86.02);
+  assert.equal(enriched.navigation, 24236.02);
+  assert.equal(enriched.navigationCCY, "INR");
+});
+
 test("APU fuel allocation follows the configured basis", () => {
   const flights = [
     {

@@ -1,7 +1,9 @@
 const AircraftOnwing = require("../model/aircraftOnwing");
+const Fleet = require("../model/fleet");
 const MaintenanceReserve = require("../model/maintenanceReserveSchema");
 const {
   normalizeAircraftOnwing,
+  normalizeFleetRows,
   normalizeMaintenanceReserveSchedule,
 } = require("./costLogic");
 
@@ -35,15 +37,20 @@ const buildMaintenanceReserveContext = async (userId, flights = []) => {
   if (!latestFlightDate) {
     return {
       aircraftOnwing: [],
+      fleet: [],
       maintenanceReserveSchedule: [],
     };
   }
 
   const reserveUpperBound = getReserveUpperBound(latestFlightDate);
-  const [aircraftOnwingRows, maintenanceReserveRows] = await Promise.all([
+  const [aircraftOnwingRows, fleetRows, maintenanceReserveRows] = await Promise.all([
     AircraftOnwing.find({ userId, date: { $lte: latestFlightDate } })
       .select("date msn pos1Esn pos2Esn apun")
       .sort({ date: 1, msn: 1, _id: 1 })
+      .lean(),
+    Fleet.find({ userId })
+      .select("regn sn mtow entry exit variant category")
+      .sort({ entry: 1, exit: 1, _id: 1 })
       .lean(),
     MaintenanceReserve.find({ userId, date: { $lte: reserveUpperBound } })
       .select("date msn mrAccId acftReg rate contribution ccy driver driverVal")
@@ -53,6 +60,7 @@ const buildMaintenanceReserveContext = async (userId, flights = []) => {
 
   return {
     aircraftOnwing: normalizeAircraftOnwing(aircraftOnwingRows),
+    fleet: normalizeFleetRows(fleetRows),
     maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(maintenanceReserveRows),
   };
 };

@@ -126,6 +126,8 @@ const normalizeMetric = (value) => {
 
 const normalizeCostCodeId = (value) => normalize(value).replace(/[^A-Z0-9]/g, "");
 
+const NAV_MTOW_TIERS = [73000, 77000, 78000, 79000];
+
 const inferAllocationCostCode = (row = {}) => {
   const explicit = normalizeCostCodeId(pick(row, ["costCode", "cost"]));
   if (explicit) return explicit;
@@ -159,6 +161,34 @@ const getFlightSector = (flight) => normalize(flight?.sector);
 const getFlightDep = (flight) => normalize(flight?.depStn);
 const getFlightArr = (flight) => normalize(flight?.arrStn);
 const getFlightDomIntl = (flight) => normalize(flight?.domIntl);
+const getFlightMtow = (flight, fleetRows = []) => {
+  const flightDate = getFlightDate(flight);
+  const regn = getFlightRegistration(flight);
+  const msn = getFlightMsn(flight);
+  if (!flightDate || (!regn && !msn)) return 0;
+
+  const candidates = (Array.isArray(fleetRows) ? fleetRows : []).filter((row) => {
+    const rowRegn = normalize(row?.regn);
+    const rowSn = normalize(row?.sn);
+    if (regn && rowRegn && rowRegn === regn) return true;
+    if (!regn && msn && rowSn && rowSn === msn) return true;
+    return false;
+  }).filter((row) => {
+    const entry = parseDate(row?.entry);
+    const exit = parseDate(row?.exit);
+    if (entry && flightDate < entry) return false;
+    if (exit && flightDate > exit) return false;
+    return true;
+  });
+
+  const best = candidates.sort((a, b) => {
+    const aEntry = parseDate(a?.entry)?.getTime() || 0;
+    const bEntry = parseDate(b?.entry)?.getTime() || 0;
+    return bEntry - aEntry;
+  })[0];
+
+  return toNumber(best?.mtow);
+};
 const getFlightLoadFactor = (flight) => {
   const explicit =
     flight?.paxLF ??
@@ -1130,6 +1160,36 @@ const normalizeStationCost = (rows = [], stationKey) => {
   return normalized.filter((row) => row[stationKey] || row.cost);
 };
 
+const normalizeNavigationCost = (rows = [], stationKey) => rows.map((row) => {
+  const tierRates = {};
+  NAV_MTOW_TIERS.forEach((tier) => {
+    const value = pick(row, [String(tier), `mtow${tier}`, `mtow_${tier}`, `tier${tier}`]);
+    if (value !== "") tierRates[tier] = round2(value);
+  });
+
+  return {
+    ...row,
+    [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn", "sector"])),
+    variant: normalize(pick(row, ["variant", "var"])),
+    month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
+    cost: round2(pick(row, ["cost", "value"])),
+    ccy: normalize(pick(row, ["ccy", "currency"])),
+    costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+    tierRates,
+  };
+}).filter((row) => row[stationKey] || row.cost || Object.keys(row.tierRates || {}).length > 0);
+
+const normalizeFleetRows = (rows = []) => rows.map((row) => ({
+  ...row,
+  regn: normalize(pick(row, ["regn", "registration"])),
+  sn: normalize(pick(row, ["sn"])),
+  mtow: toNumber(pick(row, ["mtow"])),
+  entry: pick(row, ["entry"]),
+  exit: pick(row, ["exit"]),
+  variant: normalize(pick(row, ["variant"])),
+  category: normalize(pick(row, ["category"])),
+})).filter((row) => row.regn || row.sn || row.mtow);
+
 const normalizeOtherDoc = (rows = []) => rows.map((row) => ({
   label: pick(row, ["label", "lbl"]),
   sector: normalize(pick(row, ["sector", "sec"])),
@@ -1184,8 +1244,8 @@ const normalizeCostConfig = (config = {}) => ({
   transitMx: normalizeTransitMx(config.transitMx || []),
   otherMx: normalizeOtherMx(config.otherMx || []),
   rotableChanges: normalizeRotableChanges(config.rotableChanges || []),
-  navEnr: normalizeStationCost(config.navEnr || [], "sector"),
-  navTerm: normalizeStationCost(config.navTerm || [], "arrStn"),
+  navEnr: normalizeNavigationCost(config.navEnr || [], "sector"),
+  navTerm: normalizeNavigationCost(config.navTerm || [], "arrStn"),
   airportLanding: normalizeStationCost(config.airportLanding || [], "arrStn"),
   airportAvsec: normalizeStationCost(config.airportAvsec || [], "arrStn"),
   airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
@@ -1193,6 +1253,7 @@ const normalizeCostConfig = (config = {}) => ({
   otherDoc: normalizeOtherDoc(config.otherDoc || []),
   aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
   maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
+  fleet: normalizeFleetRows(config.fleet || []),
 });
 
 const getBasisValue = (flight, basis) => {
@@ -1381,6 +1442,20 @@ const resolveMaintenanceReserveMonthlyContribution = (flight, config = {}) => {
   }, 0);
 };
 
+const getNavigationTieredCost = (row, mtow) => {
+  const tierValue = toNumber(mtow);
+  if (!row) return 0;
+
+  const converted = toNumber(row.costRCCY);
+  if (converted > 0) return round2(converted);
+
+  if (tierValue > 0 && row.tierRates && row.tierRates[tierValue] !== undefined) {
+    return round2(row.tierRates[tierValue]);
+  }
+
+  return round2(row.cost || 0);
+};
+
 const pickBest = (rows, scorer) => {
   let best = null;
   let bestScore = -1;
@@ -1560,6 +1635,7 @@ const enrichDirectCosts = (flights, config) => {
     const domIntl = getFlightDomIntl(flight);
     const bh = toNumber(flight.bh);
     const fh = toNumber(flight.fh);
+    const mtow = getFlightMtow(flight, config.fleet);
     const departures = 1;
 
     const fuelRule = pickBest(config.fuelConsum, (row) => {
@@ -1702,8 +1778,8 @@ const enrichDirectCosts = (flights, config) => {
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
       return scoreSpecificity([row.arrStn, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
-    flight.navEnr = round2(getConvertedRuleAmount(enrRule));
-    flight.navTrml = round2(termRule?.cost || 0);
+    flight.navEnr = round2(getNavigationTieredCost(enrRule, mtow));
+    flight.navTrml = round2(getNavigationTieredCost(termRule, mtow));
     applyCostField(
       flight,
       "navigation",
