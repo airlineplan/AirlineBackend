@@ -19,6 +19,7 @@ const {
   groupPlfEffectRows,
   groupFuelPriceRows,
 } = require("../utils/costLogic");
+const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const moment = require("moment");
 
 const buildExactDayDates = (schMxEvents = []) => {
@@ -156,9 +157,10 @@ exports.getCostPageData = async (req, res) => {
 
     // 3. Fetch Cost Config 
     const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId }).lean() || {});
+    const mrContext = await buildMaintenanceReserveContext(userId, flights);
 
     // 4. Compute Costs
-    const enrichedFlights = computeFlightCostsBatch(flights, costConfig);
+    const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext });
 
     res.status(200).json({ flights: enrichedFlights });
 

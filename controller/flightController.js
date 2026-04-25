@@ -25,6 +25,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 
 const createConnections = require('../helper/createConnections');
 
@@ -162,9 +163,10 @@ const searchFlights = async (req, res) => {
     // Fetch flights
     const data = await Flights.find(query).skip(skip).limit(limitNum);
     const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId: req.user.id }).lean() || {});
+    const mrContext = await buildMaintenanceReserveContext(req.user.id, data);
     const enrichedData = computeFlightCostsBatch(
       data.map((flgt) => flgt.toObject()),
-      costConfig
+      { ...costConfig, ...mrContext }
     );
 
     // Get total count

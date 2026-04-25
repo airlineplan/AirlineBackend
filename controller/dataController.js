@@ -25,6 +25,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
 const createConnections = require('../helper/createConnections');
@@ -424,7 +425,8 @@ const downloadExpenses = async (req, res) => {
 
     let count = 1;
     const products = await Flights.find({ userId }).lean();
-    const enrichedProducts = computeFlightCostsBatch(products, costConfig);
+    const mrContext = await buildMaintenanceReserveContext(userId, products);
+    const enrichedProducts = computeFlightCostsBatch(products, { ...costConfig, ...mrContext });
 
     for (const excelProduct of enrichedProducts) {
       const row = {

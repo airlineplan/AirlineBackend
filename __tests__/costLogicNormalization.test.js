@@ -327,6 +327,58 @@ test("other mx monthly expenses follow the allocation-table basis within the air
   assert.equal(fhEnriched[3].otherMxExpenses, 0);
 });
 
+test("maintenance reserve contribution uses flight FH and the matched engine SN schedule rate", () => {
+  const flight = {
+    date: "2026-04-15",
+    fh: 12,
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+    acftType: "A320",
+    variant: "A320",
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "USD",
+    leasedReserve: [
+      {
+        mrAccId: "1",
+        acftRegn: "VT-ABC",
+        pn: "A320",
+        sn: "740811",
+        setRate: 61.2733333333,
+        ccy: "USD",
+        driver: "FH",
+        asOnDate: "2026-04-01",
+        endDate: "2026-12-31",
+      },
+    ],
+    aircraftOnwing: [
+      {
+        date: "2026-04-01",
+        msn: "5825",
+        pos1Esn: "740811",
+        pos2Esn: "740812",
+        apun: "990001",
+      },
+    ],
+    maintenanceReserveSchedule: [
+      {
+        date: "2026-05-01",
+        msn: "740811",
+        mrAccId: "1",
+        rate: 61.2733333333,
+        ccy: "USD",
+      },
+    ],
+  });
+
+  assert.equal(enriched.maintenanceReserveContribution, 735.28);
+  assert.equal(enriched.maintenanceReserveContributionCCY, "USD");
+  assert.equal(enriched.mrContribution, 735.28);
+});
+
 test("engine fuel consumption multiplies fuel consumption, fuel index, and the matched PLF band", () => {
   const flight = {
     date: "2026-04-16",
