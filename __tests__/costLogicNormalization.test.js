@@ -500,3 +500,183 @@ test("generated APU fuel rows use arrival-based APU usage and departure-month fu
   assert.equal(row.consumptionLitres, 191.25 / 0.78);
   assert.ok(Math.abs(row.totalFuelCost - 22680.28846153846) < 1e-9);
 });
+
+test("generated APU fuel rows keep arrStn blank for additional-use usage rows", () => {
+  const row = apuFuelPrivate.buildGeneratedApuFuelRow(
+    {
+      _id: "flight-2",
+      date: "2026-04-20",
+      depStn: "CCU",
+      arrStn: "BOM",
+      variant: "737",
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+    {
+      apuUsage: [
+        {
+          arrStn: "",
+          variant: "737",
+          acftRegn: "VT-IJK",
+          apuHours: 1.5,
+          consumptionPerApuHour: 280,
+          addlnUse: "Y",
+          fromDate: "2026-04-20",
+          toDate: "2026-04-20",
+        },
+      ],
+      ccyFuel: [
+        {
+          station: "CCU",
+          month: "04/26",
+          kgPerLtr: 0.78,
+          intoPlaneRate: 94000,
+          ccy: "INR",
+        },
+      ],
+    },
+    [
+      {
+        _id: "flight-1",
+        date: "2026-04-20",
+        flight: "F1001",
+        depStn: "DEL",
+        arrStn: "BOM",
+        variant: "737",
+        aircraft: {
+          registration: "VT-IJK",
+        },
+      },
+      {
+        _id: "flight-2",
+        date: "2026-04-20",
+        flight: "F1002",
+        depStn: "CCU",
+        arrStn: "BOM",
+        variant: "737",
+        aircraft: {
+          registration: "VT-IJK",
+        },
+      },
+    ]
+  );
+
+  assert.equal(row.arrStn, "");
+  assert.equal(row.acftRegn, "VT-IJK");
+  assert.equal(row.apuHr, 1.5);
+  assert.equal(row.consumptionKgPerApuHr, 280);
+  assert.equal(row.consumptionKg, 420);
+  assert.equal(row.costPerLtr, 94);
+  assert.equal(row.costSourceType, "LAST_DEP_STN_RCCY");
+  assert.equal(row.costSourceStation, "CCU");
+  assert.equal(row.sourceFlightId, "flight-2");
+  assert.equal(row.consumptionLitres, 420 / 0.78);
+  assert.ok(Math.abs(row.totalFuelCost - 50615.38461538462) < 1e-9);
+});
+
+test("apu fuel allocation for additional-use rows uses the latest performed flight departure station", () => {
+  const flights = [
+    {
+      date: "2026-04-20",
+      flight: "F1001",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      acftType: "737",
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+    {
+      date: "2026-04-20",
+      flight: "F1002",
+      depStn: "CCU",
+      arrStn: "BOM",
+      variant: "737",
+      acftType: "737",
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    },
+  ];
+
+  const enriched = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    apuUsage: [
+      {
+        arrStn: "",
+        variant: "737",
+        acftRegn: "VT-IJK",
+        apuHours: 1.5,
+        consumptionPerApuHour: 280,
+        addlnUse: "Y",
+        fromDate: "2026-04-20",
+        toDate: "2026-04-20",
+      },
+    ],
+    ccyFuel: [
+      {
+        station: "DEL",
+        month: "04/26",
+        kgPerLtr: 0.78,
+        intoPlaneRate: 93000,
+        ccy: "INR",
+      },
+      {
+        station: "CCU",
+        month: "04/26",
+        kgPerLtr: 0.78,
+        intoPlaneRate: 94000,
+        ccy: "INR",
+      },
+    ],
+  });
+
+  assert.equal(enriched[0].apuFuelCost, 25307.69);
+  assert.equal(enriched[1].apuFuelCost, 25307.69);
+  assert.equal(enriched[0].apuFuelCostCCY, "INR");
+  assert.equal(enriched[1].apuFuelCostCCY, "INR");
+  assert.equal(enriched[0].apuFuelCost + enriched[1].apuFuelCost, 50615.38);
+});
+
+test("apu fuel allocation applies additional-use rows without an arrival station", () => {
+  const flight = {
+    date: "2026-04-20",
+    depStn: "CCU",
+    arrStn: "BOM",
+    variant: "737",
+    acftType: "737",
+    aircraft: {
+      registration: "VT-IJK",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    apuUsage: [
+      {
+        arrStn: "",
+        variant: "737",
+        acftRegn: "VT-IJK",
+        apuHours: 1.5,
+        consumptionPerApuHour: 280,
+        addlnUse: "Y",
+        fromDate: "2026-04-20",
+        toDate: "2026-04-20",
+      },
+    ],
+    ccyFuel: [
+      {
+        station: "CCU",
+        month: "04/26",
+        kgPerLtr: 0.78,
+        intoPlaneRate: 93000,
+        ccy: "INR",
+      },
+    ],
+  });
+
+  assert.equal(enriched.apuFuelCost, 50076.92);
+  assert.equal(enriched.apuFuelCostCCY, "INR");
+});

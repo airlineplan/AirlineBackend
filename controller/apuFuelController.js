@@ -3,7 +3,10 @@ const moment = require("moment");
 const ApuFuelConsumptionCost = require("../model/apuFuelConsumptionCostSchema");
 const Flights = require("../model/flight");
 const CostConfig = require("../model/costConfigSchema");
-const { normalizeCostConfig } = require("../utils/costLogic");
+const {
+  normalizeCostConfig,
+  getApuFuelPriceSourceFlight,
+} = require("../utils/costLogic");
 
 const toNumber = (value) => {
   if (value === null || value === undefined || value === "") return 0;
@@ -37,6 +40,7 @@ const getFlightRegistration = (flight) => trimString(flight?.aircraft?.registrat
 const getFlightArrStn = (flight) => normalizeValue(flight?.arrStn);
 const getFlightDepStn = (flight) => normalizeValue(flight?.depStn);
 const getFlightVariant = (flight) => normalizeValue(flight?.variant || flight?.acftType);
+const isAdditionalApuUseRow = (row = {}) => normalizeValue(row.addlnUse) === "Y";
 
 const scoreApuUsageRow = (row, flight) => {
   if (!isWithinRange(flight.date, row.fromDate, row.toDate)) return -1;
@@ -81,12 +85,18 @@ const roundToTwo = (value) => {
   return Number.isFinite(num) ? Math.round(num * 100) / 100 : 0;
 };
 
-const buildGeneratedApuFuelRow = (flight, costConfig) => {
+const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   const flightDate = flight?.date ? new Date(flight.date) : null;
   if (!flightDate || Number.isNaN(flightDate.getTime())) return null;
 
   const apuUsage = pickBest(costConfig.apuUsage || [], (row) => scoreApuUsageRow(row, flight));
-  const fuelPrice = pickBest(costConfig.ccyFuel || [], (row) => scoreFuelPriceRow(row, getMonthKey(flightDate), getFlightDepStn(flight)));
+  const priceSourceFlight = getApuFuelPriceSourceFlight(flight, flights, apuUsage || {});
+  const fuelPrice = pickBest(costConfig.ccyFuel || [], (row) => scoreFuelPriceRow(
+    row,
+    getMonthKey(priceSourceFlight?.date || flightDate),
+    getFlightDepStn(priceSourceFlight || flight)
+  ));
+  const additionalUse = isAdditionalApuUseRow(apuUsage);
 
   const apuHr = apuUsage ? Number(apuUsage.apuHours || 0) : 0;
   const consumptionKgPerApuHr = apuUsage ? Number(apuUsage.consumptionPerApuHour || 0) : 0;
@@ -101,7 +111,7 @@ const buildGeneratedApuFuelRow = (flight, costConfig) => {
   return {
     rowKey: String(flight._id || `${flight.flight || ""}-${flightDate.toISOString()}`),
     date: flightDate,
-    arrStn: trimString(flight?.arrStn || ""),
+    arrStn: additionalUse ? "" : trimString(flight?.arrStn || ""),
     acftRegn: getFlightRegistration(flight),
     apun: trimString(flight?.apun || flight?.aircraft?.apun || ""),
     apuHr: roundToTwo(apuHr),
@@ -111,9 +121,11 @@ const buildGeneratedApuFuelRow = (flight, costConfig) => {
     costPerLtr,
     totalFuelCost,
     currency: trimString(fuelPrice?.ccy || apuUsage?.ccy || ""),
-    costSourceType: fuelPrice ? "DEP_STN_MONTH" : "UNMATCHED",
-    costSourceStation: trimString(flight?.depStn || ""),
-    sourceFlightId: String(flight._id || ""),
+    costSourceType: additionalUse
+      ? "LAST_DEP_STN_RCCY"
+      : (fuelPrice ? "DEP_STN_MONTH" : "UNMATCHED"),
+    costSourceStation: trimString(getFlightDepStn(priceSourceFlight || flight) || flight?.depStn || ""),
+    sourceFlightId: String((priceSourceFlight || flight)?._id || flight._id || ""),
     remarks: hasMatch ? "" : "No matching APU usage or fuel price row found",
     monthKey: getMonthKey(flightDate),
   };
@@ -121,7 +133,7 @@ const buildGeneratedApuFuelRow = (flight, costConfig) => {
 
 const buildGeneratedApuFuelRows = (flights = [], costConfig = {}) => {
   return flights
-    .map((flight) => buildGeneratedApuFuelRow(flight, costConfig))
+    .map((flight) => buildGeneratedApuFuelRow(flight, costConfig, flights))
     .filter(Boolean);
 };
 

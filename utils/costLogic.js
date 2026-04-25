@@ -176,6 +176,54 @@ const getFlightLoadFactor = (flight) => {
   return 0;
 };
 
+const getLatestFlightForAircraft = (flights = [], aircraftFlight, {
+  requireBeforeOrOnDate = false,
+} = {}) => {
+  const aircraftKey = getFlightRegistration(aircraftFlight);
+  if (!aircraftKey) return null;
+
+  const currentDate = getFlightDate(aircraftFlight);
+  let latest = null;
+
+  flights.forEach((candidate) => {
+    if (getFlightRegistration(candidate) !== aircraftKey) return;
+
+    const candidateDate = getFlightDate(candidate);
+    if (!candidateDate) return;
+    if (requireBeforeOrOnDate && currentDate && candidateDate > currentDate) return;
+
+    if (!latest) {
+      latest = candidate;
+      return;
+    }
+
+    const latestDate = getFlightDate(latest);
+    if (!latestDate || candidateDate > latestDate) {
+      latest = candidate;
+      return;
+    }
+
+    if (candidateDate.getTime() === latestDate.getTime()) {
+      const candidateFlight = String(candidate?.flight || "");
+      const latestFlight = String(latest?.flight || "");
+      if (candidateFlight > latestFlight) latest = candidate;
+    }
+  });
+
+  return latest;
+};
+
+const getApuFuelPriceSourceFlight = (flight, flights = [], apuUsageRow = {}) => {
+  const isAdditionalUse = isAdditionalApuUseRow(apuUsageRow);
+  const hasArrivalStation = Boolean(normalize(flight?.arrStn));
+  if (!isAdditionalUse || hasArrivalStation) return flight;
+
+  const sourceFlight = getLatestFlightForAircraft(flights, flight, {
+    requireBeforeOrOnDate: true,
+  });
+  return sourceFlight || flight;
+};
+
 const getConvertedRuleAmount = (rule) => {
   if (!rule) return 0;
   return toNumber(rule.costRCCY) > 0 ? toNumber(rule.costRCCY) : toNumber(rule.cost || 0);
@@ -1182,6 +1230,8 @@ const scoreSpecificity = (pairs) => pairs.reduce((sum, entry) => sum + (entry ? 
 
 const matchesOptional = (target, actual) => !target || target === actual;
 
+const isAdditionalApuUseRow = (row = {}) => normalize(row.addlnUse) === "Y";
+
 const pickBest = (rows, scorer) => {
   let best = null;
   let bestScore = -1;
@@ -1581,9 +1631,10 @@ const enrichAllocatedCosts = (flights, config) => {
   }, null);
 
   config.apuUsage.forEach((row) => {
+    const isAdditionalUse = isAdditionalApuUseRow(row);
     const monthFlights = flights.filter((flight) => {
       const flightDate = getFlightDate(flight);
-      return getFlightArr(flight) === row.arrStn &&
+      return (isAdditionalUse || getFlightArr(flight) === row.arrStn) &&
         matchesOptional(row.variant, getFlightVariant(flight)) &&
         matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
         isWithinRange(flightDate, row.fromDate, row.toDate);
@@ -1591,8 +1642,12 @@ const enrichAllocatedCosts = (flights, config) => {
 
     if (!monthFlights.length) return;
 
+    const priceSourceFlight = isAdditionalUse
+      ? getLatestFlightForAircraft(monthFlights, monthFlights[0] || row)
+      : monthFlights[0];
     const priceRule = pickBest(config.ccyFuel, (price) => {
-      if (!matchesOptional(price.station, monthFlights[0] ? getFlightDep(monthFlights[0]) : "")) return -1;
+      if (!matchesOptional(price.station, priceSourceFlight ? getFlightDep(priceSourceFlight) : "")) return -1;
+      if (price.month && price.month !== getFlightMonthKey(priceSourceFlight || monthFlights[0])) return -1;
       return scoreSpecificity([price.station, price.month]);
     });
     const pricePerKg = getPricePerKg(priceRule);
@@ -1739,6 +1794,8 @@ module.exports = {
   groupFuelPriceRows,
   normalizeTransitMx,
   hydrateSchMxEvents,
+  getLatestFlightForAircraft,
+  getApuFuelPriceSourceFlight,
   computeFlightCostsBatch,
   computeFlightCosts,
 };
