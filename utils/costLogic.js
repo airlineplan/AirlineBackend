@@ -1214,6 +1214,54 @@ const serializeNavigationCostRows = (rows = [], stationKey, tiers = DEFAULT_NAV_
   return serialized;
 }).filter((row) => row[stationKey] || row.ccy || normalizeNavMtowTiers(tiers).some((tier) => row[String(tier)] !== undefined && row[String(tier)] !== ""));
 
+const normalizeAirportMtowCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => rows.map((row) => {
+  const tierRates = {};
+  const airportTiers = normalizeNavMtowTiers(tiers);
+
+  airportTiers.forEach((tier) => {
+    let value = pick(row, [
+      String(tier),
+      `mtow${tier}`,
+      `mtow_${tier}`,
+      `tier${tier}`,
+    ]);
+    if ((value === "" || value === undefined || value === null) && row?.tierRates?.[tier] !== undefined && row?.tierRates?.[tier] !== null && row?.tierRates?.[tier] !== "") {
+      value = row.tierRates[tier];
+    }
+    if (value !== "") tierRates[tier] = round2(value);
+  });
+
+  return {
+    [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn"])),
+    mtow: pick(row, ["mtow"]),
+    variant: normalize(pick(row, ["variant", "var"])),
+    month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
+    fromDate: pick(row, ["fromDate"]),
+    toDate: pick(row, ["toDate"]),
+    ccy: normalize(pick(row, ["ccy", "currency"])),
+    costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+    ...Object.fromEntries(
+      airportTiers.map((tier) => [String(tier), tierRates[tier] !== undefined ? tierRates[tier] : ""])
+    ),
+    tierRates,
+  };
+}).filter((row) => row[stationKey] || row.ccy || row.mtow || Object.keys(row.tierRates || {}).length > 0);
+
+const serializeAirportMtowCostRows = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => normalizeAirportMtowCost(rows, stationKey, tiers).map((row) => {
+  const serialized = {
+    [stationKey]: row[stationKey] || "",
+    ccy: row.ccy || "",
+  };
+
+  normalizeNavMtowTiers(tiers).forEach((tier) => {
+    if (row[String(tier)] !== undefined && row[String(tier)] !== "") {
+      serialized[String(tier)] = row[String(tier)];
+    }
+  });
+
+  return serialized;
+}).filter((row) => row[stationKey] || row.ccy || normalizeNavMtowTiers(tiers).some((tier) => row[String(tier)] !== undefined && row[String(tier)] !== ""));
+
 const normalizeFleetRows = (rows = []) => rows.map((row) => ({
   ...row,
   regn: normalize(pick(row, ["regn", "registration"])),
@@ -1288,6 +1336,7 @@ const normalizeCostConfig = (config = {}) => {
     airportAvsec: normalizeStationCost(config.airportAvsec || [], "arrStn"),
     airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
     airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
+    airportOther: normalizeAirportMtowCost(config.airportOther || [], "arrStn", navMtowTiers),
     otherDoc: normalizeOtherDoc(config.otherDoc || []),
     aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
     maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
@@ -1497,6 +1546,29 @@ const getNavigationTieredCost = (row, mtow) => {
   }
 
   return round2(row.cost || 0);
+};
+
+const getAirportMtowTieredCost = (row, mtow) => {
+  const tierValue = toNumber(mtow);
+  if (!row) return null;
+
+  if (toNumber(row.costRCCY) > 0) {
+    return round2(row.costRCCY);
+  }
+
+  if (tierValue > 0 && row.tierRates && row.tierRates[tierValue] !== undefined) {
+    return round2(row.tierRates[tierValue]);
+  }
+
+  if (tierValue > 0 && row[String(tierValue)] !== undefined && row[String(tierValue)] !== "") {
+    return round2(row[String(tierValue)]);
+  }
+
+  if (row.cost !== undefined && row.cost !== null && row.cost !== "") {
+    return round2(row.cost);
+  }
+
+  return null;
 };
 
 const pickBest = (rows, scorer) => {
@@ -1847,6 +1919,14 @@ const enrichDirectCosts = (flights, config) => {
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
       return scoreSpecificity([row.arrStn, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
+    const otherAirportRule = pickBest(config.airportOther || [], (row) => {
+      if (!matchesOptional(row.arrStn, arrStn)) return -1;
+      if (!matchesOptionalNumber(row.mtow, mtow)) return -1;
+      if (!matchesOptional(row.variant, variant)) return -1;
+      if (row.month && row.month !== flightMonthKey) return -1;
+      if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
+      return scoreSpecificity([row.arrStn, row.mtow, row.variant, row.month, row.fromDate || row.toDate]) * 10;
+    });
     const handlingSource = domIntl === "INTL" ? config.airportIntl : config.airportDom;
     const handlingRule = pickBest(handlingSource, (row) => {
       if (!matchesOptional(row.arrStn, arrStn)) return -1;
@@ -1857,15 +1937,18 @@ const enrichDirectCosts = (flights, config) => {
       return scoreSpecificity([row.arrStn, row.mtow, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
     flight.aptLandingCost = round2(landingRule?.cost || 0);
-    flight.aptOtherCost = round2(avsecRule?.cost || 0);
+    const otherAirportCost = getAirportMtowTieredCost(otherAirportRule, mtow);
+    flight.aptOtherCost = round2(
+      otherAirportCost ?? (avsecRule?.cost || 0)
+    );
     flight.aptHandlingCost = round2(handlingRule?.cost || 0);
     applyCostField(
       flight,
       "airport",
       flight.aptLandingCost + flight.aptHandlingCost + flight.aptOtherCost,
-      landingRule?.ccy || handlingRule?.ccy || avsecRule?.ccy || "",
+      landingRule?.ccy || handlingRule?.ccy || otherAirportRule?.ccy || avsecRule?.ccy || "",
       config.reportingCurrency,
-      landingRule?.costRCCY || handlingRule?.costRCCY || avsecRule?.costRCCY
+      landingRule?.costRCCY || handlingRule?.costRCCY || otherAirportRule?.costRCCY || avsecRule?.costRCCY
     );
 
     const matchingOtherDocs = (config.otherDoc || []).filter((row) => {
@@ -2139,6 +2222,7 @@ module.exports = {
   normalizeMaintenanceReserveSchedule,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
+  serializeAirportMtowCostRows,
   hydrateSchMxEvents,
   getLatestFlightForAircraft,
   getApuFuelPriceSourceFlight,

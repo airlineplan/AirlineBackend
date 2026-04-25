@@ -26,6 +26,7 @@ const CostConfigSchema = new mongoose.Schema({
   airportDom: { type: Array, default: [] },
   airportIntl: { type: Array, default: [] },
   airportAvsec: { type: Array, default: [] },
+  airportOther: { type: Array, default: [] },
 
   otherDoc: { type: Array, default: [] }
 }, { timestamps: true });

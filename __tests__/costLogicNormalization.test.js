@@ -134,6 +134,25 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherMx[0].ccy, "USD");
 });
 
+test("normalizeCostConfig preserves airport other mtow rows", () => {
+  const normalized = normalizeCostConfig({
+    airportOther: [
+      {
+        arrStn: "BOM",
+        ccy: "INR",
+        73000: "17800",
+        77000: "18100",
+        78000: "18150",
+        79000: "18200",
+      },
+    ],
+  });
+
+  assert.equal(normalized.airportOther[0].arrStn, "BOM");
+  assert.equal(normalized.airportOther[0].ccy, "INR");
+  assert.equal(normalized.airportOther[0]["77000"], 18100);
+});
+
 test("normalizeCostConfig preserves airport landing mtow rows", () => {
   const normalized = normalizeCostConfig({
     airportLanding: [
@@ -172,6 +191,39 @@ test("normalizeCostConfig preserves airport handling mtow rows", () => {
   assert.equal(normalized.airportDom[0].mtow, 77000);
   assert.equal(normalized.airportDom[0].cost, 118);
   assert.equal(normalized.airportDom[0].ccy, "USD");
+});
+
+test("airport other matches the row by arrival station and mtow tier", () => {
+  const flight = {
+    date: "2026-04-20",
+    domIntl: "DOM",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320ceo",
+    aircraft: {
+      registration: "VT-ABC",
+      msn: "5825",
+    },
+  };
+
+  const enriched = computeFlightCosts(flight, {
+    reportingCurrency: "INR",
+    fleet: [
+      {
+        regn: "VT-ABC",
+        mtow: 77000,
+        entry: "2026-01-01",
+        exit: "2026-12-31",
+      },
+    ],
+    airportOther: [
+      { arrStn: "BOM", ccy: "INR", 73000: 17800, 77000: 18100, 78000: 18150, 79000: 18200 },
+    ],
+  });
+
+  assert.equal(enriched.aptOtherCost, 18100);
+  assert.equal(enriched.airport, 18100);
+  assert.equal(enriched.airportCCY, "INR");
 });
 
 test("normalizeCostConfig preserves custom navigation mtow tiers", () => {

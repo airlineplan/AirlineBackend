@@ -121,7 +121,7 @@ exports.getCostConfig = async (req, res) => {
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
         leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navMtowTiers: [73000, 77000, 78000, 79000],
-        navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], otherDoc: []
+        navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], airportOther: [], otherDoc: []
       };
     } else {
       config.fuelConsum = groupFuelConsumRows(config.fuelConsum || []);
