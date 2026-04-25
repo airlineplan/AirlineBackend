@@ -142,6 +142,10 @@ const inferAllocationCostCode = (row = {}) => {
 
 const getFlightDate = (flight) => parseDate(flight?.date);
 const getFlightMonthKey = (flight) => normalizeMonthKey(flight?.date);
+const getFlightMonthNumber = (flight) => {
+  const date = getFlightDate(flight);
+  return date ? date.getUTCMonth() + 1 : 0;
+};
 const getFlightRegistration = (flight) => normalize(flight?.aircraft?.registration || flight?.acftRegn || flight?.registration);
 const getFlightMsn = (flight) => normalize(flight?.aircraft?.msn ?? flight?.msn);
 const getFlightVariant = (flight) => normalize(flight?.variant);
@@ -927,9 +931,11 @@ const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   mrAccId: normalize(pick(row, ["mrAccId"])),
   acftReg: normalize(pick(row, ["acftReg"])),
   rate: toNumber(pick(row, ["rate"])),
+  contribution: toNumber(pick(row, ["contribution", "setRate"])),
+  monthNumber: toNumber(pick(row, ["monthNumber", "monthNo", "month", "driverVal"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
-})).filter((row) => row.date || row.msn || row.mrAccId || row.rate);
+})).filter((row) => row.date || row.msn || row.mrAccId || row.rate || row.contribution);
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
   ...row,
@@ -1347,6 +1353,32 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
     currency,
     reportingAmount,
   };
+};
+
+const resolveMaintenanceReserveMonthlyContribution = (flight, config = {}) => {
+  const flightMonthNumber = getFlightMonthNumber(flight);
+  const flightDate = getFlightDate(flight);
+  if (!flightMonthNumber || !flightDate) return 0;
+
+  const onwing = getLatestAircraftOnwingForFlight(flight, config.aircraftOnwing || []);
+  if (!onwing) return 0;
+
+  const engineSns = [onwing?.pos1Esn, onwing?.pos2Esn]
+    .map((value) => normalize(value))
+    .filter(Boolean);
+  if (engineSns.length === 0) return 0;
+
+  const monthlyReserveRows = (Array.isArray(config.maintenanceReserveSchedule) ? config.maintenanceReserveSchedule : [])
+    .filter((row) => normalizeMetric(row?.driver) === "MONTH" && toNumber(row?.contribution) > 0);
+  if (monthlyReserveRows.length === 0) return 0;
+
+  return monthlyReserveRows.reduce((sum, row) => {
+    const rowMonthNumber = toNumber(row?.monthNumber) || (parseDate(row?.date)?.getUTCMonth() + 1 || 0);
+    if (rowMonthNumber !== flightMonthNumber) return sum;
+    if (row?.msn && !engineSns.includes(normalize(row.msn))) return sum;
+    if (row?.acftReg && normalize(row.acftReg) && normalize(row.acftReg) !== getFlightRegistration(flight)) return sum;
+    return sum + toNumber(row.contribution);
+  }, 0);
 };
 
 const pickBest = (rows, scorer) => {
@@ -1793,24 +1825,83 @@ const enrichAllocatedCosts = (flights, config) => {
     );
   });
 
-  config.leasedReserve.forEach((row) => {
-    if (row.driver !== "MONTH") return;
-    const eligibleFlights = flights.filter((flight) => {
-      const flightDate = getFlightDate(flight);
-      if (row.endDate && !isWithinRange(flightDate, null, row.endDate)) return false;
-      return matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
-        matchesOptional(row.sn, getFlightMsn(flight));
+  const monthlyReserveRows = (config.maintenanceReserveSchedule || []).filter((row) => normalizeMetric(row.driver) === "MONTH" && toNumber(row.contribution) > 0);
+  if (monthlyReserveRows.length > 0) {
+    const monthlyReserveGroups = new Map();
+
+    monthlyReserveRows.forEach((row) => {
+      const rowMonthNumber = toNumber(row.monthNumber) || (parseDate(row.date)?.getUTCMonth() + 1 || 0);
+      if (!rowMonthNumber) return;
+
+      const matchedFlights = [];
+      flights.forEach((flight) => {
+        if (getFlightMonthNumber(flight) !== rowMonthNumber) return;
+
+        const flightOnwing = getLatestAircraftOnwingForFlight(flight, config.aircraftOnwing || []);
+        if (!flightOnwing) return;
+
+        const engineSns = [flightOnwing.pos1Esn, flightOnwing.pos2Esn]
+          .map((value) => normalize(value))
+          .filter(Boolean);
+        if (engineSns.length === 0) return;
+        if (row.msn && !engineSns.includes(normalize(row.msn))) return;
+        if (row.acftReg && normalize(row.acftReg) && normalize(row.acftReg) !== getFlightRegistration(flight)) return;
+        matchedFlights.push(flight);
+      });
+
+      if (matchedFlights.length === 0) return;
+
+      const groupKey = `${getFlightAircraftKey(matchedFlights[0])}|${rowMonthNumber}`;
+      if (!monthlyReserveGroups.has(groupKey)) {
+        monthlyReserveGroups.set(groupKey, {
+          flights: new Map(),
+          amount: 0,
+          currency: row.ccy || "",
+          reportingAmount: row.costRCCY || 0,
+        });
+      }
+
+      const group = monthlyReserveGroups.get(groupKey);
+      matchedFlights.forEach((flight) => {
+        const flightKey = `${String(flight.flight || "")}|${String(flight.date || "")}`;
+        group.flights.set(flightKey, flight);
+      });
+      group.amount = round2(group.amount + toNumber(row.contribution));
+      if (!group.currency && row.ccy) group.currency = row.ccy;
+      if (!group.reportingAmount && row.costRCCY) group.reportingAmount = row.costRCCY;
     });
-    distributePool(
-      eligibleFlights,
-      "mrMonthly",
-      row.setRate,
-      row.ccy,
-      config.reportingCurrency,
-      row.basis || getAllocationBasis(config, "MRMONTHLY"),
-      row.costRCCY
-    );
-  });
+
+    monthlyReserveGroups.forEach((group) => {
+      distributePool(
+        Array.from(group.flights.values()),
+        "mrMonthly",
+        group.amount,
+        group.currency,
+        config.reportingCurrency,
+        "BH",
+        group.reportingAmount
+      );
+    });
+  } else {
+    config.leasedReserve.forEach((row) => {
+      if (normalizeMetric(row.driver) !== "MONTH") return;
+      const eligibleFlights = flights.filter((flight) => {
+        const flightDate = getFlightDate(flight);
+        if (row.endDate && !isWithinRange(flightDate, null, row.endDate)) return false;
+        return matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
+          matchesOptional(row.sn, getFlightMsn(flight));
+      });
+      distributePool(
+        eligibleFlights,
+        "mrMonthly",
+        row.setRate,
+        row.ccy,
+        config.reportingCurrency,
+        row.basis || getAllocationBasis(config, "MRMONTHLY"),
+        row.costRCCY
+      );
+    });
+  }
 
   const schGroups = {};
   config.schMxEvents.forEach((row) => {

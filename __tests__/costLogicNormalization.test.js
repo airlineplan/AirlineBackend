@@ -379,6 +379,97 @@ test("maintenance reserve contribution uses flight FH and the matched engine SN 
   assert.equal(enriched.mrContribution, 735.28);
 });
 
+test("maintenance reserve monthly contribution splits the schedule contribution by aircraft-month BH share", () => {
+  const flights = [
+    {
+      date: "2026-04-03",
+      bh: 2,
+      aircraft: {
+        registration: "VT-ABC",
+        msn: "5825",
+      },
+    },
+    {
+      date: "2026-04-17",
+      bh: 6,
+      aircraft: {
+        registration: "VT-ABC",
+        msn: "5825",
+      },
+    },
+    {
+      date: "2026-04-21",
+      bh: 4,
+      aircraft: {
+        registration: "VT-XYZ",
+        msn: "9999",
+      },
+    },
+    {
+      date: "2026-05-02",
+      bh: 3,
+      aircraft: {
+        registration: "VT-ABC",
+        msn: "5825",
+      },
+    },
+  ];
+
+  const enriched = computeFlightCostsBatch(flights, {
+    reportingCurrency: "USD",
+    aircraftOnwing: [
+      {
+        date: "2026-04-01",
+        msn: "5825",
+        pos1Esn: "740811",
+        pos2Esn: "740812",
+        apun: "990001",
+      },
+      {
+        date: "2026-04-01",
+        msn: "9999",
+        pos1Esn: "111111",
+        pos2Esn: "111112",
+        apun: "990002",
+      },
+    ],
+    maintenanceReserveSchedule: [
+      {
+        date: "2026-04-01",
+        msn: "740811",
+        mrAccId: "1",
+        contribution: 800,
+        ccy: "USD",
+        driver: "MONTH",
+        driverVal: 4,
+      },
+      {
+        date: "2026-04-01",
+        msn: "111111",
+        mrAccId: "2",
+        contribution: 500,
+        ccy: "USD",
+        driver: "MONTH",
+        driverVal: 4,
+      },
+      {
+        date: "2026-05-01",
+        msn: "740811",
+        mrAccId: "1",
+        contribution: 900,
+        ccy: "USD",
+        driver: "MONTH",
+        driverVal: 5,
+      },
+    ],
+  });
+
+  assert.equal(enriched[0].mrMonthly, 200);
+  assert.equal(enriched[1].mrMonthly, 600);
+  assert.equal(enriched[2].mrMonthly, 500);
+  assert.equal(enriched[3].mrMonthly, 900);
+});
+
 test("engine fuel consumption multiplies fuel consumption, fuel index, and the matched PLF band", () => {
   const flight = {
     date: "2026-04-16",

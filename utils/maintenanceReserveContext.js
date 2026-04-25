@@ -46,7 +46,7 @@ const buildMaintenanceReserveContext = async (userId, flights = []) => {
       .sort({ date: 1, msn: 1, _id: 1 })
       .lean(),
     MaintenanceReserve.find({ userId, date: { $lte: reserveUpperBound } })
-      .select("date msn mrAccId acftReg rate ccy driver")
+      .select("date msn mrAccId acftReg rate contribution ccy driver driverVal")
       .sort({ date: 1, msn: 1, mrAccId: 1, _id: 1 })
       .lean(),
   ]);
