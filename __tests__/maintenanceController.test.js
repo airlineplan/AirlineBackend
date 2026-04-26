@@ -12,6 +12,7 @@ const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
 const AircraftOnwing = require("../model/aircraftOnwing");
 const MaintenanceReset = require("../model/maintenanceReset");
+const MaintenanceTarget = require("../model/maintenanceTargetSchema");
 const Utilisation = require("../model/utilisation");
 const maintenanceController = require("../controller/maintenanceController");
 
@@ -504,4 +505,94 @@ test("saving reset records waits for recompute before responding", async () => {
 
   assert.equal(res.statusCode, 200);
   assert.equal(nextDayUtil?.tsn, 24);
+});
+
+test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
+  const targetDate = utcDate(2026, 4, 13);
+
+  await seedFlightDays([targetDate]);
+  await MaintenanceTarget.create({
+    userId: USER_ID,
+    label: "DEF",
+    msnEsn: "685912",
+    pn: "CFM56-5B6",
+    snBn: "685912",
+    category: "Conserve",
+    date: targetDate,
+    tsn: "19385",
+    csn: "9800",
+    cso: "9900",
+  });
+  await Utilisation.create({
+    userId: USER_ID,
+    date: targetDate,
+    msnEsn: "685912",
+    pn: "CFM56-5B6",
+    snBn: "685912",
+    tsn: 19381.48,
+    csn: 9916,
+    csoCsr: 9916,
+  });
+
+  const req = { user: { id: USER_ID }, query: { date: "2026-04-13" } };
+  const res = createMockResponse();
+
+  await maintenanceController.getTargets(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.data.length, 1);
+  assert.equal(res.body.data[0].targetLabel, "DEF");
+  assert.equal(res.body.data[0].targetMsn, "685912");
+  assert.equal(res.body.data[0].date, "2026-04-13");
+  assert.equal(res.body.data[0].displayDate, "13 Apr 26");
+  assert.equal(res.body.data[0].fTsn, 3.52);
+  assert.equal(res.body.data[0].fCsn, -116);
+  assert.equal(res.body.data[0].fCso, -16);
+  assert.deepEqual(res.body.data[0].highlights.sort(), ["cso", "csn"].sort());
+});
+
+test("saving rotable movement scopes on-wing updates to the current user", async () => {
+  const otherUserId = new mongoose.Types.ObjectId().toString();
+
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 12),
+    msn: "4120",
+    pos2Esn: "OLD-USER",
+  });
+  await AircraftOnwing.create({
+    userId: otherUserId,
+    date: utcDate(2026, 4, 12),
+    msn: "4120",
+    pos2Esn: "OLD-OTHER",
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      rotablesData: [
+        {
+          label: "Engine change",
+          date: "2026-04-11",
+          pn: "CFM56-5B6",
+          msn: "4120",
+          acftRegn: "VT-DKU",
+          position: "#2",
+          removedSN: "OLD-USER",
+          installedSN: "685782",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveRotables(req, res);
+
+  const userOnwing = await AircraftOnwing.findOne({ userId: USER_ID, msn: "4120", date: utcDate(2026, 4, 12) }).lean();
+  const otherOnwing = await AircraftOnwing.findOne({ userId: otherUserId, msn: "4120", date: utcDate(2026, 4, 12) }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(userOnwing?.pos2Esn, "685782");
+  assert.equal(otherOnwing?.pos2Esn, "OLD-OTHER");
 });

@@ -450,6 +450,26 @@ const getUtilisationWindow = ({ masterStartDate, masterEndDate, fleet }) => {
     return { startBoundaryDate, endBoundaryDate };
 };
 
+const targetMetricFields = [
+    { key: "tsn", utilKey: "tsn" },
+    { key: "csn", utilKey: "csn" },
+    { key: "dsn", utilKey: "dsn" },
+    { key: "tso", utilKey: "tsoTsr" },
+    { key: "cso", utilKey: "csoCsr" },
+    { key: "dso", utilKey: "dsoDsr" },
+    { key: "tsRplmt", utilKey: "tsRplmt" },
+    { key: "csRplmt", utilKey: "csRplmt" },
+    { key: "dsRplmt", utilKey: "dsRplmt" },
+];
+
+const parseMetricValue = (value) => {
+    if (value === "" || value === null || value === undefined) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+const roundMetricDelta = (value) => Number(value.toFixed(2));
+
 /**
  * 1. GET: Fetch Main Dashboard Data
  */
@@ -856,7 +876,7 @@ exports.bulkSaveRotables = async (req, res) => {
                     // 1. Update all future chronological configurations for this MSN
                     onwingOps.push({
                         updateMany: {
-                            filter: { msn: record.msn, date: { $gte: nextDay } },
+                            filter: { userId: String(userId), msn: record.msn, date: { $gte: nextDay } },
                             update: {
                                 $set: {
                                     [updateField]: record.installedSN
@@ -868,9 +888,12 @@ exports.bulkSaveRotables = async (req, res) => {
                     // 2. Explicitly log the new configuration timeline starting on nextDay
                     onwingOps.push({
                         updateOne: {
-                            filter: { msn: record.msn, date: nextDay },
+                            filter: { userId: String(userId), msn: record.msn, date: nextDay },
                             update: {
                                 $set: {
+                                    userId: String(userId),
+                                    msn: record.msn,
+                                    date: nextDay,
                                     [updateField]: record.installedSN
                                 }
                             },
@@ -916,24 +939,84 @@ exports.getTargets = async (req, res) => {
         }
 
         const records = await MaintenanceTarget.find({ userId: String(userId) }).sort({ date: -1 }).lean();
-        const formattedRecords = records.map(record => ({
-            id: record._id,
-            label: record.label || "",
-            msnEsn: record.msnEsn || "",
-            pn: record.pn || "",
-            snBn: record.snBn || "",
-            category: record.category || "",
-            date: moment(record.date).format("DD MMM YY"),
-            tsn: record.tsn || "",
-            csn: record.csn || "",
-            dsn: record.dsn || "",
-            tso: record.tso || "",
-            cso: record.cso || "",
-            dso: record.dso || "",
-            tsRplmt: record.tsRplmt || "",
-            csRplmt: record.csRplmt || "",
-            dsRplmt: record.dsRplmt || ""
-        }));
+        const utilisationQueries = records.map(record => {
+            const startOfTargetDay = moment.utc(record.date).startOf("day").toDate();
+            const endOfTargetDay = moment.utc(record.date).endOf("day").toDate();
+
+            return Utilisation.findOne({
+                userId: String(userId),
+                date: { $gte: startOfTargetDay, $lte: endOfTargetDay },
+                msnEsn: record.msnEsn || "",
+                pn: record.pn || "",
+                snBn: record.snBn || ""
+            }).sort({ updatedAt: -1, createdAt: -1 }).lean();
+        });
+        const forecastRows = await Promise.all(utilisationQueries);
+
+        const formattedRecords = records.map((record, index) => {
+            const forecast = forecastRows[index] || {};
+            const deltas = {};
+            const highlights = [];
+            const category = String(record.category || "").trim().toLowerCase();
+
+            targetMetricFields.forEach(({ key, utilKey }) => {
+                const targetValue = parseMetricValue(record[key]);
+                const forecastValue = parseMetricValue(forecast[utilKey]);
+
+                if (targetValue === null || forecastValue === null) {
+                    deltas[key] = "";
+                    return;
+                }
+
+                const delta = roundMetricDelta(targetValue - forecastValue);
+                deltas[key] = delta;
+
+                if ((category === "conserve" && delta < 0) || (category === "run-down" && delta > 0)) {
+                    highlights.push(key);
+                }
+            });
+
+            const base = {
+                id: record._id,
+                label: record.label || "",
+                msnEsn: record.msnEsn || "",
+                pn: record.pn || "",
+                snBn: record.snBn || "",
+                category: record.category || "",
+                date: moment.utc(record.date).format("YYYY-MM-DD"),
+                displayDate: moment.utc(record.date).format("DD MMM YY"),
+                tsn: record.tsn || "",
+                csn: record.csn || "",
+                dsn: record.dsn || "",
+                tso: record.tso || "",
+                cso: record.cso || "",
+                dso: record.dso || "",
+                tsRplmt: record.tsRplmt || "",
+                csRplmt: record.csRplmt || "",
+                dsRplmt: record.dsRplmt || "",
+                highlights,
+            };
+
+            return {
+                ...base,
+                targetLabel: base.label,
+                targetMsn: base.msnEsn,
+                targetPn: base.pn,
+                targetSn: base.snBn,
+                tsr: base.tsRplmt,
+                csr: base.csRplmt,
+                dsr: base.dsRplmt,
+                fTsn: deltas.tsn,
+                fCsn: deltas.csn,
+                fDsn: deltas.dsn,
+                fTso: deltas.tso,
+                fCso: deltas.cso,
+                fDso: deltas.dso,
+                fTsr: deltas.tsRplmt,
+                fCsr: deltas.csRplmt,
+                fDsr: deltas.dsRplmt,
+            };
+        });
         res.status(200).json({ success: true, data: formattedRecords });
     } catch (error) {
         console.error("Error fetching target maintenance data:", error);
