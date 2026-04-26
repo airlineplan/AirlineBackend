@@ -590,10 +590,10 @@ function buildLegRows({
     const maxDecreased =
         snapshot.maxPax < prevMetrics.maxPax ||
         snapshot.maxCargoT < prevMetrics.maxCargoT;
-    const loadDecreased =
-        snapshot.sourcePaxTotal < prevMetrics.sourcePaxTotal ||
-        snapshot.sourceCargoTotal < prevMetrics.sourceCargoTotal;
-    const forceReset = maxDecreased || loadDecreased;
+    const sourceChanged =
+        snapshot.sourcePaxTotal !== prevMetrics.sourcePaxTotal ||
+        snapshot.sourceCargoTotal !== prevMetrics.sourceCargoTotal;
+    const forceReset = maxDecreased || sourceChanged;
 
     let depPax;
     let arrPax;
@@ -1212,6 +1212,8 @@ async function buildPooDataset({ userId, poo, date }) {
 
         const connectionMatchesPage =
             normalizedPoo === firstSnapshot.depStn ||
+            normalizedPoo === firstSnapshot.arrStn ||
+            normalizedPoo === secondSnapshot.depStn ||
             normalizedPoo === secondSnapshot.arrStn ||
             normalizedPoo === firstSnapshot.odOrigin ||
             normalizedPoo === secondSnapshot.odDestination;
@@ -1821,6 +1823,7 @@ exports.populatePoo = async (req, res) => {
 
         await PooTable.deleteMany({
             userId,
+            poo: dataset.normalizedPoo,
             date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
             rowKey: { $nin: [...dataset.keepRowKeys] },
             $or: [
