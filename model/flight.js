@@ -100,6 +100,10 @@ const flightSchema = new mongoose.Schema(
     otherDoc3: costField,
 
     domIntl: { type: String },
+    msn: { type: String, default: "" },
+    eng1Esn: { type: String, default: "" },
+    eng2Esn: { type: String, default: "" },
+    apun: { type: String, default: "" },
     userTag1: { type: String },
     userTag2: { type: String },
     remarks1: { type: String },

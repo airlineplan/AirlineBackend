@@ -6,6 +6,7 @@ const {
   computeFlightCosts,
   computeFlightCostsBatch,
   serializeNavigationCostRows,
+  getFlightSnContext,
 } = require("../utils/costLogic");
 const { __private__: apuFuelPrivate } = require("../controller/apuFuelController");
 
@@ -132,6 +133,28 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherMx[0].sn, "SN-1");
   assert.equal(normalized.otherMx[0].costPerBh, 125);
   assert.equal(normalized.otherMx[0].ccy, "USD");
+});
+
+test("cost enrichment populates MSN, engine ESNs, and APUN from aircraft on-wing rows", () => {
+  const flight = {
+    date: "2026-04-20",
+    aircraft: { msn: "5825", registration: "VT-ABC" },
+    flight: "AB123",
+  };
+
+  const onwing = [
+    { date: "2026-04-01", msn: "5825", pos1Esn: "ENG-1", pos2Esn: "ENG-2", apun: "APU-1" },
+  ];
+
+  const context = getFlightSnContext(flight, onwing);
+  const [enriched] = computeFlightCostsBatch([flight], { aircraftOnwing: onwing });
+
+  assert.deepEqual(context.snList, ["5825", "ENG-1", "ENG-2", "APU-1"]);
+  assert.equal(enriched.msn, "5825");
+  assert.equal(enriched.eng1Esn, "ENG-1");
+  assert.equal(enriched.eng2Esn, "ENG-2");
+  assert.equal(enriched.apun, "APU-1");
+  assert.equal(enriched.sn, "5825, ENG-1, ENG-2, APU-1");
 });
 
 test("normalizeCostConfig preserves airport other mtow rows", () => {

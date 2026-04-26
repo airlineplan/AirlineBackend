@@ -241,7 +241,7 @@ const populateDashboardDropDowns = async (req, res) => {
     ]);
 
     const distinctSnValues = await Fleet.aggregate([
-      { $match: { userId: userId, category: "Aircraft" } },
+      { $match: { userId: userId, category: { $in: ["Aircraft", "Engine", "APU"] } } },
       { $group: { _id: null, sn: { $addToSet: "$sn" } } },
       { $project: { _id: 0, sn: 1 } },
     ]);

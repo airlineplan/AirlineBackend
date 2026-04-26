@@ -1444,6 +1444,31 @@ const getLatestAircraftOnwingForFlight = (flight, onwingRows = []) => {
   return latest;
 };
 
+const getFlightSnContext = (flight, onwingRows = []) => {
+  const onwing = getLatestAircraftOnwingForFlight(flight, onwingRows);
+  const msn = normalize(onwing?.msn || getFlightMsn(flight));
+  const eng1Esn = normalize(onwing?.pos1Esn || flight?.eng1Esn);
+  const eng2Esn = normalize(onwing?.pos2Esn || flight?.eng2Esn);
+  const apun = normalize(onwing?.apun || flight?.apun);
+  return {
+    msn,
+    eng1Esn,
+    eng2Esn,
+    apun,
+    snList: [msn, eng1Esn, eng2Esn, apun].filter(Boolean),
+  };
+};
+
+const applySnContext = (flight, config = {}) => {
+  const context = getFlightSnContext(flight, config.aircraftOnwing || []);
+  flight.msn = context.msn;
+  flight.eng1Esn = context.eng1Esn;
+  flight.eng2Esn = context.eng2Esn;
+  flight.apun = context.apun;
+  flight.sn = context.snList.join(", ");
+  flight.snList = context.snList;
+};
+
 const resolveMaintenanceReserveRate = (flight, config = {}) => {
   const flightDate = getFlightDate(flight);
   const fh = toNumber(flight?.fh);
@@ -2195,6 +2220,7 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
 
   const flights = (inputFlights || []).map((flight) => initializeFlight(flight, config.reportingCurrency));
 
+  flights.forEach((flight) => applySnContext(flight, config));
   enrichDirectCosts(flights, config);
   enrichAllocatedCosts(flights, config);
   flights.forEach(applyCompatibilityAliases);
@@ -2213,6 +2239,7 @@ module.exports = {
   flattenFuelPriceRows,
   normalizeApuUsage,
   normalizeOtherMx,
+  normalizeFleetRows,
   groupFuelConsumRows,
   groupFuelConsumIndexRows,
   groupPlfEffectRows,
@@ -2224,6 +2251,7 @@ module.exports = {
   serializeNavigationCostRows,
   serializeAirportMtowCostRows,
   hydrateSchMxEvents,
+  getFlightSnContext,
   getLatestFlightForAircraft,
   getApuFuelPriceSourceFlight,
   computeFlightCostsBatch,

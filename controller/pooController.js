@@ -1455,7 +1455,6 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
                 `${describeRow(edited)} cannot be updated`
             );
 
-            rowsById.set(String(edited._id), edited);
             Object.assign(current, edited);
             Object.assign(pairedLeg, rebalanceLegRow(pairedLeg, paxDelta, cargoDelta));
             return;
@@ -2306,4 +2305,5 @@ exports.__testables__ = {
     recalculateRevenue,
     buildEditableResponse,
     buildRowMatchKey,
+    applyTrafficUpdates,
 };

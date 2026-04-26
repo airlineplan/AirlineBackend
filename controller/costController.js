@@ -20,6 +20,7 @@ const {
   groupFuelConsumIndexRows,
   groupPlfEffectRows,
   groupFuelPriceRows,
+  getFlightSnContext,
 } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const moment = require("moment");
@@ -164,7 +165,6 @@ exports.getCostPageData = async (req, res) => {
     applyArrayFilter("arrStn", to);
     applyArrayFilter("sector", sector);
     applyArrayFilter("variant", variant);
-    applyArrayFilter("aircraft.msn", sn);
     applyArrayFilter("flight", flight);
     applyArrayFilter("userTag1", userTag1);
     applyArrayFilter("userTag2", userTag2);
@@ -177,7 +177,15 @@ exports.getCostPageData = async (req, res) => {
     const mrContext = await buildMaintenanceReserveContext(userId, flights);
 
     // 4. Compute Costs
-    const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext });
+    let enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext });
+
+    if (sn?.length) {
+      const selectedSn = new Set(sn.map((item) => String(item.value ?? item).trim().toUpperCase()).filter(Boolean));
+      enrichedFlights = enrichedFlights.filter((flight) => {
+        const context = getFlightSnContext(flight, mrContext.aircraftOnwing || []);
+        return context.snList.some((value) => selectedSn.has(value));
+      });
+    }
 
     res.status(200).json({ flights: enrichedFlights });
 
