@@ -11,6 +11,7 @@ const RotationSummary = require("../model/rotationSummary");
 const RotationDetails = require("../model/rotationDetails");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
+const CostConfig = require("../model/costConfigSchema");
 const csv = require("csvtojson");
 const xlsx = require("xlsx");
 const exceljs = require("exceljs");
@@ -25,6 +26,7 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const { normalizeCostConfig } = require("../utils/costLogic");
 
 const createConnections = require('../helper/createConnections');
 
@@ -58,6 +60,42 @@ const normalizeSingleQueryValue = (value) => {
   }
 
   return String(value ?? "").trim();
+};
+
+const normalizeRevenueLabel = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized.includes("intl")) return "Intl";
+  if (normalized.includes("dom")) return "Dom";
+  return "";
+};
+
+const toNumericValue = (value) => {
+  if (value === null || value === undefined || value === "") return 0;
+  const parsed = Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getCostConfigRowDate = (row = {}) => {
+  if (row?.date) {
+    const parsed = new Date(row.date);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  const month = String(row?.month ?? "").trim();
+  const monthMatch = month.match(/^(\d{1,2})[/-](\d{2,4})$/);
+  if (monthMatch) {
+    const monthIndex = Number(monthMatch[1]) - 1;
+    const year = Number(monthMatch[2].length === 2 ? `20${monthMatch[2]}` : monthMatch[2]);
+    const parsed = new Date(Date.UTC(year, monthIndex, 1));
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  const fallbackDate = new Date(month);
+  return Number.isNaN(fallbackDate.getTime()) ? null : fallbackDate;
 };
 
 const getUserIdFromReq = (req) => {
@@ -271,12 +309,22 @@ const getDashboardData = async (req, res) => {
   let flightsQuery = {
     userId: id
   };
+  let revenueQuery = {
+    userId: id
+  };
 
   if (label === "both") {
     flightsQuery.domIntl = { $in: ["dom", "intl"] };
   } else {
     datequery.domINTL = label
     flightsQuery.domIntl = label
+    const normalizedRevenueLabel = normalizeRevenueLabel(label);
+    if (normalizedRevenueLabel) {
+      revenueQuery.$or = [
+        { odDI: normalizedRevenueLabel },
+        { legDI: normalizedRevenueLabel },
+      ];
+    }
   }
 
   const normalizedVariant = normalizeQueryValues(variant);
@@ -315,6 +363,41 @@ const getDashboardData = async (req, res) => {
     flightsQuery.arrStn = { $in: normalizedTo };
   }
 
+  const dataFilterClauses = [];
+  if (normalizedFrom.length > 0) dataFilterClauses.push({ depStn: { $in: normalizedFrom } });
+  if (normalizedTo.length > 0) dataFilterClauses.push({ arrStn: { $in: normalizedTo } });
+  if (normalizedSector.length > 0) dataFilterClauses.push({ sector: { $in: normalizedSector } });
+  if (normalizedVariant.length > 0) dataFilterClauses.push({ variant: { $in: normalizedVariant } });
+  if (normalizedFlight.length > 0) dataFilterClauses.push({ flight: { $in: normalizedFlight } });
+  if (normalizedUserTag1.length > 0) dataFilterClauses.push({ userTag1: { $in: normalizedUserTag1 } });
+  if (normalizedUserTag2.length > 0) dataFilterClauses.push({ userTag2: { $in: normalizedUserTag2 } });
+
+  if (dataFilterClauses.length > 0 || label !== "both") {
+    const dataMatch = { userId: id };
+    const normalizedRevenueLabel = normalizeRevenueLabel(label);
+    if (label !== "both" && normalizedRevenueLabel) {
+      dataMatch.domINTL = normalizedRevenueLabel;
+    }
+    if (dataFilterClauses.length > 0) {
+      dataMatch.$and = dataFilterClauses;
+    }
+
+    const matchingData = await Data.find(dataMatch).select("flight depStn arrStn sector");
+    const allowedFlights = [...new Set(matchingData.map((row) => String(row.flight || "").trim()).filter(Boolean))];
+    const allowedSectors = [...new Set(matchingData.map((row) => String(row.sector || "").trim().toUpperCase()).filter(Boolean))];
+
+    if (matchingData.length === 0) {
+      revenueQuery.$and = [{ _id: null }];
+    } else {
+      const revenueClauses = [];
+      if (allowedFlights.length > 0) revenueClauses.push({ flightNumber: { $in: allowedFlights } });
+      if (allowedSectors.length > 0) revenueClauses.push({ sector: { $in: allowedSectors } });
+      if (revenueClauses.length > 0) {
+        revenueQuery.$and = revenueClauses;
+      }
+    }
+  }
+
   try {
 
       const datas = await Data.find(datequery);
@@ -349,6 +432,13 @@ const getDashboardData = async (req, res) => {
       } else if (periodicity === 'daily') {
         periods = generateDailyDates(startDate, endDate);
       }
+
+      const [revenueRows, costConfigDoc] = await Promise.all([
+        PooTable.find(revenueQuery).lean(),
+        CostConfig.findOne({ userId: id }).lean(),
+      ]);
+      const costConfig = normalizeCostConfig(costConfigDoc || {});
+      const schMxEvents = Array.isArray(costConfig.schMxEvents) ? costConfig.schMxEvents : [];
 
       try {
         // Initialize an array to store the result data
@@ -609,6 +699,110 @@ const getDashboardData = async (req, res) => {
             return totalfh + (Number(flight.fh) || 0);
           }, 0);
 
+          const periodStartDay = startOfUtcDay(periodStartDate);
+          const periodEndDay = endOfUtcDay(periodEndDate);
+          const revenueInPeriod = revenueRows.filter((row) => {
+            const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
+            return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
+          });
+          const fnlRccyPaxRev = revenueInPeriod.reduce((total, row) => total + (Number(row.fnlRccyPaxRev) || 0), 0);
+          const fnlRccyCargoRev = revenueInPeriod.reduce((total, row) => total + (Number(row.fnlRccyCargoRev) || 0), 0);
+          const fnlRccyTotalRev = fnlRccyPaxRev + fnlRccyCargoRev;
+
+          const schMxInPeriod = schMxEvents.filter((row) => {
+            const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
+            return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
+          });
+          const rotableChangesInPeriod = Array.isArray(costConfig.rotableChanges)
+            ? costConfig.rotableChanges.filter((row) => {
+                const rowDate = getCostConfigRowDate(row);
+                return rowDate && startOfUtcDay(rowDate) >= periodStartDay && startOfUtcDay(rowDate) <= periodEndDay;
+              })
+            : [];
+
+          const groupedSchMxEvents = new Map();
+          schMxInPeriod.forEach((row) => {
+            const eventKey = String(row?.event || "").trim() || "Sch.Mx.Event";
+            if (!groupedSchMxEvents.has(eventKey)) {
+              groupedSchMxEvents.set(eventKey, []);
+            }
+            groupedSchMxEvents.get(eventKey).push(row);
+          });
+
+          const orderedSchMxEvents = Array.from(groupedSchMxEvents.entries())
+            .map(([event, rows]) => ({
+              event,
+              rows: [...rows].sort((a, b) => {
+                const aDate = startOfUtcDay(new Date(a.date)).getTime();
+                const bDate = startOfUtcDay(new Date(b.date)).getTime();
+                return aDate - bDate;
+              }),
+            }))
+            .sort((a, b) => {
+              const aDate = a.rows[0] ? startOfUtcDay(new Date(a.rows[0].date)).getTime() : 0;
+              const bDate = b.rows[0] ? startOfUtcDay(new Date(b.rows[0].date)).getTime() : 0;
+              return aDate - bDate;
+            });
+
+          const firstSchMxRows = orderedSchMxEvents[0]?.rows || [];
+          const secondSchMxRows = orderedSchMxEvents[1]?.rows || [];
+          const sumSchMxRows = (rows = []) => rows.reduce((total, row) => total + toNumericValue(row?.costRCCY ?? row?.cost), 0);
+
+          const schMxEvent1Detail1RCCY = toNumericValue(firstSchMxRows[0]?.costRCCY ?? firstSchMxRows[0]?.cost);
+          const schMxEvent1Detail2RCCY = toNumericValue(firstSchMxRows[1]?.costRCCY ?? firstSchMxRows[1]?.cost);
+          const schMxEvent1RCCY = sumSchMxRows(firstSchMxRows);
+          const schMxEvent2Detail1RCCY = toNumericValue(secondSchMxRows[0]?.costRCCY ?? secondSchMxRows[0]?.cost);
+          const schMxEvent2RCCY = sumSchMxRows(secondSchMxRows);
+          const qualifyingSchMxEventsRCCY = schMxEvent1RCCY + schMxEvent2RCCY;
+
+          const sumNumericField = (rows = [], field, fallback = 0) => rows.reduce((total, row) => {
+            return total + toNumericValue(row?.[field]);
+          }, fallback);
+
+          const sumRowFields = (rows = [], fields = []) => rows.reduce((total, row) => {
+            const rowTotal = fields.reduce((rowSum, field) => {
+              return rowSum + toNumericValue(row?.[field]);
+            }, 0);
+            return total + rowTotal;
+          }, 0);
+
+          const engineFuelConsumption = sumNumericField(flightsInPeriod, "engineFuelConsumption");
+          const engineFuelCostRCCY = sumNumericField(flightsInPeriod, "engineFuelCostRCCY");
+          const apuFuelCostRCCY = sumNumericField(flightsInPeriod, "apuFuelCostRCCY");
+          const totalFuelCostRCCY = engineFuelCostRCCY + apuFuelCostRCCY;
+
+          const maintenanceReserveContributionRCCY = sumNumericField(flightsInPeriod, "maintenanceReserveContributionRCCY");
+          const mrMonthlyRCCY = sumNumericField(flightsInPeriod, "mrMonthlyRCCY");
+          const totalMrContributionRCCY = maintenanceReserveContributionRCCY + mrMonthlyRCCY;
+
+          const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
+          const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
+          const otherMaintenanceUtilisationRCCY = sumRowFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
+          const otherMaintenanceCalendarRCCY = sumNumericField(flightsInPeriod, "otherMaintenance3");
+          const rotableChangesRCCY = rotableChangesInPeriod.reduce((total, row) => total + toNumericValue(row?.costRCCY ?? row?.cost), 0);
+          const totalMaintenanceCostRCCY =
+            totalMrContributionRCCY +
+            qualifyingSchMxEventsRCCY +
+            transitMaintenanceRCCY +
+            otherMaintenanceRCCY +
+            rotableChangesRCCY;
+
+          const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
+          const layoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");
+          const crewPositioningCostRCCY = sumNumericField(flightsInPeriod, "crewPositioningCostRCCY");
+          const crewTotalDirectCostRCCY = crewAllowancesRCCY + layoverCostRCCY + crewPositioningCostRCCY;
+
+          const airportRCCY = sumNumericField(flightsInPeriod, "airportRCCY");
+          const navigationRCCY = sumNumericField(flightsInPeriod, "navigationRCCY");
+          const otherDocRCCY = sumNumericField(flightsInPeriod, "otherDocRCCY");
+          const totalDocRCCY =
+            totalFuelCostRCCY +
+            totalMaintenanceCostRCCY +
+            crewTotalDirectCostRCCY +
+            airportRCCY +
+            navigationRCCY +
+            otherDocRCCY;
+
           resultData.push({
             endDate: periodEndDate.toString(),
             destinations: parseInt(uniqueStations.size).toLocaleString(),
@@ -639,7 +833,37 @@ const getDashboardData = async (req, res) => {
             sumOfask: sumOfask,
             sumOfrsk: sumOfrsk,
             sumOfcargoAtk: sumOfcargoAtk,
-            sumOfcargoRtk: sumOfcargoRtk
+            sumOfcargoRtk: sumOfcargoRtk,
+            fnlRccyPaxRev,
+            fnlRccyCargoRev,
+            fnlRccyTotalRev,
+            engineFuelConsumption,
+            engineFuelCostRCCY,
+            apuFuelCostRCCY,
+            totalFuelCostRCCY,
+            maintenanceReserveContributionRCCY,
+            mrMonthlyRCCY,
+            totalMrContributionRCCY,
+            qualifyingSchMxEventsRCCY,
+            schMxEvent1RCCY,
+            schMxEvent1Detail1RCCY,
+            schMxEvent1Detail2RCCY,
+            schMxEvent2RCCY,
+            schMxEvent2Detail1RCCY,
+            transitMaintenanceRCCY,
+            otherMaintenanceRCCY,
+            otherMaintenanceUtilisationRCCY,
+            otherMaintenanceCalendarRCCY,
+            rotableChangesRCCY,
+            totalMaintenanceCostRCCY,
+            crewAllowancesRCCY,
+            layoverCostRCCY,
+            crewPositioningCostRCCY,
+            crewTotalDirectCostRCCY,
+            airportRCCY,
+            navigationRCCY,
+            otherDocRCCY,
+            totalDocRCCY
           });
         }
 
