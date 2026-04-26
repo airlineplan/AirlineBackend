@@ -29,7 +29,6 @@ const REVENUE_FIELDS = [
     "legRate",
     "odFare",
     "odRate",
-    "prorateRatioL1",
     "fareProrateRatioL1L2",
     "rateProrateRatioL1L2",
     "pooCcyToRccy",
@@ -419,8 +418,7 @@ function createWorkingState(record) {
         legRate: roundToTwo(record.legRate),
         odFare: roundToTwo(record.odFare),
         odRate: roundToTwo(record.odRate),
-        prorateRatioL1: roundToTwo(record.prorateRatioL1),
-        fareProrateRatioL1L2: roundToTwo(record.fareProrateRatioL1L2),
+        fareProrateRatioL1L2: roundToTwo(record.fareProrateRatioL1L2 ?? record.prorateRatioL1),
         rateProrateRatioL1L2: roundToTwo(record.rateProrateRatioL1L2),
         legPaxRev: roundToTwo(record.legPaxRev),
         legCargoRev: roundToTwo(record.legCargoRev),
@@ -436,9 +434,6 @@ function createWorkingState(record) {
         rccyOdPaxRev: roundToTwo(record.rccyOdPaxRev),
         rccyOdCargoRev: roundToTwo(record.rccyOdCargoRev),
         rccyOdTotalRev: roundToTwo(record.rccyOdTotalRev),
-        rccyPax: roundToTwo(record.rccyPax),
-        rccyCargo: roundToTwo(record.rccyCargo),
-        rccyTotalRev: roundToTwo(record.rccyTotalRev),
         fnlRccyPaxRev: roundToTwo(record.fnlRccyPaxRev),
         fnlRccyCargoRev: roundToTwo(record.fnlRccyCargoRev),
         fnlRccyTotalRev: roundToTwo(record.fnlRccyTotalRev),
@@ -455,10 +450,6 @@ function calculateProrateRatio(row, fieldName) {
     const explicit = parseNumber(row[fieldName]);
     if (explicit > 0) {
         return Math.min(explicit, 1);
-    }
-    const sharedExplicit = parseNumber(row.prorateRatioL1);
-    if (sharedExplicit > 0) {
-        return Math.min(sharedExplicit, 1);
     }
     if (row.stops !== 1) {
         return 1;
@@ -508,9 +499,6 @@ function recalculateRevenue(row) {
     next.rccyOdPaxRev = roundToTwo(next.odPaxRev * rate);
     next.rccyOdCargoRev = roundToTwo(next.odCargoRev * rate);
     next.rccyOdTotalRev = roundToTwo(next.odTotalRev * rate);
-    next.rccyPax = next.rccyOdPaxRev;
-    next.rccyCargo = next.rccyOdCargoRev;
-    next.rccyTotalRev = next.rccyOdTotalRev;
     next.fnlRccyPaxRev = next.rccyOdPaxRev;
     next.fnlRccyCargoRev = next.rccyOdCargoRev;
     next.fnlRccyTotalRev = roundToTwo(next.fnlRccyPaxRev + next.fnlRccyCargoRev);
@@ -526,11 +514,15 @@ function buildEditableResponse(records) {
         })
         .map((record) => {
             const baseRecord = typeof record.toObject === "function" ? record.toObject() : record;
+            delete baseRecord.prorateRatioL1;
+            delete baseRecord.rccyPax;
+            delete baseRecord.rccyCargo;
+            delete baseRecord.rccyTotalRev;
             return {
-            ...baseRecord,
-            displayType: DISPLAY_LABELS[record.trafficType] || record.identifier || record.trafficType,
-            rowMatchKey: buildRowMatchKey(record),
-        };
+                ...baseRecord,
+                displayType: DISPLAY_LABELS[record.trafficType] || record.identifier || record.trafficType,
+                rowMatchKey: buildRowMatchKey(record),
+            };
         });
 }
 
@@ -677,8 +669,7 @@ function buildLegRows({
                 legRate: depExisting ? roundToTwo(depExisting.legRate) : 0,
                 odFare: depExisting ? roundToTwo(depExisting.odFare) : 0,
                 odRate: depExisting ? roundToTwo(depExisting.odRate) : 0,
-                prorateRatioL1: depExisting ? roundToTwo(depExisting.prorateRatioL1) : 0,
-                fareProrateRatioL1L2: depExisting ? roundToTwo(depExisting.fareProrateRatioL1L2) : 0,
+                fareProrateRatioL1L2: depExisting ? roundToTwo(depExisting.fareProrateRatioL1L2 ?? depExisting.prorateRatioL1) : 0,
                 rateProrateRatioL1L2: depExisting ? roundToTwo(depExisting.rateProrateRatioL1L2) : 0,
                 pooCcy: depExisting ? String(depExisting.pooCcy || "") : currencyContextByPoo[snapshot.depStn]?.pooCcy || "",
                 pooCcyToRccy: depExisting ? roundToTwo(depExisting.pooCcyToRccy || 1) : currencyContextByPoo[snapshot.depStn]?.pooCcyToRccy || 1,
@@ -700,8 +691,7 @@ function buildLegRows({
                 legRate: arrExisting ? roundToTwo(arrExisting.legRate) : 0,
                 odFare: arrExisting ? roundToTwo(arrExisting.odFare) : 0,
                 odRate: arrExisting ? roundToTwo(arrExisting.odRate) : 0,
-                prorateRatioL1: arrExisting ? roundToTwo(arrExisting.prorateRatioL1) : 0,
-                fareProrateRatioL1L2: arrExisting ? roundToTwo(arrExisting.fareProrateRatioL1L2) : 0,
+                fareProrateRatioL1L2: arrExisting ? roundToTwo(arrExisting.fareProrateRatioL1L2 ?? arrExisting.prorateRatioL1) : 0,
                 rateProrateRatioL1L2: arrExisting ? roundToTwo(arrExisting.rateProrateRatioL1L2) : 0,
                 pooCcy: arrExisting ? String(arrExisting.pooCcy || "") : currencyContextByPoo[snapshot.arrStn]?.pooCcy || "",
                 pooCcyToRccy: arrExisting ? roundToTwo(arrExisting.pooCcyToRccy || 1) : currencyContextByPoo[snapshot.arrStn]?.pooCcyToRccy || 1,
@@ -809,8 +799,7 @@ function buildSystemConnectionRows({
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
-            prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2 ?? sharedRevenue.prorateRatioL1) : 0,
             rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
             pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
             pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
@@ -871,8 +860,7 @@ function buildSystemConnectionRows({
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
-            prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2 ?? sharedRevenue.prorateRatioL1) : 0,
             rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
             pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
             pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
@@ -976,8 +964,7 @@ function buildUserTransitRows({
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
-            prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2 ?? sharedRevenue.prorateRatioL1) : 0,
             rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
             pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
             pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
@@ -1038,8 +1025,7 @@ function buildUserTransitRows({
             legRate: 0,
             odFare: sharedRevenue ? roundToTwo(sharedRevenue.odFare) : 0,
             odRate: sharedRevenue ? roundToTwo(sharedRevenue.odRate) : 0,
-            prorateRatioL1: sharedRevenue ? roundToTwo(sharedRevenue.prorateRatioL1) : 0,
-            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2) : 0,
+            fareProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.fareProrateRatioL1L2 ?? sharedRevenue.prorateRatioL1) : 0,
             rateProrateRatioL1L2: sharedRevenue ? roundToTwo(sharedRevenue.rateProrateRatioL1L2) : 0,
             pooCcy: sharedRevenue ? String(sharedRevenue.pooCcy || "") : pageCurrencyContext.pooCcy || "",
             pooCcyToRccy: sharedRevenue ? roundToTwo(sharedRevenue.pooCcyToRccy || 1) : pageCurrencyContext.pooCcyToRccy || 1,
@@ -1704,7 +1690,6 @@ async function applyUpdatesForDate({ userId, updates }) {
                             legRate: row.legRate,
                             odFare: row.odFare,
                             odRate: row.odRate,
-                            prorateRatioL1: row.prorateRatioL1,
                             fareProrateRatioL1L2: row.fareProrateRatioL1L2,
                             rateProrateRatioL1L2: row.rateProrateRatioL1L2,
                             pooCcy: row.pooCcy,
@@ -1727,9 +1712,6 @@ async function applyUpdatesForDate({ userId, updates }) {
                             rccyOdPaxRev: row.rccyOdPaxRev,
                             rccyOdCargoRev: row.rccyOdCargoRev,
                             rccyOdTotalRev: row.rccyOdTotalRev,
-                            rccyPax: row.rccyPax,
-                            rccyCargo: row.rccyCargo,
-                            rccyTotalRev: row.rccyTotalRev,
                             fnlRccyPaxRev: row.fnlRccyPaxRev,
                             fnlRccyCargoRev: row.fnlRccyCargoRev,
                             fnlRccyTotalRev: row.fnlRccyTotalRev,
@@ -1890,7 +1872,6 @@ exports.updatePooRecords = async (req, res) => {
                     cargoT: transitDraft.cargoT ?? 0,
                     odFare: transitDraft.odFare ?? row.odFare,
                     odRate: transitDraft.odRate ?? row.odRate,
-                    prorateRatioL1: transitDraft.prorateRatioL1 ?? row.prorateRatioL1,
                     fareProrateRatioL1L2: transitDraft.fareProrateRatioL1L2 ?? row.fareProrateRatioL1L2,
                     rateProrateRatioL1L2: transitDraft.rateProrateRatioL1L2 ?? row.rateProrateRatioL1L2,
                     pooCcy: transitDraft.pooCcy ?? row.pooCcy,
@@ -1928,7 +1909,6 @@ exports.updatePooRecords = async (req, res) => {
                         odRate: row.odRate,
                         pooCcy: row.pooCcy,
                         pooCcyToRccy: row.pooCcyToRccy,
-                        prorateRatioL1: row.prorateRatioL1,
                         fareProrateRatioL1L2: row.fareProrateRatioL1L2,
                         rateProrateRatioL1L2: row.rateProrateRatioL1L2,
                         applySSPricing: row.applySSPricing,
@@ -2316,4 +2296,11 @@ exports.deletePooRecords = async (req, res) => {
         console.error("🔥 Error deleting POO records:", error);
         res.status(500).json({ message: "Failed to delete records", error: error.message });
     }
+};
+
+exports.__testables__ = {
+    calculateProrateRatio,
+    recalculateRevenue,
+    buildEditableResponse,
+    buildRowMatchKey,
 };

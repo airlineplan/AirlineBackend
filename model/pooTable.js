@@ -60,7 +60,6 @@ const pooTableSchema = new mongoose.Schema({
     legRate: { type: Number, default: 0 },
     odFare: { type: Number, default: 0 },
     odRate: { type: Number, default: 0 },
-    prorateRatioL1: { type: Number, default: 0 },
     fareProrateRatioL1L2: { type: Number, default: 0 },
     rateProrateRatioL1L2: { type: Number, default: 0 },
     applySSPricing: { type: Boolean, default: false },
@@ -91,10 +90,7 @@ const pooTableSchema = new mongoose.Schema({
     rccyOdCargoRev: { type: Number, default: 0 },
     rccyOdTotalRev: { type: Number, default: 0 },
 
-    // Total Revenue (Reporting Currency - RCCY)
-    rccyPax: { type: Number, default: 0 },
-    rccyCargo: { type: Number, default: 0 },
-    rccyTotalRev: { type: Number, default: 0 },
+    // Final Revenue (Reporting Currency - RCCY)
     fnlRccyPaxRev: { type: Number, default: 0 },
     fnlRccyCargoRev: { type: Number, default: 0 },
     fnlRccyTotalRev: { type: Number, default: 0 },
