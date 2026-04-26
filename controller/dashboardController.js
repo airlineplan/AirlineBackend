@@ -759,6 +759,8 @@ const getDashboardData = async (req, res) => {
             return total + toNumericValue(row?.[field]);
           }, fallback);
 
+          const sumFlightCostField = (rows = [], field) => sumNumericField(rows, field);
+
           const sumRowFields = (rows = [], fields = []) => rows.reduce((total, row) => {
             const rowTotal = fields.reduce((rowSum, field) => {
               return rowSum + toNumericValue(row?.[field]);
@@ -792,9 +794,11 @@ const getDashboardData = async (req, res) => {
           const crewPositioningCostRCCY = sumNumericField(flightsInPeriod, "crewPositioningCostRCCY");
           const crewTotalDirectCostRCCY = crewAllowancesRCCY + layoverCostRCCY + crewPositioningCostRCCY;
 
-          const airportRCCY = sumNumericField(flightsInPeriod, "airportRCCY");
-          const navigationRCCY = sumNumericField(flightsInPeriod, "navigationRCCY");
-          const otherDocRCCY = sumNumericField(flightsInPeriod, "otherDocRCCY");
+          // Pull the DOC line items straight from the flight rows so the dashboard
+          // stays aligned with what is stored on the flight table.
+          const airportRCCY = sumFlightCostField(flightsInPeriod, "airportRCCY");
+          const navigationRCCY = sumFlightCostField(flightsInPeriod, "navigationRCCY");
+          const otherDocRCCY = sumFlightCostField(flightsInPeriod, "otherDocRCCY");
           const totalDocRCCY =
             totalFuelCostRCCY +
             totalMaintenanceCostRCCY +
