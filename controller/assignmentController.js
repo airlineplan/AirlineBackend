@@ -65,7 +65,24 @@ const parseExcelDate = (value) => {
         const excelEpoch = Date.UTC(1899, 11, 30);
         return moment.utc(excelEpoch + value * 86400000).toDate();
     }
-    const formats = ["DD-MM-YYYY", "DD/MM/YYYY", "YYYY-MM-DD", "MM/DD/YYYY", "DD-MMM-YY", "D MMM YY"];
+    const formats = [
+        "DD-MM-YYYY",
+        "D-MM-YYYY",
+        "DD/MM/YYYY",
+        "D/MM/YYYY",
+        "YYYY-MM-DD",
+        "MM/DD/YYYY",
+        "M/DD/YYYY",
+        "M/D/YYYY",
+        "DD-MMM-YYYY",
+        "D-MMM-YYYY",
+        "DD-MMM-YY",
+        "D-MMM-YY",
+        "DD MMM YYYY",
+        "D MMM YYYY",
+        "DD MMM YY",
+        "D MMM YY",
+    ];
     const m = moment.utc(value, formats, true);
     return m.isValid() ? m.startOf('day').toDate() : null;
 };
@@ -191,3 +208,8 @@ exports.getWeeklyAssignments = async (req, res) => {
         res.status(500).json({ message: "Failed to fetch assignments" });
     }
 }
+
+exports.__testables__ = {
+    parseExcelDate,
+    getExcelValue,
+};
