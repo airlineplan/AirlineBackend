@@ -4,6 +4,11 @@ const Flight = require('../model/flight');
 const moment = require('moment');
 const { buildAssignmentSyncPlan } = require('../utils/assignmentSync');
 
+const hasValidationRejections = (diagnostics) => Boolean(
+    diagnostics?.rejections &&
+    Object.values(diagnostics.rejections).some((count) => Number(count) > 0)
+);
+
 const buildUploadMessage = (diagnostics) => {
     const missingFleet = diagnostics?.rejections?.missingFromFleetDB || 0;
     const preEntryDates = diagnostics?.rejections?.preEntryDates || 0;
@@ -14,7 +19,7 @@ const buildUploadMessage = (diagnostics) => {
     const overlaps = diagnostics?.rejections?.acftOverlaps || 0;
     const rejectedRows = Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : [];
 
-    if (!missingFleet && !flightNotFound && !variantMismatches && !overlaps) {
+    if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches && !groundConflicts && !overlaps) {
         return "Assignments uploaded successfully!";
     }
 
@@ -148,25 +153,22 @@ exports.uploadAssignments = async (req, res) => {
             rows: validRows,
         });
 
-        const dbPromises = [];
-        if (assignmentBulkOps.length > 0) dbPromises.push(Assignment.bulkWrite(assignmentBulkOps, { ordered: false }));
-        if (flightBulkOps.length > 0) dbPromises.push(Flight.bulkWrite(flightBulkOps, { ordered: false }));
-
-        await Promise.all(dbPromises);
-
-        const hasRejections = Boolean(
-            diagnostics?.rejections &&
-            Object.values(diagnostics.rejections).some((count) => Number(count) > 0)
-        );
+        const hasRejections = hasValidationRejections(diagnostics);
         const message = buildUploadMessage(diagnostics);
 
-        if (assignmentBulkOps.length === 0 && hasRejections) {
+        if (hasRejections) {
             return res.status(422).json({
                 success: false,
                 message,
                 diagnostics,
             });
         }
+
+        const dbPromises = [];
+        if (assignmentBulkOps.length > 0) dbPromises.push(Assignment.bulkWrite(assignmentBulkOps, { ordered: false }));
+        if (flightBulkOps.length > 0) dbPromises.push(Flight.bulkWrite(flightBulkOps, { ordered: false }));
+
+        await Promise.all(dbPromises);
 
         res.status(200).json({
             message,
@@ -212,4 +214,6 @@ exports.getWeeklyAssignments = async (req, res) => {
 exports.__testables__ = {
     parseExcelDate,
     getExcelValue,
+    hasValidationRejections,
+    buildUploadMessage,
 };

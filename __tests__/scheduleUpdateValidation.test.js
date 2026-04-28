@@ -6,12 +6,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const mongoose = require("mongoose");
+const xlsx = require("xlsx");
 
 const Data = require("../model/dataSchema");
 const Sector = require("../model/sectorSchema");
 const Flight = require("../model/flight");
 const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
+const { uploadAssignments } = require("../controller/assignmentController");
 const { buildAssignmentSyncPlan } = require("../utils/assignmentSync");
 
 const USER_ID = "test-user";
@@ -209,6 +211,31 @@ async function seedValidAssignment({ date, flightNumber = BASE_FLIGHT, regn = "V
     createdAt: new Date(),
     updatedAt: new Date(),
   });
+}
+
+function createAssignmentWorkbook(rows) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "assignment-upload-"));
+  const filePath = path.join(tempDir, "assignments.xlsx");
+  const workbook = xlsx.utils.book_new();
+  const worksheet = xlsx.utils.json_to_sheet(rows);
+  xlsx.utils.book_append_sheet(workbook, worksheet, "Assignments");
+  xlsx.writeFile(workbook, filePath);
+  return { tempDir, filePath };
+}
+
+function createMockResponse() {
+  return {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
 }
 
 before(async () => {
@@ -433,6 +460,59 @@ test("assignment sync treats base variant before hyphen as a match", async () =>
   assert.equal(result.assignmentBulkOps.length, 1);
   assert.equal(result.flightBulkOps.length, 1);
   assert.equal(result.assignmentBulkOps[0].updateOne.update.$set.isValid, true);
+});
+
+test("assignment upload rejects the whole file when any row fails validation", async () => {
+  await seedNetwork({ variant: BASE_VARIANT });
+  await Fleet.create([
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: BASE_VARIANT,
+      variant: BASE_VARIANT,
+      sn: "4120",
+      regn: "VT-AAA",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: "B737",
+      variant: "B737",
+      sn: "7370",
+      regn: "VT-BAD",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+  ]);
+
+  const { tempDir, filePath } = createAssignmentWorkbook([
+    { Date: "06-Apr-26", "Flight #": BASE_FLIGHT, ACFT: "VT-AAA" },
+    { Date: "08-Apr-26", "Flight #": BASE_FLIGHT, ACFT: "VT-BAD" },
+  ]);
+  const res = createMockResponse();
+
+  try {
+    await uploadAssignments(
+      {
+        user: { id: USER_ID },
+        file: { path: filePath },
+      },
+      res
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const assignments = await Assignment.find({ userId: USER_ID }).lean();
+  const flights = await Flight.find({ userId: USER_ID }).lean();
+
+  assert.equal(res.statusCode, 422);
+  assert.equal(res.body?.success, false);
+  assert.equal(res.body?.diagnostics?.rejections?.variantMismatches, 1);
+  assert.equal(assignments.length, 0);
+  assert.ok(flights.every((flight) => !flight.aircraft?.registration));
 });
 
 test("assignment and flight tenant indexes reject duplicate rows for the same user scope", async () => {
