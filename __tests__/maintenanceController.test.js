@@ -14,6 +14,7 @@ const AircraftOnwing = require("../model/aircraftOnwing");
 const MaintenanceReset = require("../model/maintenanceReset");
 const MaintenanceTarget = require("../model/maintenanceTargetSchema");
 const Utilisation = require("../model/utilisation");
+const UtilisationAssumption = require("../model/utilisationAssumptionSchema");
 const maintenanceController = require("../controller/maintenanceController");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
@@ -263,6 +264,111 @@ test("maintenance compute uses the aircraft ownership valid on the reset date", 
   }).lean();
 
   assert.equal(nextDayUtil?.tsn, 12);
+});
+
+test("maintenance compute uses utilisation assumptions only when assignments are absent", async () => {
+  const day1 = utcDate(2026, 4, 1);
+  const day2 = utcDate(2026, 4, 2);
+  const day3 = utcDate(2026, 4, 3);
+
+  await seedFlightDays([day1, day2, day3]);
+  await seedFleetAsset({
+    msn: 4120,
+    regn: "VT-AAA",
+    entry: day1,
+    exit: utcDate(2026, 4, 30),
+  });
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: day1,
+    msnEsn: "4120",
+    pn: "PN-1",
+    snBn: "SN-1",
+    tsn: 100,
+    csn: 100,
+    dsn: 100,
+    tsoTsr: 100,
+    csoCsr: 100,
+    dsoDsr: 100,
+    tsRplmt: 100,
+    csRplmt: 100,
+    dsRplmt: 100,
+    timeMetric: "BH",
+  });
+
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "4120",
+    fromDate: day2,
+    toDate: day3,
+    hours: 5,
+    cycles: 2,
+  });
+
+  await seedAssignment({
+    date: day3,
+    flightNumber: "FL3",
+    msn: 4120,
+    registration: "VT-AAA",
+    bh: 3,
+  });
+
+  const req = { user: { id: USER_ID } };
+  const res = createMockResponse();
+
+  await maintenanceController.computeMaintenanceLogic(req, res);
+
+  const day2Util = await Utilisation.findOne({
+    userId: USER_ID,
+    date: day2,
+    msnEsn: "4120",
+    pn: "PN-1",
+    snBn: "SN-1",
+  }).lean();
+
+  const day3Util = await Utilisation.findOne({
+    userId: USER_ID,
+    date: day3,
+    msnEsn: "4120",
+    pn: "PN-1",
+    snBn: "SN-1",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(day2Util?.tsn, 105);
+  assert.equal(day2Util?.csn, 102);
+  assert.equal(day3Util?.tsn, 108);
+  assert.equal(day3Util?.csn, 103);
+});
+
+test("utilisation assumptions persist avg downdays", async () => {
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      utilisationAssumptions: [
+        {
+          msn: "4120",
+          fromDate: "2025-10-01",
+          toDate: "2025-10-12",
+          hours: 5,
+          cycles: 2,
+          avgDowndays: 1.5,
+        },
+      ],
+    },
+  };
+  const saveRes = createMockResponse();
+
+  await maintenanceController.bulkSaveUtilisationAssumptions(req, saveRes);
+
+  const getRes = createMockResponse();
+  await maintenanceController.getUtilisationAssumptions({ user: { id: USER_ID } }, getRes);
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(getRes.statusCode, 200);
+  assert.equal(getRes.body.data[0].msn, "4120");
+  assert.equal(getRes.body.data[0].avgDowndays, 1.5);
 });
 
 test("maintenance backfill writes the first boundary day", async () => {

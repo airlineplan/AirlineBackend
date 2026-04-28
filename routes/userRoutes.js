@@ -230,14 +230,35 @@ user.delete(
   maintenanceController.deleteTarget
 );
 
-// 9. Get Calendar Inputs
+// 9. Get Utilisation Assumptions
+user.get(
+  "/maintenance/utilisation-assumptions",
+  verifyToken,
+  maintenanceController.getUtilisationAssumptions
+);
+
+// 10. Bulk Save Utilisation Assumptions
+user.post(
+  "/maintenance/utilisation-assumptions",
+  verifyToken,
+  jsonParser,
+  maintenanceController.bulkSaveUtilisationAssumptions
+);
+
+user.delete(
+  "/maintenance/utilisation-assumptions/:id",
+  verifyToken,
+  maintenanceController.deleteUtilisationAssumption
+);
+
+// 11. Get Calendar Inputs
 user.get(
   "/maintenance/calendar",
   verifyToken,
   maintenanceController.getCalendar
 );
 
-// 10. Bulk Save Calendar Inputs
+// 12. Bulk Save Calendar Inputs
 user.post(
   "/maintenance/calendar",
   verifyToken,

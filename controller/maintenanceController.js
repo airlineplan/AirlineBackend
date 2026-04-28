@@ -9,6 +9,7 @@ const Fleet = require("../model/fleet.js");
 const Assignment = require("../model/assignment.js");
 const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
+const UtilisationAssumption = require("../model/utilisationAssumptionSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
@@ -84,6 +85,64 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     };
 };
 
+const getAssumptionUsageForDate = ({ assumptions = [], effectiveMsn, date }) => {
+    const msn = String(effectiveMsn || "").trim();
+    if (!msn || !date) {
+        return { timeUsage: 0, cycleUsage: 0 };
+    }
+
+    const targetDate = moment.utc(date).startOf("day");
+    const match = assumptions.find((assumption) => (
+        String(assumption.msn || "").trim() === msn &&
+        targetDate.isSameOrAfter(moment.utc(assumption.fromDate).startOf("day")) &&
+        targetDate.isSameOrBefore(moment.utc(assumption.toDate).endOf("day"))
+    ));
+
+    if (!match) {
+        return { timeUsage: 0, cycleUsage: 0 };
+    }
+
+    return {
+        timeUsage: Number(match.hours || 0),
+        cycleUsage: Number(match.cycles || 0)
+    };
+};
+
+const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, assumptions = [] }) => {
+    if (!effectiveMsn) {
+        return { timeUsage: 0, cycleUsage: 0 };
+    }
+
+    const msnNumber = Number(effectiveMsn);
+    const assignmentFilter = {
+        ...(userId ? { userId: String(userId) } : {}),
+        date: {
+            $gte: date.toDate(),
+            $lt: moment.utc(date).endOf("day").toDate()
+        }
+    };
+
+    if (Number.isFinite(msnNumber)) {
+        assignmentFilter["aircraft.msn"] = msnNumber;
+    } else {
+        assignmentFilter["aircraft.msn"] = effectiveMsn;
+    }
+
+    const assignments = await Assignment.find(assignmentFilter);
+
+    if (assignments.length > 0) {
+        const timeUsage = assignments.reduce((sum, a) =>
+            sum + (metric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
+
+        return {
+            timeUsage,
+            cycleUsage: assignments.length
+        };
+    }
+
+    return getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
+};
+
 const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedResetGroups } = {}) => {
     const flightBounds = await getFlightDateBounds({ userId });
 
@@ -98,6 +157,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
     const masterEndDate = moment.utc(flightBounds.lastDate).endOf("day");
 
     const allCalendars = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
+    const utilisationAssumptions = await UtilisationAssumption.find({ userId: String(userId) }).lean();
 
     const resetGroups = Array.isArray(requestedResetGroups) && requestedResetGroups.length > 0
         ? [...new Map(
@@ -162,18 +222,13 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 while (backfillCursor.isAfter(startBoundaryDate)) {
                     const targetDate = moment.utc(backfillCursor).subtract(1, "day").startOf("day");
 
-                    const assignments = await Assignment.find({
-                        userId: String(userId),
-                        date: {
-                            $gte: backfillCursor.toDate(),
-                            $lt: moment.utc(backfillCursor).endOf("day").toDate()
-                        },
-                        "aircraft.msn": Number(effectiveMsn)
+                    const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+                        userId,
+                        effectiveMsn,
+                        date: backfillCursor,
+                        metric: currentReset.timeMetric,
+                        assumptions: utilisationAssumptions
                     });
-
-                    const timeUsage = assignments.reduce((sum, a) =>
-                        sum + (currentReset.timeMetric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
-                    const cycleUsage = assignments.length;
 
                     if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
                     if (currentCsn !== null) currentCsn -= cycleUsage;
@@ -283,18 +338,13 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     continue;
                 }
 
-                const assignments = await Assignment.find({
-                    userId: String(userId),
-                    date: {
-                        $gte: currDate.toDate(),
-                        $lt: moment.utc(currDate).endOf("day").toDate()
-                    },
-                    "aircraft.msn": Number(effectiveMsn)
+                const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+                    userId,
+                    effectiveMsn,
+                    date: currDate,
+                    metric: currentReset.timeMetric,
+                    assumptions: utilisationAssumptions
                 });
-
-                const timeUsage = assignments.reduce((sum, a) =>
-                    sum + (currentReset.timeMetric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
-                const cycleUsage = assignments.length;
 
                 const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
                 const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
@@ -1226,6 +1276,136 @@ exports.deleteTarget = async (req, res) => {
     } catch (error) {
         console.error("Error deleting target maintenance status:", error);
         res.status(500).json({ message: "Failed to delete target maintenance status", error: error.message });
+    }
+};
+
+exports.getUtilisationAssumptions = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const records = await UtilisationAssumption.find({ userId: String(userId) })
+            .sort({ msn: 1, fromDate: 1 })
+            .lean();
+
+        const formattedRecords = records.map(record => ({
+            id: record._id,
+            msn: record.msn || "",
+            fromDate: record.fromDate ? moment.utc(record.fromDate).format("YYYY-MM-DD") : "",
+            toDate: record.toDate ? moment.utc(record.toDate).format("YYYY-MM-DD") : "",
+            hours: record.hours ?? "",
+            cycles: record.cycles ?? "",
+            avgDowndays: record.avgDowndays ?? ""
+        }));
+
+        res.status(200).json({ success: true, data: formattedRecords });
+    } catch (error) {
+        console.error("Error fetching utilisation assumptions:", error);
+        res.status(500).json({ message: "Failed to fetch utilisation assumptions", error: error.message });
+    }
+};
+
+exports.bulkSaveUtilisationAssumptions = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { utilisationAssumptions } = req.body;
+
+        if (!Array.isArray(utilisationAssumptions)) {
+            return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
+        }
+
+        const parseNum = (value) => {
+            if (value === "" || value === null || value === undefined) return 0;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+
+        const bulkOperations = [];
+
+        for (const record of utilisationAssumptions) {
+            const values = [record.msn, record.fromDate, record.toDate, record.hours, record.cycles, record.avgDowndays];
+            const hasAnyValue = values.some(value => String(value ?? "").trim() !== "");
+            if (!hasAnyValue) continue;
+
+            const msn = String(record.msn || "").trim();
+            const fromDate = moment.utc(record.fromDate, moment.ISO_8601, true);
+            const toDate = moment.utc(record.toDate, moment.ISO_8601, true);
+
+            if (!msn || !fromDate.isValid() || !toDate.isValid()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "MSN, From date, and To date are required for utilisation assumptions."
+                });
+            }
+
+            if (toDate.isBefore(fromDate, "day")) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Utilisation assumption To date cannot be before From date."
+                });
+            }
+
+            const normalizedFromDate = fromDate.startOf("day").toDate();
+            const normalizedToDate = toDate.startOf("day").toDate();
+            const filter = isValidObjectId(record.id)
+                ? { _id: record.id, userId: String(userId) }
+                : {
+                    userId: String(userId),
+                    msn,
+                    fromDate: normalizedFromDate,
+                    toDate: normalizedToDate
+                };
+
+            bulkOperations.push({
+                updateOne: {
+                    filter,
+                    update: {
+                        $set: {
+                            userId: String(userId),
+                            msn,
+                            fromDate: normalizedFromDate,
+                            toDate: normalizedToDate,
+                            hours: parseNum(record.hours),
+                            cycles: parseNum(record.cycles),
+                            avgDowndays: parseNum(record.avgDowndays)
+                        }
+                    },
+                    upsert: true
+                }
+            });
+        }
+
+        if (bulkOperations.length > 0) {
+            await UtilisationAssumption.bulkWrite(bulkOperations, { ordered: false });
+        }
+
+        await recomputeMaintenanceTimeline({ userId });
+
+        res.status(200).json({ success: true, message: "Utilisation assumptions updated successfully." });
+    } catch (error) {
+        console.error("Error saving utilisation assumptions:", error);
+        res.status(500).json({ message: "Failed to update utilisation assumptions", error: error.message });
+    }
+};
+
+exports.deleteUtilisationAssumption = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { id } = req.params;
+
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+        if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid utilisation assumption id." });
+
+        const deletedRecord = await UtilisationAssumption.findOneAndDelete({ _id: id, userId: String(userId) });
+
+        if (!deletedRecord) {
+            return res.status(404).json({ message: "Utilisation assumption not found." });
+        }
+
+        await recomputeMaintenanceTimeline({ userId });
+
+        res.status(200).json({ success: true, message: "Utilisation assumption deleted successfully." });
+    } catch (error) {
+        console.error("Error deleting utilisation assumption:", error);
+        res.status(500).json({ message: "Failed to delete utilisation assumption", error: error.message });
     }
 };
 
