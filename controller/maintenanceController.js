@@ -683,8 +683,22 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const msnEsn = String(record.msnEsn || "").trim();
             const pn = String(record.pn || "").trim();
             const snBn = String(record.snBn || "").trim();
+            const values = [
+                record.msnEsn, record.pn, record.snBn, record.tsn, record.csn, record.dsn,
+                record.tso, record.cso, record.dso, record.tsr, record.csr, record.dsr
+            ];
+            const hasAnyValue = values.some(value => String(value ?? "").trim() !== "");
+            if (!hasAnyValue) continue;
+
+            if (!msnEsn || !pn || !snBn) {
+                return res.status(400).json({
+                    success: false,
+                    message: "MSN/ESN, PN, and SN/BN are required before saving reset records."
+                });
+            }
+
             const rawDate = record.date || fallbackResetDate;
-            const parsedDate = moment(rawDate);
+            const parsedDate = moment.utc(rawDate, moment.ISO_8601, true);
 
             if (!parsedDate.isValid()) {
                 return res.status(400).json({

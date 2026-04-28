@@ -507,6 +507,58 @@ test("saving reset records waits for recompute before responding", async () => {
   assert.equal(nextDayUtil?.tsn, 24);
 });
 
+test("saving reset records accepts modal fallback date", async () => {
+  const resetDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([resetDate]);
+  await seedFleetAsset({
+    msn: 8000,
+    regn: "VT-FFF",
+    entry: resetDate,
+    exit: utcDate(2026, 5, 31),
+  });
+  await seedAssignment({
+    date: resetDate,
+    flightNumber: "FL5",
+    msn: 8000,
+    registration: "VT-FFF",
+    bh: 3,
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      resetDate: "2026-05-05",
+      resetData: [
+        {
+          msnEsn: "8000",
+          pn: "PN-2",
+          snBn: "SN-2",
+          tsn: "30",
+          csn: "12",
+          metric: "FH",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveResetRecords(req, res);
+
+  const savedReset = await MaintenanceReset.findOne({
+    userId: USER_ID,
+    msnEsn: "8000",
+    pn: "PN-2",
+    snBn: "SN-2",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(savedReset?.date.toISOString().slice(0, 10), "2026-05-05");
+  assert.equal(savedReset?.tsn, 30);
+  assert.equal(savedReset?.csn, 12);
+  assert.equal(savedReset?.timeMetric, "FH");
+});
+
 test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
   const targetDate = utcDate(2026, 4, 13);
 
