@@ -591,10 +591,28 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 resetFilter.userId = String(userId);
             }
 
-            const [utils, resetRecords] = await Promise.all([
+            const fleetFilter = {};
+            if (userId) {
+                fleetFilter.userId = String(userId);
+            }
+            fleetFilter.$and = [
+                { $or: [{ entry: { $exists: false } }, { entry: null }, { entry: { $lte: endOfDay } }] },
+                { $or: [{ exit: { $exists: false } }, { exit: null }, { exit: { $gte: moment(date).startOf("day").toDate() } }] }
+            ];
+
+            const [utils, resetRecords, fleetAssets] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
+                Fleet.find(fleetFilter).select("sn titled").lean(),
             ]);
+
+            const titledBySn = new Map();
+            fleetAssets.forEach(asset => {
+                const sn = String(asset.sn || "").trim().toUpperCase();
+                if (sn && !titledBySn.has(sn)) {
+                    titledBySn.set(sn, asset.titled || "");
+                }
+            });
 
             const utilByKey = new Map();
             utils.forEach(record => {
@@ -637,7 +655,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                     pn: record.pn || "",
                     sn: record.snBn || "",
                     snBn: record.snBn || "",
-                    titled: "",
+                    titled: titledBySn.get(String(record.msnEsn || "").trim().toUpperCase()) || "",
                     date: savedResetDate,
                     savedResetDate,
                     asOnDate: selectedDate,
@@ -684,43 +702,30 @@ exports.getResetRecords = async (req, res) => {
         const { date, msnEsn } = req.query;
         const filter = {};
 
-        // Apply filters if provided from the React frontend.
-        // The dashboard shows the effective reset row as of the selected date, so
-        // the modal should use the same <= date lookup instead of exact-day only.
         if (date) {
-            const endOfDay = moment(date).endOf('day').toDate();
-            filter.date = { $lte: endOfDay };
+            const selectedDate = moment.utc(date, moment.ISO_8601, true);
+            if (!selectedDate.isValid()) {
+                return res.status(400).json({ message: "Invalid reset date." });
+            }
+            filter.date = {
+                $gte: selectedDate.startOf("day").toDate(),
+                $lte: selectedDate.endOf("day").toDate()
+            };
         }
 
         if (msnEsn) {
-            // Regex for partial matching in the search dropdown
-            filter.msnEsn = { $regex: msnEsn, $options: 'i' };
+            filter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
         }
         if (userId) {
             filter.userId = String(userId);
         }
 
-        const effectiveRecords = date
-            ? await MaintenanceReset.aggregate([
-                { $match: filter },
-                { $sort: { date: -1, updatedAt: -1, createdAt: -1, msnEsn: 1 } },
-                {
-                    $group: {
-                        _id: {
-                            msnEsn: { $toUpper: { $trim: { input: { $ifNull: ["$msnEsn", ""] } } } },
-                            pn: { $toUpper: { $trim: { input: { $ifNull: ["$pn", ""] } } } },
-                            snBn: { $toUpper: { $trim: { input: { $ifNull: ["$snBn", ""] } } } }
-                        },
-                        record: { $first: "$$ROOT" }
-                    }
-                },
-                { $replaceRoot: { newRoot: "$record" } },
-                { $sort: { msnEsn: 1, pn: 1, snBn: 1 } }
-            ])
-            : await MaintenanceReset.find(filter).sort({ date: -1, updatedAt: -1, createdAt: -1, msnEsn: 1 }).lean();
+        const resetRecords = await MaintenanceReset.find(filter)
+            .sort({ date: -1, updatedAt: -1, createdAt: -1, msnEsn: 1 })
+            .lean();
 
         // Format data for the React frontend (map _id to id, format dates)
-        const formattedRecords = effectiveRecords.map(record => ({
+        const formattedRecords = resetRecords.map(record => ({
             id: record._id,
             date: moment(record.date).format("YYYY-MM-DD"),
             msnEsn: record.msnEsn || "",

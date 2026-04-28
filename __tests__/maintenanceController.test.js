@@ -122,7 +122,7 @@ async function seedFlightDays(days, flightPrefix = "FL") {
   }
 }
 
-async function seedFleetAsset({ msn, regn, entry, exit }) {
+async function seedFleetAsset({ msn, regn, entry, exit, titled = "" }) {
   await Fleet.create({
     userId: USER_ID,
     category: "Aircraft",
@@ -132,6 +132,7 @@ async function seedFleetAsset({ msn, regn, entry, exit }) {
     regn,
     entry,
     exit,
+    titled,
   });
 }
 
@@ -719,7 +720,7 @@ test("saving reset records uses modal reset date over effective row date", async
   assert.equal(savedReset?.tsn, 25);
 });
 
-test("reset records modal returns effective rows as of selected date", async () => {
+test("reset records modal returns only records matching selected date", async () => {
   await MaintenanceReset.create([
     {
       userId: USER_ID,
@@ -736,6 +737,22 @@ test("reset records modal returns effective rows as of selected date", async () 
       pn: "PN-1",
       snBn: "SN-1",
       tsn: 14,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 5, 5),
+      msnEsn: "9000",
+      pn: "PN-1",
+      snBn: "SN-1",
+      tsn: 15,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 5, 5),
+      msnEsn: "9001",
+      pn: "PN-2",
+      snBn: "SN-2",
+      tsn: 20,
     },
     {
       userId: USER_ID,
@@ -760,8 +777,48 @@ test("reset records modal returns effective rows as of selected date", async () 
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.data.length, 1);
-  assert.equal(res.body.data[0].date, "2026-05-04");
-  assert.equal(res.body.data[0].tsn, 14);
+  assert.equal(res.body.data[0].date, "2026-05-05");
+  assert.equal(res.body.data[0].msnEsn, "9000");
+  assert.equal(res.body.data[0].tsn, 15);
+});
+
+test("maintenance dashboard autopopulates titled spare from active fleet asset", async () => {
+  const selectedDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([selectedDate]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-ABC",
+    entry: utcDate(2026, 5, 1),
+    exit: utcDate(2026, 5, 30),
+    titled: "Spare",
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: selectedDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1000,
+    dsn: 200,
+    timeMetric: "BH",
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    query: {
+      date: "2026-05-05",
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.getMaintenanceDashboard(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.maintenanceData.length, 1);
+  assert.equal(res.body.data.maintenanceData[0].msnEsn, "5340");
+  assert.equal(res.body.data.maintenanceData[0].titled, "Spare");
 });
 
 test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
