@@ -559,6 +559,51 @@ test("saving reset records accepts modal fallback date", async () => {
   assert.equal(savedReset?.timeMetric, "FH");
 });
 
+test("reset records modal returns effective rows as of selected date", async () => {
+  await MaintenanceReset.create([
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 5, 1),
+      msnEsn: "9000",
+      pn: "PN-1",
+      snBn: "SN-1",
+      tsn: 10,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 5, 4),
+      msnEsn: "9000",
+      pn: "PN-1",
+      snBn: "SN-1",
+      tsn: 14,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 5, 8),
+      msnEsn: "9000",
+      pn: "PN-1",
+      snBn: "SN-1",
+      tsn: 18,
+    },
+  ]);
+
+  const req = {
+    user: { id: USER_ID },
+    query: {
+      date: "2026-05-05",
+      msnEsn: "9000",
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.getResetRecords(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.length, 1);
+  assert.equal(res.body.data[0].date, "2026-05-04");
+  assert.equal(res.body.data[0].tsn, 14);
+});
+
 test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
   const targetDate = utcDate(2026, 4, 13);
 

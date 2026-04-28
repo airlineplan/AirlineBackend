@@ -174,6 +174,12 @@ user.post(
   maintenanceController.bulkSaveResetRecords
 );
 
+user.delete(
+  "/maintenance/reset-records/:id",
+  verifyToken,
+  maintenanceController.deleteResetRecord
+);
+
 // 4. Trigger Compute Button
 user.post(
   "/maintenance/compute",
@@ -197,6 +203,12 @@ user.post(
   maintenanceController.bulkSaveRotables
 );
 
+user.delete(
+  "/maintenance/rotables/:id",
+  verifyToken,
+  maintenanceController.deleteRotable
+);
+
 // 7. Get Target Maintenance Status
 user.get(
   "/maintenance/targets",
@@ -212,6 +224,12 @@ user.post(
   maintenanceController.bulkSaveTargets
 );
 
+user.delete(
+  "/maintenance/targets/:id",
+  verifyToken,
+  maintenanceController.deleteTarget
+);
+
 // 9. Get Calendar Inputs
 user.get(
   "/maintenance/calendar",
@@ -225,6 +243,12 @@ user.post(
   verifyToken,
   jsonParser,
   maintenanceController.bulkSaveCalendar
+);
+
+user.delete(
+  "/maintenance/calendar/:id",
+  verifyToken,
+  maintenanceController.deleteCalendar
 );
 
 // ─── POO & Revenue ─────────────────────────────────────────────────

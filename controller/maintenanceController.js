@@ -12,9 +12,22 @@ const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
+const isValidObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
 
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildResetGroupKey = ({ msnEsn, pn, snBn } = {}) => [
+    String(msnEsn || "").trim().toUpperCase(),
+    String(pn || "").trim().toUpperCase(),
+    String(snBn || "").trim().toUpperCase()
+].join("|");
+
+const normalizeResetGroup = ({ msnEsn, pn, snBn } = {}) => ({
+    msnEsn: String(msnEsn || "").trim(),
+    pn: String(pn || "").trim(),
+    snBn: String(snBn || "").trim()
+});
 
 const getFlightDateBounds = async ({ userId } = {}) => {
     const buildPipeline = (match = {}) => [
@@ -71,7 +84,7 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     };
 };
 
-const recomputeMaintenanceTimeline = async ({ userId }) => {
+const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedResetGroups } = {}) => {
     const flightBounds = await getFlightDateBounds({ userId });
 
     if (!flightBounds?.firstDate || !flightBounds?.lastDate) {
@@ -86,10 +99,17 @@ const recomputeMaintenanceTimeline = async ({ userId }) => {
 
     const allCalendars = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
 
-    const resetGroups = await MaintenanceReset.aggregate([
-        { $match: { userId: String(userId) } },
-        { $group: { _id: { msnEsn: "$msnEsn", pn: "$pn", snBn: "$snBn" } } }
-    ]);
+    const resetGroups = Array.isArray(requestedResetGroups) && requestedResetGroups.length > 0
+        ? [...new Map(
+            requestedResetGroups
+                .map(normalizeResetGroup)
+                .filter(group => group.msnEsn && group.pn && group.snBn)
+                .map(group => [buildResetGroupKey(group), { _id: group }])
+        ).values()]
+        : await MaintenanceReset.aggregate([
+            { $match: { userId: String(userId) } },
+            { $group: { _id: { msnEsn: "$msnEsn", pn: "$pn", snBn: "$snBn" } } }
+        ]);
 
     const totalOps = [];
 
@@ -614,12 +634,12 @@ exports.getResetRecords = async (req, res) => {
         const { date, msnEsn } = req.query;
         const filter = {};
 
-        // Apply filters if provided from the React frontend
+        // Apply filters if provided from the React frontend.
+        // The dashboard shows the effective reset row as of the selected date, so
+        // the modal should use the same <= date lookup instead of exact-day only.
         if (date) {
-            // Match exact date (ignoring time)
-            const startOfDay = moment(date).startOf('day').toDate();
             const endOfDay = moment(date).endOf('day').toDate();
-            filter.date = { $gte: startOfDay, $lte: endOfDay };
+            filter.date = { $lte: endOfDay };
         }
 
         if (msnEsn) {
@@ -630,10 +650,27 @@ exports.getResetRecords = async (req, res) => {
             filter.userId = String(userId);
         }
 
-        const records = await MaintenanceReset.find(filter).sort({ date: -1, msnEsn: 1 }).lean();
+        const effectiveRecords = date
+            ? await MaintenanceReset.aggregate([
+                { $match: filter },
+                { $sort: { date: -1, updatedAt: -1, createdAt: -1, msnEsn: 1 } },
+                {
+                    $group: {
+                        _id: {
+                            msnEsn: { $toUpper: { $trim: { input: { $ifNull: ["$msnEsn", ""] } } } },
+                            pn: { $toUpper: { $trim: { input: { $ifNull: ["$pn", ""] } } } },
+                            snBn: { $toUpper: { $trim: { input: { $ifNull: ["$snBn", ""] } } } }
+                        },
+                        record: { $first: "$$ROOT" }
+                    }
+                },
+                { $replaceRoot: { newRoot: "$record" } },
+                { $sort: { msnEsn: 1, pn: 1, snBn: 1 } }
+            ])
+            : await MaintenanceReset.find(filter).sort({ date: -1, updatedAt: -1, createdAt: -1, msnEsn: 1 }).lean();
 
         // Format data for the React frontend (map _id to id, format dates)
-        const formattedRecords = records.map(record => ({
+        const formattedRecords = effectiveRecords.map(record => ({
             id: record._id,
             date: moment(record.date).format("YYYY-MM-DD"),
             msnEsn: record.msnEsn || "",
@@ -675,6 +712,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
         const bulkOperations = [];
         const utilisationOps = [];
         const saveDateStrings = new Set();
+        const changedResetGroups = new Map();
 
         // Use a for...of loop to handle async Await calls
         for (const record of resetData) {
@@ -683,6 +721,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const msnEsn = String(record.msnEsn || "").trim();
             const pn = String(record.pn || "").trim();
             const snBn = String(record.snBn || "").trim();
+            const resetGroup = { msnEsn, pn, snBn };
             const values = [
                 record.msnEsn, record.pn, record.snBn, record.tsn, record.csn, record.dsn,
                 record.tso, record.cso, record.dso, record.tsr, record.csr, record.dsr
@@ -724,6 +763,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 dsRplmt: parseNum(record.dsr),
             };
             saveDateStrings.add(moment(normalizedDate).format("YYYY-MM-DD"));
+            changedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
 
             // 1. MaintenanceReset mapping (for the explicit reset date)
             bulkOperations.push({
@@ -778,13 +818,50 @@ exports.bulkSaveResetRecords = async (req, res) => {
         }
 
         if (saveDateStrings.size > 0) {
-            await recomputeMaintenanceTimeline({ userId });
+            await recomputeMaintenanceTimeline({
+                userId,
+                resetGroups: [...changedResetGroups.values()]
+            });
         }
 
         res.status(200).json({ success: true, message: "Maintenance reset records updated successfully!" });
     } catch (error) {
         console.error("🔥 Error saving reset records:", error);
         res.status(500).json({ message: "Failed to save records", error: error.message });
+    }
+};
+
+exports.deleteResetRecord = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { id } = req.params;
+
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+        if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid reset record id." });
+
+        const deletedRecord = await MaintenanceReset.findOneAndDelete({ _id: id, userId: String(userId) });
+
+        if (!deletedRecord) {
+            return res.status(404).json({ message: "Maintenance reset record not found." });
+        }
+
+        await Utilisation.deleteOne({
+            userId: String(userId),
+            date: deletedRecord.date,
+            msnEsn: deletedRecord.msnEsn,
+            pn: deletedRecord.pn,
+            snBn: deletedRecord.snBn
+        });
+
+        await recomputeMaintenanceTimeline({
+            userId,
+            resetGroups: [deletedRecord]
+        });
+
+        res.status(200).json({ success: true, message: "Maintenance reset record deleted successfully." });
+    } catch (error) {
+        console.error("Error deleting reset record:", error);
+        res.status(500).json({ message: "Failed to delete maintenance reset record", error: error.message });
     }
 };
 
@@ -930,6 +1007,27 @@ exports.bulkSaveRotables = async (req, res) => {
     } catch (error) {
         console.error("Error saving rotables data:", error);
         res.status(500).json({ message: "Failed to update rotables data", error: error.message });
+    }
+};
+
+exports.deleteRotable = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { id } = req.params;
+
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+        if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid rotable movement id." });
+
+        const deletedRecord = await RotableMovement.findOneAndDelete({ _id: id, userId: String(userId) });
+
+        if (!deletedRecord) {
+            return res.status(404).json({ message: "Rotable movement not found." });
+        }
+
+        res.status(200).json({ success: true, message: "Rotable movement deleted successfully." });
+    } catch (error) {
+        console.error("Error deleting rotable movement:", error);
+        res.status(500).json({ message: "Failed to delete rotable movement", error: error.message });
     }
 };
 
@@ -1110,6 +1208,27 @@ exports.bulkSaveTargets = async (req, res) => {
     }
 };
 
+exports.deleteTarget = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { id } = req.params;
+
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+        if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid target maintenance status id." });
+
+        const deletedRecord = await MaintenanceTarget.findOneAndDelete({ _id: id, userId: String(userId) });
+
+        if (!deletedRecord) {
+            return res.status(404).json({ message: "Target maintenance status not found." });
+        }
+
+        res.status(200).json({ success: true, message: "Target maintenance status deleted successfully." });
+    } catch (error) {
+        console.error("Error deleting target maintenance status:", error);
+        res.status(500).json({ message: "Failed to delete target maintenance status", error: error.message });
+    }
+};
+
 /**
  * 9. GET: Fetch Calendar Inputs
  */
@@ -1204,5 +1323,26 @@ exports.bulkSaveCalendar = async (req, res) => {
     } catch (error) {
         console.error("Error saving calendar data:", error);
         res.status(500).json({ message: "Failed to update calendar inputs", error: error.message });
+    }
+};
+
+exports.deleteCalendar = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const { id } = req.params;
+
+        if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
+        if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid calendar input id." });
+
+        const deletedRecord = await MaintenanceCalendar.findOneAndDelete({ _id: id, userId: String(userId) });
+
+        if (!deletedRecord) {
+            return res.status(404).json({ message: "Calendar input not found." });
+        }
+
+        res.status(200).json({ success: true, message: "Calendar input deleted successfully." });
+    } catch (error) {
+        console.error("Error deleting calendar input:", error);
+        res.status(500).json({ message: "Failed to delete calendar input", error: error.message });
     }
 };
