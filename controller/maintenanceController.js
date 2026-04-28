@@ -131,12 +131,21 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
     const assignments = await Assignment.find(assignmentFilter);
 
     if (assignments.length > 0) {
-        const timeUsage = assignments.reduce((sum, a) =>
-            sum + (metric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0)), 0);
+        const primaryTimeKey = metric === "FH" ? "flightHours" : "blockHours";
+        const fallbackTimeKey = metric === "FH" ? "blockHours" : "flightHours";
+        const primaryTimeUsage = assignments.reduce((sum, a) =>
+            sum + (a.metrics?.[primaryTimeKey] || 0), 0);
+        const fallbackTimeUsage = assignments.reduce((sum, a) =>
+            sum + (a.metrics?.[fallbackTimeKey] || 0), 0);
+        const timeUsage = primaryTimeUsage || fallbackTimeUsage;
+        const cycleUsage = assignments.reduce((sum, a) => {
+            const cycles = Number(a.metrics?.cycles);
+            return sum + (Number.isFinite(cycles) && cycles > 0 ? cycles : 1);
+        }, 0);
 
         return {
             timeUsage,
-            cycleUsage: assignments.length
+            cycleUsage
         };
     }
 
@@ -492,14 +501,18 @@ const getAssignmentUsageForDate = async ({ userId, effectiveMsn, date, metric })
         "aircraft.msn": msnNumber
     });
 
-    const timeUsage = assignments.reduce((sum, a) => {
-        const usage = metric === "FH" ? (a.metrics?.flightHours || 0) : (a.metrics?.blockHours || 0);
-        return sum + usage;
-    }, 0);
+    const primaryTimeKey = metric === "FH" ? "flightHours" : "blockHours";
+    const fallbackTimeKey = metric === "FH" ? "blockHours" : "flightHours";
+    const primaryTimeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.[primaryTimeKey] || 0), 0);
+    const fallbackTimeUsage = assignments.reduce((sum, a) => sum + (a.metrics?.[fallbackTimeKey] || 0), 0);
+    const timeUsage = primaryTimeUsage || fallbackTimeUsage;
 
     return {
         timeUsage,
-        cycleUsage: assignments.length
+        cycleUsage: assignments.reduce((sum, a) => {
+            const cycles = Number(a.metrics?.cycles);
+            return sum + (Number.isFinite(cycles) && cycles > 0 ? cycles : 1);
+        }, 0)
     };
 };
 

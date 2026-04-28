@@ -267,6 +267,125 @@ test("maintenance compute uses the aircraft ownership valid on the reset date", 
   assert.equal(nextDayUtil?.tsn, 12);
 });
 
+test("maintenance target deltas include aircraft and on-wing utilisation through the target date", async () => {
+  const resetDate = utcDate(2026, 4, 20);
+  const targetDate = utcDate(2026, 5, 10);
+  const utilisationDays = [
+    [utcDate(2026, 4, 21), "FL21", 2.5],
+    [utcDate(2026, 4, 24), "FL24", 3],
+    [utcDate(2026, 4, 27), "FL27", 2.5],
+    [utcDate(2026, 5, 3), "FL03", 3],
+    [utcDate(2026, 5, 6), "FL06", 3],
+    [utcDate(2026, 5, 8), "FL08", 3],
+  ];
+
+  await seedFlightDays([resetDate, targetDate]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 3, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 3, 1),
+    msn: "5340",
+    pos1Esn: "635799",
+  });
+
+  for (const [date, flightNumber, bh] of utilisationDays) {
+    await seedAssignment({
+      date,
+      flightNumber,
+      msn: 5340,
+      registration: "VT-AAA",
+      bh,
+    });
+  }
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1001,
+    dsn: 201,
+    tsoTsr: 2500,
+    csoCsr: 1251,
+    dsoDsr: 251,
+    tsRplmt: 2750,
+    csRplmt: 1401,
+    dsRplmt: 276,
+    timeMetric: "FH",
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "635799",
+    pn: "CFM56",
+    snBn: "635799",
+    tsn: 3000,
+    csn: 1501,
+    dsn: 301,
+    tsoTsr: 2500,
+    csoCsr: 1251,
+    dsoDsr: 251,
+    tsRplmt: 2750,
+    csRplmt: 1401,
+    dsRplmt: 276,
+    timeMetric: "FH",
+  });
+  await MaintenanceTarget.create({
+    userId: USER_ID,
+    label: "SI check",
+    msnEsn: "635799",
+    pn: "CFM56",
+    snBn: "635799",
+    category: "Conserve",
+    date: targetDate,
+    tsn: "3100",
+    csn: "1600",
+    dsn: "350",
+    tsRplmt: "2800",
+    csRplmt: "1450",
+    dsRplmt: "333",
+  });
+
+  const computeReq = { user: { id: USER_ID } };
+  const computeRes = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic(computeReq, computeRes);
+
+  const forecast = await Utilisation.findOne({
+    userId: USER_ID,
+    date: targetDate,
+    msnEsn: "635799",
+    pn: "CFM56",
+    snBn: "635799",
+  }).lean();
+
+  assert.equal(computeRes.statusCode, 200);
+  assert.equal(forecast?.tsn, 3017);
+  assert.equal(forecast?.csn, 1507);
+  assert.equal(forecast?.dsn, 321);
+  assert.equal(forecast?.tsRplmt, 2767);
+  assert.equal(forecast?.csRplmt, 1407);
+  assert.equal(forecast?.dsRplmt, 296);
+
+  const targetReq = { user: { id: USER_ID }, query: { date: "2026-05-10", msnEsn: "635799" } };
+  const targetRes = createMockResponse();
+  await maintenanceController.getTargets(targetReq, targetRes);
+
+  assert.equal(targetRes.statusCode, 200);
+  assert.equal(targetRes.body.data[0].fTsn, 83);
+  assert.equal(targetRes.body.data[0].fCsn, 93);
+  assert.equal(targetRes.body.data[0].fDsn, 29);
+  assert.equal(targetRes.body.data[0].fTsr, 33);
+  assert.equal(targetRes.body.data[0].fCsr, 43);
+  assert.equal(targetRes.body.data[0].fDsr, 37);
+});
+
 test("maintenance compute uses utilisation assumptions only when assignments are absent", async () => {
   const day1 = utcDate(2026, 4, 1);
   const day2 = utcDate(2026, 4, 2);
