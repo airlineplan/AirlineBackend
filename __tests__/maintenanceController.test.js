@@ -552,6 +552,71 @@ test("target dashboard returns rendered aliases, deltas, and highlight flags", a
   assert.deepEqual(res.body.data[0].highlights.sort(), ["cso", "csn"].sort());
 });
 
+test("saving target maintenance status is scoped by target date", async () => {
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      targetData: [
+        {
+          label: "ABC",
+          msnEsn: "685912",
+          pn: "CFM56-5B6",
+          snBn: "685912",
+          category: "Conserve",
+          date: "2026-10-12",
+          csn: "9800",
+        },
+        {
+          label: "DEF",
+          msnEsn: "685912",
+          pn: "CFM56-5B6",
+          snBn: "685912",
+          category: "Conserve",
+          date: "2026-10-13",
+          csn: "9900",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveTargets(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(await MaintenanceTarget.countDocuments({ userId: USER_ID }), 2);
+
+  const updateReq = {
+    user: { id: USER_ID },
+    body: {
+      targetData: [
+        {
+          label: "ABC",
+          msnEsn: "685912",
+          pn: "CFM56-5B6",
+          snBn: "685912",
+          category: "Run-down",
+          date: "2026-10-12",
+          csn: "9850",
+        },
+      ],
+    },
+  };
+  const updateRes = createMockResponse();
+
+  await maintenanceController.bulkSaveTargets(updateReq, updateRes);
+
+  const records = await MaintenanceTarget.find({ userId: USER_ID }).sort({ date: 1 }).lean();
+
+  assert.equal(updateRes.statusCode, 200);
+  assert.equal(records.length, 2);
+  assert.equal(records[0].date.toISOString().slice(0, 10), "2026-10-12");
+  assert.equal(records[0].category, "Run-down");
+  assert.equal(records[0].csn, "9850");
+  assert.equal(records[1].date.toISOString().slice(0, 10), "2026-10-13");
+  assert.equal(records[1].category, "Conserve");
+  assert.equal(records[1].csn, "9900");
+});
+
 test("saving rotable movement scopes on-wing updates to the current user", async () => {
   const otherUserId = new mongoose.Types.ObjectId().toString();
 

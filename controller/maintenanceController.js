@@ -925,20 +925,14 @@ exports.bulkSaveRotables = async (req, res) => {
 exports.getTargets = async (req, res) => {
     try {
         const userId = getUserIdFromReq(req);
-        const { date } = req.query;
-        if (date) {
-            const selectedDate = moment(date, moment.ISO_8601, true);
-            const flightBounds = await getFlightDateBounds({ userId });
-            const outsideRange = !selectedDate.isValid() || !flightBounds?.firstDate || !flightBounds?.lastDate ||
-                selectedDate.isBefore(moment(flightBounds.firstDate).startOf("day")) ||
-                selectedDate.isAfter(moment(flightBounds.lastDate).endOf("day"));
+        const { msnEsn } = req.query;
+        const filter = { userId: String(userId) };
 
-            if (outsideRange) {
-                return res.status(200).json({ success: true, data: [] });
-            }
+        if (msnEsn) {
+            filter.msnEsn = String(msnEsn).trim();
         }
 
-        const records = await MaintenanceTarget.find({ userId: String(userId) }).sort({ date: -1 }).lean();
+        const records = await MaintenanceTarget.find(filter).sort({ date: -1 }).lean();
         const utilisationQueries = records.map(record => {
             const startOfTargetDay = moment.utc(record.date).startOf("day").toDate();
             const endOfTargetDay = moment.utc(record.date).endOf("day").toDate();
@@ -1039,19 +1033,41 @@ exports.bulkSaveTargets = async (req, res) => {
         const bulkOperations = [];
 
         for (const record of targetData) {
+            const values = [
+                record.label, record.msnEsn, record.pn, record.snBn, record.category, record.date,
+                record.tsn, record.csn, record.dsn, record.tso, record.cso, record.dso,
+                record.tsRplmt, record.csRplmt, record.dsRplmt
+            ];
+            const hasAnyValue = values.some(value => String(value ?? "").trim() !== "");
+            if (!hasAnyValue) continue;
+
+            const targetDate = moment.utc(record.date, moment.ISO_8601, true);
+            if (!targetDate.isValid()) {
+                return res.status(400).json({ message: "Target maintenance status requires a valid date." });
+            }
+
+            const normalizedDate = targetDate.startOf("day").toDate();
+            const msnEsn = String(record.msnEsn || "").trim();
+            const pn = String(record.pn || "").trim();
+            const snBn = String(record.snBn || "").trim();
+
             bulkOperations.push({
                 updateOne: {
                     filter: {
                         userId: String(userId),
-                        msnEsn: record.msnEsn,
-                        pn: record.pn,
-                        snBn: record.snBn
+                        msnEsn,
+                        pn,
+                        snBn,
+                        date: normalizedDate
                     },
                     update: {
                         $set: {
-                            label: record.label,
-                            category: record.category,
-                            date: record.date ? new Date(record.date) : new Date(),
+                            label: String(record.label || "").trim(),
+                            msnEsn,
+                            pn,
+                            snBn,
+                            category: String(record.category || "").trim(),
+                            date: normalizedDate,
                             tsn: record.tsn,
                             csn: record.csn,
                             dsn: record.dsn,
