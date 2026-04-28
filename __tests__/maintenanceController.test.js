@@ -665,6 +665,60 @@ test("saving reset records accepts modal fallback date", async () => {
   assert.equal(savedReset?.timeMetric, "FH");
 });
 
+test("saving reset records uses modal reset date over effective row date", async () => {
+  const staleEffectiveDate = utcDate(2026, 5, 1);
+  const resetDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([staleEffectiveDate, resetDate]);
+  await seedFleetAsset({
+    msn: 9700,
+    regn: "VT-MOD",
+    entry: staleEffectiveDate,
+    exit: utcDate(2026, 5, 30),
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      resetDate: "2026-05-05",
+      resetData: [
+        {
+          date: "2026-05-01",
+          msnEsn: "9700",
+          pn: "PN-MOD",
+          snBn: "SN-MOD",
+          tsn: 25,
+          csn: 10,
+          dsn: 5,
+          metric: "BH",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveResetRecords(req, res);
+
+  const staleReset = await MaintenanceReset.findOne({
+    userId: USER_ID,
+    date: staleEffectiveDate,
+    msnEsn: "9700",
+    pn: "PN-MOD",
+    snBn: "SN-MOD",
+  }).lean();
+  const savedReset = await MaintenanceReset.findOne({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "9700",
+    pn: "PN-MOD",
+    snBn: "SN-MOD",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(staleReset, null);
+  assert.equal(savedReset?.tsn, 25);
+});
+
 test("reset records modal returns effective rows as of selected date", async () => {
   await MaintenanceReset.create([
     {

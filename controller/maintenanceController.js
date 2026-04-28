@@ -786,7 +786,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 });
             }
 
-            const rawDate = record.date || fallbackResetDate;
+            const rawDate = fallbackResetDate || record.date;
             const parsedDate = moment.utc(rawDate, moment.ISO_8601, true);
 
             if (!parsedDate.isValid()) {
