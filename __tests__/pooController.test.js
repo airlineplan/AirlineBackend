@@ -7,8 +7,114 @@ const {
     calculateProrateRatio,
     recalculateRevenue,
     buildEditableResponse,
+    buildFlightSnapshot,
+    buildLegRows,
+    buildSystemConnectionRows,
     applyTrafficUpdates,
 } = pooController.__testables__;
+
+test("buildFlightSnapshot carries a userId fallback into generated POO rows", () => {
+    const snapshot = buildFlightSnapshot(
+        {
+            _id: "flight-1",
+            depStn: "del",
+            arrStn: "bom",
+            domIntl: "dom",
+            date: new Date("2026-03-01T00:00:00.000Z"),
+            day: "Sun",
+            flight: "A 100",
+            std: "09:00",
+            sta: "11:30",
+            seats: 180,
+            CargoCapT: 1.2,
+            pax: 153,
+            CargoT: 0.6,
+            dist: 1200,
+        },
+        new Map(),
+        "user-1"
+    );
+
+    const { rows } = buildLegRows({
+        snapshot,
+        existingRowsByKey: new Map(),
+        existingRecords: [],
+        currencyContextByPoo: {},
+    });
+
+    assert.equal(snapshot.userId, "user-1");
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((row) => row.poo).sort(), ["BOM", "DEL"]);
+    assert.ok(rows.every((row) => row.userId === "user-1"));
+});
+
+test("connection rows are generated for both OD endpoint POO values", () => {
+    const firstSnapshot = {
+        userId: "user-1",
+        flightId: "f1",
+        al: "Own",
+        depStn: "DEL",
+        arrStn: "BOM",
+        sector: "DEL-BOM",
+        odDI: "Dom",
+        legDI: "Dom",
+        date: new Date("2026-03-04T00:00:00.000Z"),
+        day: "Wed",
+        flightNumber: "A 100",
+        variant: "",
+        std: "09:00",
+        sta: "11:30",
+        maxPax: 180,
+        maxCargoT: 1.2,
+        sourcePaxTotal: 153,
+        sourceCargoTotal: 0.6,
+        sourceSeats: 180,
+        sourceCargoCapT: 1.2,
+        sourcePaxLF: 85,
+        sourceCargoLF: 50,
+        sectorGcd: 1200,
+    };
+    const secondSnapshot = {
+        userId: "user-1",
+        flightId: "f2",
+        al: "Own",
+        depStn: "BOM",
+        arrStn: "HYD",
+        sector: "BOM-HYD",
+        odDI: "Dom",
+        legDI: "Dom",
+        date: new Date("2026-03-04T00:00:00.000Z"),
+        day: "Wed",
+        flightNumber: "A 101",
+        variant: "",
+        std: "14:30",
+        sta: "16:10",
+        maxPax: 144,
+        maxCargoT: 1.4,
+        sourcePaxTotal: 128,
+        sourceCargoTotal: 1.4,
+        sourceSeats: 144,
+        sourceCargoCapT: 1.4,
+        sourcePaxLF: 89,
+        sourceCargoLF: 100,
+        sectorGcd: 600,
+    };
+
+    const rows = ["DEL", "HYD"].flatMap((pagePoo) =>
+        buildSystemConnectionRows({
+            pagePoo,
+            firstSnapshot,
+            secondSnapshot,
+            existingRowsByKey: new Map(),
+            shouldReset: false,
+            pageCurrencyContext: {},
+        })
+    );
+
+    assert.equal(rows.length, 4);
+    assert.deepEqual(rows.map((row) => row.poo).sort(), ["DEL", "DEL", "HYD", "HYD"]);
+    assert.ok(rows.every((row) => row.userId === "user-1"));
+});
 
 test("calculates proration from the field-specific ratio before GCD fallback", () => {
     const row = {
@@ -750,8 +856,12 @@ test("applies the 4 Mar DEL POO example across leg, behind, and beyond rows", ()
 
     assert.equal(byId.get("del-hyd-behind").pax, 5);
     assert.equal(byId.get("del-hyd-beyond").pax, 5);
+    assert.equal(byId.get("del-hyd-behind").timeInclLayover, "07:10");
+    assert.equal(byId.get("del-hyd-beyond").timeInclLayover, "07:10");
     assert.equal(byId.get("del-dxb-behind").pax, 12);
     assert.equal(byId.get("del-dxb-beyond").pax, 12);
+    assert.equal(byId.get("del-dxb-behind").timeInclLayover, "09:30");
+    assert.equal(byId.get("del-dxb-beyond").timeInclLayover, "09:30");
     assert.equal(byId.get("a101-bom").pax, 64);
     assert.equal(byId.get("a102-bom").pax, 121);
 });

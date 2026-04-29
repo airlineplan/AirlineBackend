@@ -47,6 +47,10 @@ function normalizeStation(value) {
     return String(value || "").trim().toUpperCase();
 }
 
+function normalizeUserId(value) {
+    return String(value || "").trim();
+}
+
 function normalizeRevenueLabel(value) {
     const normalized = String(value || "").trim().toLowerCase();
     if (normalized.includes("intl")) return "Intl";
@@ -285,7 +289,7 @@ function resolveCurrencyContext({ stationCurrencyMap, revenueConfig, fxRateMap, 
     };
 }
 
-function buildFlightSnapshot(flight, sectorMap) {
+function buildFlightSnapshot(flight, sectorMap, userId = "") {
     const sector = `${normalizeStation(flight.depStn)}-${normalizeStation(flight.arrStn)}`;
     const sectorInfo = sectorMap.get(sector) || {};
     const sourceSeats = parseNumber(flight.seats, sectorInfo.paxCapacity || 0);
@@ -295,7 +299,7 @@ function buildFlightSnapshot(flight, sectorMap) {
 
     return {
         flightId: String(flight._id),
-        userId: flight.userId,
+        userId: normalizeUserId(flight.userId) || normalizeUserId(userId),
         al: "Own",
         depStn: normalizeStation(flight.depStn),
         arrStn: normalizeStation(flight.arrStn),
@@ -1086,27 +1090,30 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
     return { firstFlight, secondFlight };
 }
 
-async function buildPooDataset({ userId, poo, date }) {
+async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
     const dayStart = moment(date).startOf("day").toDate();
     const dayEnd = moment(date).endOf("day").toDate();
     const normalizedPoo = normalizeStation(poo);
+    const normalizedUserId = normalizeUserId(userId);
 
     const [sectorMap, existingRecords, directFlights, stations, rawRevenueConfig] = await Promise.all([
-        getSectorInfoMap(userId),
+        getSectorInfoMap(normalizedUserId),
         PooTable.find({
-            userId,
+            userId: normalizedUserId,
             date: { $gte: dayStart, $lte: dayEnd },
         }).lean(),
         Flight.find({
-            userId,
+            userId: normalizedUserId,
             date: { $gte: dayStart, $lte: dayEnd },
-            $or: [
-                { depStn: normalizedPoo },
-                { arrStn: normalizedPoo },
-            ],
+            ...(includeAllPoos ? {} : {
+                $or: [
+                    { depStn: normalizedPoo },
+                    { arrStn: normalizedPoo },
+                ],
+            }),
         }).lean(),
-        Station.find({ userId }).lean(),
-        RevenueConfig.findOne({ userId }).lean(),
+        Station.find({ userId: normalizedUserId }).lean(),
+        RevenueConfig.findOne({ userId: normalizedUserId }).lean(),
     ]);
     const stationCurrencyMap = buildStationCurrencyMap(stations);
     const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
@@ -1118,7 +1125,7 @@ async function buildPooDataset({ userId, poo, date }) {
     const directFlightIds = directFlights.map((flight) => String(flight._id));
     const connectionEdges = directFlightIds.length
         ? await Connections.find({
-            userId,
+            userId: normalizedUserId,
             $or: [
                 { flightID: { $in: directFlightIds } },
                 { beyondOD: { $in: directFlightIds } },
@@ -1134,7 +1141,7 @@ async function buildPooDataset({ userId, poo, date }) {
 
     const existingTransitRows = existingRecords.filter(
         (row) =>
-            row.poo === normalizedPoo &&
+            (includeAllPoos || row.poo === normalizedPoo) &&
             row.source === "user" &&
             (
                 row.trafficType === TRAFFIC_TYPES.TRANSIT_FL ||
@@ -1157,7 +1164,7 @@ async function buildPooDataset({ userId, poo, date }) {
 
     if (missingFlightIds.length) {
         const extraFlights = await Flight.find({
-            userId,
+            userId: normalizedUserId,
             _id: { $in: missingFlightIds },
             date: { $gte: dayStart, $lte: dayEnd },
         }).lean();
@@ -1186,7 +1193,7 @@ async function buildPooDataset({ userId, poo, date }) {
     };
 
     for (const flight of flightsById.values()) {
-        const snapshot = buildFlightSnapshot(flight, sectorMap);
+        const snapshot = buildFlightSnapshot(flight, sectorMap, normalizedUserId);
         snapshots.set(snapshot.flightId, snapshot);
         const { rows: legRows, forceReset } = buildLegRows({
             snapshot,
@@ -1210,27 +1217,29 @@ async function buildPooDataset({ userId, poo, date }) {
         const secondSnapshot = snapshots.get(String(secondFlight._id));
         if (!firstSnapshot || !secondSnapshot) return;
 
-        const connectionMatchesPage =
-            normalizedPoo === firstSnapshot.depStn ||
-            normalizedPoo === firstSnapshot.arrStn ||
-            normalizedPoo === secondSnapshot.depStn ||
-            normalizedPoo === secondSnapshot.arrStn ||
-            normalizedPoo === firstSnapshot.odOrigin ||
-            normalizedPoo === secondSnapshot.odDestination;
-        if (!connectionMatchesPage) return;
+        const connectionPoos = includeAllPoos
+            ? [firstSnapshot.depStn, secondSnapshot.arrStn]
+            : [normalizedPoo].filter((pagePoo) =>
+                pagePoo === firstSnapshot.depStn ||
+                pagePoo === firstSnapshot.arrStn ||
+                pagePoo === secondSnapshot.depStn ||
+                pagePoo === secondSnapshot.arrStn ||
+                pagePoo === firstSnapshot.odOrigin ||
+                pagePoo === secondSnapshot.odDestination
+            );
 
-        rows.push(
-            ...buildSystemConnectionRows({
-                pagePoo: normalizedPoo,
+        [...new Set(connectionPoos)].forEach((pagePoo) => {
+            rows.push(...buildSystemConnectionRows({
+                pagePoo,
                 firstSnapshot,
                 secondSnapshot,
                 existingRowsByKey,
-                pageCurrencyContext: getCurrencyContextForPoo(normalizedPoo),
+                pageCurrencyContext: getCurrencyContextForPoo(pagePoo),
                 shouldReset:
                     Boolean(resetByFlightId.get(firstSnapshot.flightId)) ||
                     Boolean(resetByFlightId.get(secondSnapshot.flightId)),
-            })
-        );
+            }));
+        });
     });
 
     const existingTransitGroups = new Map();
@@ -1250,11 +1259,11 @@ async function buildPooDataset({ userId, poo, date }) {
 
         rows.push(
             ...buildUserTransitRows({
-                pagePoo: normalizedPoo,
+                pagePoo: includeAllPoos ? normalizeStation(lead.poo) : normalizedPoo,
                 firstSnapshot,
                 secondSnapshot,
                 existingRowsByKey,
-                pageCurrencyContext: getCurrencyContextForPoo(normalizedPoo),
+                pageCurrencyContext: getCurrencyContextForPoo(includeAllPoos ? lead.poo : normalizedPoo),
                 shouldReset:
                     Boolean(resetByFlightId.get(firstSnapshot.flightId)) ||
                     Boolean(resetByFlightId.get(secondSnapshot.flightId)),
@@ -1814,24 +1823,23 @@ exports.getPooData = async (req, res) => {
 
 exports.populatePoo = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = normalizeUserId(req.user.id);
         const { poo, date } = req.body;
 
         if (!poo || !date) {
             return res.status(400).json({ message: "POO station and date are required" });
         }
 
-        const dataset = await buildPooDataset({ userId, poo, date });
+        const dataset = await buildPooDataset({ userId, poo, date, includeAllPoos: true });
 
         if (!dataset.rows.length) {
             await PooTable.deleteMany({
                 userId,
                 date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
-                poo: dataset.normalizedPoo,
             });
             return res.status(200).json({
                 data: [],
-                message: "No POO rows found for this station and date",
+                message: "No POO rows found for this date",
             });
         }
 
@@ -1848,7 +1856,6 @@ exports.populatePoo = async (req, res) => {
 
         await PooTable.deleteMany({
             userId,
-            poo: dataset.normalizedPoo,
             date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
             rowKey: { $nin: [...dataset.keepRowKeys] },
             $or: [
@@ -2348,5 +2355,8 @@ exports.__testables__ = {
     recalculateRevenue,
     buildEditableResponse,
     buildRowMatchKey,
+    buildFlightSnapshot,
+    buildLegRows,
+    buildSystemConnectionRows,
     applyTrafficUpdates,
 };
