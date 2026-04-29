@@ -1633,6 +1633,32 @@ function doesSignatureMatch(source, candidate) {
     );
 }
 
+function buildApplyPayload(row, fields = []) {
+    const allowedFields = new Set([
+        "pax",
+        "cargoT",
+        "legFare",
+        "legRate",
+        "odFare",
+        "odRate",
+        "pooCcy",
+        "pooCcyToRccy",
+        "fareProrateRatioL1L2",
+        "rateProrateRatioL1L2",
+        "applySSPricing",
+        "interline",
+        "codeshare",
+    ]);
+    const selectedFields = Array.isArray(fields) && fields.length
+        ? fields.filter((field) => allowedFields.has(field))
+        : [...allowedFields];
+
+    return selectedFields.reduce((payload, field) => {
+        payload[field] = row[field];
+        return payload;
+    }, {});
+}
+
 async function applyUpdatesForDate({ userId, updates }) {
     if (!updates.length) return [];
 
@@ -1854,6 +1880,7 @@ exports.updatePooRecords = async (req, res) => {
             records = [],
             transitDraft = null,
             applyToDates = [],
+            applyTargets = [],
         } = req.body;
 
         let createdTransitRows = [];
@@ -1897,29 +1924,44 @@ exports.updatePooRecords = async (req, res) => {
         const appliedDates = [];
         const skippedDates = [];
 
-        if (Array.isArray(applyToDates) && applyToDates.length) {
+        if (
+            (Array.isArray(applyToDates) && applyToDates.length) ||
+            (Array.isArray(applyTargets) && applyTargets.length)
+        ) {
             const sourceRowsById = new Map(refreshedRows.map((row) => [String(row._id), row]));
-            const sourceTargets = normalizedUpdates
-                .map((update) => sourceRowsById.get(String(update._id)))
-                .filter(Boolean)
-                .map((row) => ({
-                    signature: buildApplySignature(row),
-                    payload: {
-                        pax: row.pax,
-                        cargoT: row.cargoT,
-                        odFare: row.odFare,
-                        odRate: row.odRate,
-                        pooCcy: row.pooCcy,
-                        pooCcyToRccy: row.pooCcyToRccy,
-                        fareProrateRatioL1L2: row.fareProrateRatioL1L2,
-                        rateProrateRatioL1L2: row.rateProrateRatioL1L2,
-                        applySSPricing: row.applySSPricing,
-                        interline: row.interline,
-                        codeshare: row.codeshare,
-                    },
-                }));
+            const sourceTargets = [];
 
-            for (const targetDate of applyToDates) {
+            if (Array.isArray(applyToDates) && applyToDates.length) {
+                normalizedUpdates
+                    .map((update) => sourceRowsById.get(String(update._id)))
+                    .filter(Boolean)
+                    .forEach((row) => {
+                        sourceTargets.push({
+                            signature: buildApplySignature(row),
+                            payload: buildApplyPayload(row),
+                            dates: [...new Set(applyToDates)],
+                        });
+                    });
+            }
+
+            if (Array.isArray(applyTargets) && applyTargets.length) {
+                applyTargets.forEach((target) => {
+                    const sourceRow = sourceRowsById.get(String(target.sourceId));
+                    const dates = Array.isArray(target.dates)
+                        ? [...new Set(target.dates.filter(Boolean))]
+                        : [];
+                    if (!sourceRow || !dates.length) return;
+                    sourceTargets.push({
+                        signature: buildApplySignature(sourceRow),
+                        payload: buildApplyPayload(sourceRow, target.fields),
+                        dates,
+                    });
+                });
+            }
+
+            const targetDates = [...new Set(sourceTargets.flatMap((target) => target.dates))];
+
+            for (const targetDate of targetDates) {
                 const targetRows = await PooTable.find({
                     userId,
                     date: {
@@ -1929,7 +1971,8 @@ exports.updatePooRecords = async (req, res) => {
                 });
 
                 const targetUpdates = [];
-                sourceTargets.forEach((sourceRow) => {
+                const sourcesForDate = sourceTargets.filter((sourceRow) => sourceRow.dates.includes(targetDate));
+                sourcesForDate.forEach((sourceRow) => {
                     const candidate = targetRows.find((row) => doesSignatureMatch(sourceRow.signature, row));
                     if (candidate) {
                         targetUpdates.push({
@@ -1939,7 +1982,7 @@ exports.updatePooRecords = async (req, res) => {
                     }
                 });
 
-                if (targetUpdates.length === sourceTargets.length && sourceTargets.length > 0) {
+                if (targetUpdates.length === sourcesForDate.length && sourcesForDate.length > 0) {
                     await applyUpdatesForDate({ userId, updates: targetUpdates });
                     appliedDates.push(targetDate);
                 } else {
