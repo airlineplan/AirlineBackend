@@ -244,6 +244,57 @@ test("connection rows are generated for both OD endpoint POO values", () => {
     );
 });
 
+test("timeInclLayover uses BT for leg rows and BT-plus-gap for OD rows", () => {
+    const firstSnapshot = makeConnectionSnapshot({
+        std: "09:00",
+        sta: "11:30",
+        bt: "02:30",
+    });
+    const secondSnapshot = makeConnectionSnapshot({
+        flightId: "f2",
+        depStn: "BOM",
+        arrStn: "HYD",
+        sector: "BOM-HYD",
+        odDI: "Dom",
+        legDI: "Dom",
+        flightNumber: "A 101",
+        std: "14:30",
+        sta: "16:10",
+        bt: "01:40",
+        maxPax: 128,
+        maxCargoT: 1.4,
+        sourcePaxTotal: 128,
+        sourceCargoTotal: 1.4,
+        sourceSeats: 144,
+        sourceCargoCapT: 1.4,
+        sourcePaxLF: 89,
+        sourceCargoLF: 100,
+        sectorGcd: 600,
+    });
+
+    const legRows = buildLegRows({
+        snapshot: firstSnapshot,
+        existingRowsByKey: new Map(),
+        existingRecords: [],
+        currencyContextByPoo: {},
+    }).rows;
+
+    const odRows = buildSystemConnectionRows({
+        pagePoo: "DEL",
+        firstSnapshot,
+        secondSnapshot,
+        existingRowsByKey: new Map(),
+        shouldReset: false,
+        pageCurrencyContext: {},
+    });
+
+    assert.ok(legRows.every((row) => row.timeInclLayover === "02:30"));
+    assert.deepEqual(
+        odRows.map((row) => row.timeInclLayover),
+        ["07:10", "07:10"]
+    );
+});
+
 test("builds raw POO rows from the March fixture explicit behind and beyond references", () => {
     const fixtureFlights = [
         [1, "2026-03-01", "Sun", "A 100", "DEL", "09:00", "11:30", "BOM", "Dom", 1200, 180, 1.2, 153, 0.6, null, null, null, null],

@@ -139,14 +139,20 @@ function calculateLayoverMinutes(firstSta, secondStd) {
     return diffMinutes(firstSta, secondStd);
 }
 
+function getSnapshotBlockTime(snapshot) {
+    const explicitBt = String(snapshot?.bt || "").trim();
+    if (explicitBt) return explicitBt;
+    return formatDuration(diffMinutes(snapshot?.std, snapshot?.sta));
+}
+
 function calculateTimeInclLayover(firstSnapshot, secondSnapshot = null) {
     if (!secondSnapshot) {
-        return formatDuration(diffMinutes(firstSnapshot.std, firstSnapshot.sta));
+        return getSnapshotBlockTime(firstSnapshot);
     }
 
-    const firstLeg = diffMinutes(firstSnapshot.std, firstSnapshot.sta);
+    const firstLeg = timeToMinutes(getSnapshotBlockTime(firstSnapshot)) || 0;
     const layover = calculateLayoverMinutes(firstSnapshot.sta, secondSnapshot.std);
-    const secondLeg = diffMinutes(secondSnapshot.std, secondSnapshot.sta);
+    const secondLeg = timeToMinutes(getSnapshotBlockTime(secondSnapshot)) || 0;
     return formatDuration(firstLeg + layover + secondLeg);
 }
 
