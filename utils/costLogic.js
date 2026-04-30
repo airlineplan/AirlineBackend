@@ -22,6 +22,7 @@ const COST_FIELDS = [
   "qualifyingSchMxEvents",
   "otherMxExpenses",
   "rotableChanges",
+  "totalCost",
 ];
 
 const toNumber = (value) => {
@@ -120,6 +121,7 @@ const normalizeMetric = (value) => {
   if (["DEPARTURE", "DEPARTURES", "CYCLE", "CYCLES"].includes(raw)) return "DEPARTURES";
   if (["BH", "BLOCKHOURS", "BLOCK HOURS"].includes(raw)) return "BH";
   if (["FH", "FLIGHTHOURS", "FLIGHT HOURS"].includes(raw)) return "FH";
+  if (["FT", "FLIGHTTIME", "FLIGHT TIME"].includes(raw)) return "FT";
   if (["MONTH", "MONTHLY"].includes(raw)) return "MONTH";
   return raw;
 };
@@ -167,35 +169,43 @@ const getFlightAircraftKey = (flight) => (
   getFlightVariant(flight)
 );
 const getFlightPartNumber = (flight) => normalize(flight?.acftType || flight?.variant);
-const getFlightSector = (flight) => normalize(flight?.sector);
+const getFlightSector = (flight) => normalize(flight?.sector) || [flight?.depStn, flight?.arrStn].filter(Boolean).join("-").toUpperCase();
 const getFlightDep = (flight) => normalize(flight?.depStn);
 const getFlightArr = (flight) => normalize(flight?.arrStn);
 const getFlightDomIntl = (flight) => normalize(flight?.domIntl);
+const getFlightEffectiveFt = (flight) => {
+  const ft = toNumber(flight?.ft);
+  if (ft > 0) return ft;
+  const fh = toNumber(flight?.fh);
+  if (fh > 0) return fh;
+  return toNumber(flight?.bh);
+};
 const getFlightMtow = (flight, fleetRows = []) => {
   const flightDate = getFlightDate(flight);
   const regn = getFlightRegistration(flight);
   const msn = getFlightMsn(flight);
-  if (!flightDate || (!regn && !msn)) return 0;
+  const variant = getFlightVariant(flight);
+  if (!flightDate) return 0;
 
-  const candidates = (Array.isArray(fleetRows) ? fleetRows : []).filter((row) => {
-    const rowRegn = normalize(row?.regn);
-    const rowSn = normalize(row?.sn);
-    if (regn && rowRegn && rowRegn === regn) return true;
-    if (!regn && msn && rowSn && rowSn === msn) return true;
-    return false;
-  }).filter((row) => {
+  const validRows = (Array.isArray(fleetRows) ? fleetRows : []).filter((row) => {
     const entry = parseDate(row?.entry);
     const exit = parseDate(row?.exit);
     if (entry && flightDate < entry) return false;
     if (exit && flightDate > exit) return false;
+    if (toNumber(row?.mtow) <= 0) return false;
     return true;
   });
 
-  const best = candidates.sort((a, b) => {
+  const findBest = (predicate) => validRows.filter(predicate).sort((a, b) => {
     const aEntry = parseDate(a?.entry)?.getTime() || 0;
     const bEntry = parseDate(b?.entry)?.getTime() || 0;
     return bEntry - aEntry;
   })[0];
+
+  const best =
+    (regn && findBest((row) => normalize(row?.regn) === regn)) ||
+    (msn && findBest((row) => normalize(row?.sn) === msn)) ||
+    (variant && findBest((row) => normalize(row?.variant) === variant || normalize(row?.type) === variant));
 
   return toNumber(best?.mtow);
 };
@@ -1131,19 +1141,28 @@ const normalizeOtherMx = (rows = []) => rows.map((row) => ({
   sn: normalize(pick(row, ["sn", "msn"])),
   fromDate: pick(row, ["fromDate"]),
   toDate: pick(row, ["toDate"]),
+  per: normalizeMetric(pick(row, ["per", "basis", "driver"])),
+  cost: toNumber(pick(row, ["cost", "rate", "value"])),
   costPerBh: toNumber(pick(row, ["costPerBh", "costBh"])),
+  costPerFh: toNumber(pick(row, ["costPerFh", "costFh"])),
   costPerDeparture: toNumber(pick(row, ["costPerDeparture", "costDep"])),
   costPerMonth: toNumber(pick(row, ["costPerMonth", "costMonth"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).filter((row) => row.depStn || row.variant || row.acftRegn || row.pn || row.sn);
+})).map((row) => ({
+  ...row,
+  costPerBh: row.costPerBh || (row.per === "BH" ? row.cost : 0),
+  costPerFh: row.costPerFh || (row.per === "FH" ? row.cost : 0),
+  costPerDeparture: row.costPerDeparture || (["", "DEPARTURES"].includes(row.per) ? row.cost : 0),
+  costPerMonth: row.costPerMonth || (row.per === "MONTH" ? row.cost : 0),
+})).filter((row) => row.depStn || row.variant || row.acftRegn || row.pn || row.sn || row.cost);
 
 const normalizeStationCost = (rows = [], stationKey) => {
   const normalized = [];
   rows.forEach((row) => {
     const base = {
       [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn"])),
-      mtow: toNumber(pick(row, ["mtow"])),
+      mtow: pick(row, ["mtow"]) === "" ? "" : toNumber(pick(row, ["mtow"])),
       variant: normalize(pick(row, ["variant", "var"])),
       fromDate: pick(row, ["fromDate"]),
       toDate: pick(row, ["toDate"]),
@@ -1190,6 +1209,10 @@ const normalizeNavigationCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW
   return {
     [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn", "sector"])),
     cost: round2(pick(row, ["cost", "value"])),
+    variant: normalize(pick(row, ["variant", "var"])),
+    month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
+    fromDate: pick(row, ["fromDate"]),
+    toDate: pick(row, ["toDate"]),
     ccy: normalize(pick(row, ["ccy", "currency"])),
     costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
     ...Object.fromEntries(
@@ -1233,11 +1256,12 @@ const normalizeAirportMtowCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTO
 
   return {
     [stationKey]: normalize(pick(row, [stationKey, "stn", "station", "arrStn"])),
-    mtow: pick(row, ["mtow"]),
+    mtow: pick(row, ["mtow"]) === "" ? "" : toNumber(pick(row, ["mtow"])),
     variant: normalize(pick(row, ["variant", "var"])),
     month: normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"])),
     fromDate: pick(row, ["fromDate"]),
     toDate: pick(row, ["toDate"]),
+    cost: round2(pick(row, ["cost", "value"])),
     ccy: normalize(pick(row, ["ccy", "currency"])),
     costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
     ...Object.fromEntries(
@@ -1245,7 +1269,7 @@ const normalizeAirportMtowCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTO
     ),
     tierRates,
   };
-}).filter((row) => row[stationKey] || row.ccy || row.mtow || Object.keys(row.tierRates || {}).length > 0);
+}).filter((row) => row[stationKey] || row.ccy || row.mtow || row.cost || Object.keys(row.tierRates || {}).length > 0);
 
 const serializeAirportMtowCostRows = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => normalizeAirportMtowCost(rows, stationKey, tiers).map((row) => {
   const serialized = {
@@ -1264,12 +1288,13 @@ const serializeAirportMtowCostRows = (rows = [], stationKey, tiers = DEFAULT_NAV
 
 const normalizeFleetRows = (rows = []) => rows.map((row) => ({
   ...row,
-  regn: normalize(pick(row, ["regn", "registration"])),
-  sn: normalize(pick(row, ["sn"])),
+  regn: normalize(pick(row, ["acftRegn", "regn", "registration"])),
+  sn: normalize(pick(row, ["sn", "msn"])),
   mtow: toNumber(pick(row, ["mtow"])),
-  entry: pick(row, ["entry"]),
-  exit: pick(row, ["exit"]),
-  variant: normalize(pick(row, ["variant"])),
+  entry: pick(row, ["entryDate", "entry", "inductionDate"]),
+  exit: pick(row, ["exitDate", "exit"]),
+  variant: normalize(pick(row, ["variant", "type"])),
+  type: normalize(pick(row, ["type"])),
   category: normalize(pick(row, ["category"])),
 })).filter((row) => row.regn || row.sn || row.mtow);
 
@@ -1332,7 +1357,7 @@ const normalizeCostConfig = (config = {}) => {
     navMtowTiers,
     navEnr: normalizeNavigationCost(config.navEnr || [], "sector", navMtowTiers),
     navTerm: normalizeNavigationCost(config.navTerm || [], "arrStn", navMtowTiers),
-    airportLanding: normalizeStationCost(config.airportLanding || [], "arrStn"),
+    airportLanding: normalizeAirportMtowCost(config.airportLanding || [], "arrStn", navMtowTiers),
     airportAvsec: normalizeStationCost(config.airportAvsec || [], "arrStn"),
     airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
     airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
@@ -1350,6 +1375,10 @@ const getBasisValue = (flight, basis) => {
       return toNumber(flight.bh);
     case "FH":
       return toNumber(flight.fh);
+    case "FT":
+      return getFlightEffectiveFt(flight);
+    case "MONTH":
+      return 1;
     case "DEPARTURES":
     default:
       return 1;
@@ -1367,6 +1396,8 @@ const getDefaultAllocationBasis = (costCode) => {
     case "OTHERMXEXPENSES":
       return "FH";
     case "ROTABLECHANGES":
+      return "DEPARTURES";
+    case "OTHERDOC":
       return "DEPARTURES";
     default:
       return "DEPARTURES";
@@ -1396,10 +1427,48 @@ const calculateFuelCost = (fuelConsumptionKg, fuelPriceRow) => {
   return round2((consumption / kgPerLtr) * (intoPlanePerKLtr / 1000));
 };
 
-const convertToRccy = (amount, currency, reportingCurrency, explicitRccy) => {
+const normalizeFxRates = (rates = []) => (Array.isArray(rates) ? rates : []).map((row) => {
+  const from = normalize(pick(row, ["from", "ccy", "currency", "source"]));
+  const to = normalize(pick(row, ["to", "rccy", "reportingCurrency", "target"]));
+  const pair = normalize(pick(row, ["pair"]));
+  return {
+    pair: pair || (from && to ? `${from}/${to}` : ""),
+    dateKey: normalizeMonthKey(pick(row, ["dateKey", "month", "date", "period"])),
+    exactDate: toDayKey(pick(row, ["date", "effectiveDate"])),
+    rate: toNumber(pick(row, ["rate", "fxRate", "value"])),
+  };
+}).filter((row) => row.pair && row.rate > 0);
+
+const findFxRate = (fxRates, currency, reportingCurrency, date) => {
+  const pair = `${normalize(currency)}/${normalize(reportingCurrency)}`;
+  const dayKey = toDayKey(date);
+  const monthKey = normalizeMonthKey(date);
+  const rates = normalizeFxRates(fxRates).filter((row) => row.pair === pair);
+  return (
+    rates.find((row) => row.exactDate && row.exactDate === dayKey)?.rate ||
+    rates.find((row) => row.dateKey && row.dateKey === monthKey)?.rate ||
+    rates.find((row) => !row.dateKey && !row.exactDate)?.rate ||
+    0
+  );
+};
+
+const addMissingFxPair = (flight, currency, reportingCurrency) => {
+  if (!flight || !currency || normalize(currency) === normalize(reportingCurrency)) return;
+  const pair = `${normalize(currency)}/${normalize(reportingCurrency)}`;
+  if (!flight.missingFxPairs) flight.missingFxPairs = [];
+  if (!flight.missingFxPairs.includes(pair)) flight.missingFxPairs.push(pair);
+  if (flight.costDebug?.missingLookups && !flight.costDebug.missingLookups.includes(`No FX rate for ${pair}`)) {
+    flight.costDebug.missingLookups.push(`No FX rate for ${pair}`);
+  }
+};
+
+const convertToRccy = (amount, currency, reportingCurrency, explicitRccy, fxRates = [], date, flight) => {
   const numeric = round2(amount);
   if (toNumber(explicitRccy) > 0) return round2(explicitRccy);
   if (!currency || normalize(currency) === normalize(reportingCurrency)) return numeric;
+  const rate = findFxRate(fxRates, currency, reportingCurrency, date);
+  if (rate > 0) return round2(numeric * rate);
+  addMissingFxPair(flight, currency, reportingCurrency);
   return numeric;
 };
 
@@ -1471,19 +1540,12 @@ const applySnContext = (flight, config = {}) => {
 
 const resolveMaintenanceReserveRate = (flight, config = {}) => {
   const flightDate = getFlightDate(flight);
-  const fh = toNumber(flight?.fh);
-  if (!flightDate || fh <= 0) {
+  if (!flightDate) {
     return { amount: 0, rate: 0, currency: "", reportingAmount: 0 };
   }
 
-  const onwing = getLatestAircraftOnwingForFlight(flight, config.aircraftOnwing || []);
-  const engineSns = [onwing?.pos1Esn, onwing?.pos2Esn]
-    .map((value) => normalize(value))
-    .filter(Boolean);
-
-  if (engineSns.length === 0) {
-    return { amount: 0, rate: 0, currency: "", reportingAmount: 0 };
-  }
+  const snContext = getFlightSnContext(flight, config.aircraftOnwing || []);
+  const snList = snContext.snList || [];
 
   const reserveSettings = Array.isArray(config.leasedReserve) ? config.leasedReserve : [];
   const scheduleRows = Array.isArray(config.maintenanceReserveSchedule) ? config.maintenanceReserveSchedule : [];
@@ -1491,7 +1553,7 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
 
   const settingsMatches = reserveSettings.filter((row) => {
     if (normalizeMetric(row?.driver) === "MONTH") return false;
-    if (!matchesOptional(row?.sn, engineSns[0]) && !engineSns.includes(normalize(row?.sn))) return false;
+    if (row?.sn && !snList.includes(normalize(row?.sn))) return false;
     if (!matchesOptional(row?.acftRegn, getFlightRegistration(flight))) return false;
     if (!matchesOptional(row?.pn, getFlightPartNumber(flight))) return false;
     return isWithinRange(flightDate, row?.asOnDate, row?.endDate);
@@ -1502,7 +1564,7 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
 
   const candidateSnList = settingsMatches.length > 0
     ? settingsMatches.map((row) => normalize(row?.sn)).filter(Boolean)
-    : engineSns;
+    : snList;
 
   const matchedScheduleRows = scheduleRows.filter((row) => {
     if (!row || !rateDate) return false;
@@ -1517,16 +1579,35 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
 
   const derivedRate = toNumber(bestSchedule?.rate);
   const fallbackRate = toNumber(bestSettings?.setRate || bestSettings?.rate);
-  const rate = derivedRate > 0 ? derivedRate : fallbackRate;
+  let rate = derivedRate > 0 ? derivedRate : fallbackRate;
   const currency = bestSchedule?.ccy || bestSettings?.ccy || "";
   const reportingAmount = toNumber(bestSchedule?.costRCCY || bestSettings?.costRCCY);
+
+  if (!bestSchedule && rate > 0 && bestSettings?.annualEscl) {
+    const anniversary = parseDate(bestSettings.anniversary || bestSettings.asOnDate);
+    if (anniversary) {
+      let anniversaries = flightDate.getUTCFullYear() - anniversary.getUTCFullYear();
+      const anniversaryThisYear = new Date(Date.UTC(flightDate.getUTCFullYear(), anniversary.getUTCMonth(), anniversary.getUTCDate()));
+      if (flightDate < anniversaryThisYear) anniversaries -= 1;
+      if (anniversaries > 0) rate *= ((1 + toNumber(bestSettings.annualEscl) / 100) ** anniversaries);
+    }
+  }
 
   if (rate <= 0) {
     return { amount: 0, rate: 0, currency, reportingAmount };
   }
 
+  const driver = normalizeMetric(bestSchedule?.driver || bestSettings?.driver);
+  const driverValue = driver === "BH"
+    ? toNumber(flight.bh)
+    : driver === "DEPARTURES"
+      ? 1
+      : driver === "FT"
+        ? getFlightEffectiveFt(flight)
+        : toNumber(flight.fh);
+
   return {
-    amount: round2(fh * rate),
+    amount: round2(driverValue * rate),
     rate: round2(rate),
     currency,
     reportingAmount,
@@ -1566,8 +1647,15 @@ const getNavigationTieredCost = (row, mtow) => {
   const converted = toNumber(row.costRCCY);
   if (converted > 0) return round2(converted);
 
-  if (tierValue > 0 && row.tierRates && row.tierRates[tierValue] !== undefined) {
-    return round2(row.tierRates[tierValue]);
+  const rates = Object.entries(row.tierRates || {})
+    .map(([tier, cost]) => ({ tier: toNumber(tier), cost: toNumber(cost) }))
+    .filter((entry) => entry.tier > 0 && entry.cost !== 0)
+    .sort((a, b) => a.tier - b.tier);
+
+  if (tierValue > 0 && rates.length > 0) {
+    const exact = rates.find((entry) => entry.tier === tierValue);
+    const nearestHigher = rates.find((entry) => entry.tier >= tierValue);
+    return round2((exact || nearestHigher || rates[rates.length - 1]).cost);
   }
 
   return round2(row.cost || 0);
@@ -1581,8 +1669,19 @@ const getAirportMtowTieredCost = (row, mtow) => {
     return round2(row.costRCCY);
   }
 
-  if (tierValue > 0 && row.tierRates && row.tierRates[tierValue] !== undefined) {
-    return round2(row.tierRates[tierValue]);
+  const rates = Object.entries(row.tierRates || {})
+    .map(([tier, cost]) => ({ tier: toNumber(tier), cost: toNumber(cost) }))
+    .filter((entry) => entry.tier > 0 && entry.cost !== 0)
+    .sort((a, b) => a.tier - b.tier);
+
+  if (tierValue > 0 && rates.length > 0) {
+    const exact = rates.find((entry) => entry.tier === tierValue);
+    const nearestHigher = rates.find((entry) => entry.tier >= tierValue);
+    return round2((exact || nearestHigher || rates[rates.length - 1]).cost);
+  }
+
+  if (tierValue > 0 && toNumber(row.mtow) > 0 && toNumber(row.mtow) === tierValue) {
+    return round2(row.cost || 0);
   }
 
   if (tierValue > 0 && row[String(tierValue)] !== undefined && row[String(tierValue)] !== "") {
@@ -1609,11 +1708,12 @@ const pickBest = (rows, scorer) => {
   return bestScore >= 0 ? best : null;
 };
 
-const applyCostField = (flight, field, amount, currency, reportingCurrency, explicitRccy) => {
+const applyCostField = (flight, field, amount, currency, reportingCurrency, explicitRccy, fxRates = [], date) => {
   const numeric = round2(amount);
+  const effectiveFxRates = fxRates.length ? fxRates : (flight.__costFxRates || []);
   flight[field] = numeric;
   flight[`${field}CCY`] = currency || "";
-  flight[`${field}RCCY`] = convertToRccy(numeric, currency, reportingCurrency, explicitRccy);
+  flight[`${field}RCCY`] = convertToRccy(numeric, currency, reportingCurrency, explicitRccy, effectiveFxRates, date || flight?.date, flight);
 };
 
 const initializeFlight = (flight, reportingCurrency) => {
@@ -1632,6 +1732,16 @@ const initializeFlight = (flight, reportingCurrency) => {
   next.otherMx = 0;
   next.majorSchMx = 0;
   next.apuFuel = 0;
+  next.apuFuelConsumptionKg = 0;
+  next.apuFuelKg = 0;
+  next.apuFuelLitres = 0;
+  next.apuFuelCostDirect = 0;
+  next.apuFuelCostAllocated = 0;
+  next.engineFuelKg = 0;
+  next.engineFuelConsumptionKg = 0;
+  next.engineFuelLitres = 0;
+  next.ftEffective = getFlightEffectiveFt(next);
+  next.mtowUsed = 0;
   next.otherMaintenance1 = 0;
   next.otherMaintenance2 = 0;
   next.otherMaintenance3 = 0;
@@ -1639,6 +1749,7 @@ const initializeFlight = (flight, reportingCurrency) => {
   next.navTrml = 0;
   next.aptLandingCost = 0;
   next.aptHandlingCost = 0;
+  next.aptAvsecCost = 0;
   next.aptOtherCost = 0;
   next.otherDoc1 = 0;
   next.otherDoc2 = 0;
@@ -1650,14 +1761,15 @@ const initializeFlight = (flight, reportingCurrency) => {
   return next;
 };
 
-const addAllocation = (flight, field, amount, currency, reportingCurrency, explicitRccy) => {
+const addAllocation = (flight, field, amount, currency, reportingCurrency, explicitRccy, fxRates = [], date) => {
+  const effectiveFxRates = fxRates.length ? fxRates : (flight.__costFxRates || []);
   const numeric = round2((flight[field] || 0) + amount);
   flight[field] = numeric;
   flight[`${field}CCY`] = currency || flight[`${field}CCY`] || "";
-  flight[`${field}RCCY`] = round2((flight[`${field}RCCY`] || 0) + convertToRccy(amount, currency, reportingCurrency, explicitRccy));
+  flight[`${field}RCCY`] = round2((flight[`${field}RCCY`] || 0) + convertToRccy(amount, currency, reportingCurrency, explicitRccy, effectiveFxRates, date || flight?.date, flight));
 };
 
-const distributePool = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy) => {
+const distributePool = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy, fxRates = [], date) => {
   const amount = round2(totalAmount);
   if (!eligibleFlights.length || amount === 0) return;
 
@@ -1672,11 +1784,11 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
       ? round2(amount - allocated)
       : round2((amount * safeWeights[index]) / safeTotal);
     allocated = round2(allocated + share);
-    addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy);
+    addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy, fxRates, date);
   });
 };
 
-const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy) => {
+const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy, fxRates = []) => {
   const amount = round2(totalAmount);
   if (!eligibleFlights.length || amount === 0) return;
 
@@ -1702,7 +1814,7 @@ const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, curre
         ? round2(amount - allocated)
         : round2((amount * safeWeights[index]) / safeTotal);
       allocated = round2(allocated + share);
-      addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy);
+      addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy, fxRates);
     });
   });
 };
@@ -1718,12 +1830,14 @@ const selectPlfFactor = (rule, paxLf) => {
   return selected?.factor || 1;
 };
 
-const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg }) => {
+const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg, pn, msn }) => {
   const candidates = [];
 
   rows.forEach((row, index) => {
     if (!row) return;
     if (!matchesOptional(row.depStn, depStn)) return;
+    if (!matchesOptional(row.pn, pn)) return;
+    if (!matchesOptional(row.sn, msn)) return;
     if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return;
 
     const matchesAcft = matchesOptional(row.acftRegn, acftReg);
@@ -1742,7 +1856,7 @@ const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg }) 
 
     candidates.push({
       row,
-      priority,
+      priority: priority + scoreTransitRule(row),
       effectiveFrom: parseDate(row.fromDate)?.getTime() || 0,
       effectiveTo: parseDate(row.toDate)?.getTime() || 0,
       index,
@@ -1761,6 +1875,35 @@ const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg }) 
   return candidates[0].row;
 };
 
+const addDebugMissing = (flight, message) => {
+  if (!flight?.costDebug) return;
+  if (!flight.costDebug.missingLookups.includes(message)) {
+    flight.costDebug.missingLookups.push(message);
+  }
+};
+
+const scoreApuUsageRule = (row, flight) => {
+  if (!row || isAdditionalApuUseRow(row)) return -1;
+  const flightDate = getFlightDate(flight);
+  if (!matchesOptional(row.arrStn, getFlightArr(flight))) return -1;
+  if (!matchesOptional(row.variant, getFlightVariant(flight))) return -1;
+  if (!matchesOptional(row.acftRegn, getFlightRegistration(flight))) return -1;
+  if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
+  return scoreSpecificity([row.arrStn, row.acftRegn, row.variant, row.fromDate || row.toDate]) * 10;
+};
+
+const findFuelPriceForStations = (config, stations = [], monthKey) => {
+  for (const station of stations.map(normalize).filter(Boolean)) {
+    const match = pickBest(config.ccyFuel, (row) => {
+      if (!matchesOptional(row.station, station)) return -1;
+      if (row.month && row.month !== monthKey) return -1;
+      return scoreSpecificity([row.station, row.month]);
+    });
+    if (match) return match;
+  }
+  return null;
+};
+
 const enrichDirectCosts = (flights, config) => {
   flights.forEach((flight) => {
     const flightDate = getFlightDate(flight);
@@ -1775,14 +1918,20 @@ const enrichDirectCosts = (flights, config) => {
     const domIntl = getFlightDomIntl(flight);
     const bh = toNumber(flight.bh);
     const fh = toNumber(flight.fh);
+    const ftEffective = getFlightEffectiveFt(flight);
     const mtow = getFlightMtow(flight, config.fleet);
     const departures = 1;
+    flight.ftEffective = ftEffective;
+    flight.mtowUsed = mtow;
 
     const fuelRule = pickBest(config.fuelConsum, (row) => {
-      if (!matchesOptional(row.sectorOrGcd, sector) && !matchesOptional(row.sectorOrGcd, normalize(flight.dist))) return -1;
-      if (!matchesOptional(row.acftRegn, acftReg)) return -1;
+      const rowSector = normalize(row.sectorOrGcd);
+      const sectorMatch = rowSector && rowSector === sector;
+      const gcdMatch = rowSector && rowSector === normalize(flight.dist);
+      if (!sectorMatch && !gcdMatch) return -1;
+      if (row.acftRegn && row.acftRegn !== acftReg) return -1;
       if (row.month && row.month !== flightMonthKey) return -1;
-      return scoreSpecificity([row.sectorOrGcd, row.acftRegn, row.month]) * 10;
+      return (sectorMatch ? 1000 : 500) + scoreSpecificity([row.acftRegn, row.month]) * 10;
     });
 
     const fuelIndexRule = pickBest(config.fuelConsumIndex, (row) => {
@@ -1797,11 +1946,7 @@ const enrichDirectCosts = (flights, config) => {
       return scoreSpecificity([row.sectorOrGcd, row.acftRegn]);
     });
 
-    const fuelPriceRule = pickBest(config.ccyFuel, (row) => {
-      if (!matchesOptional(row.station, depStn)) return -1;
-      if (row.month && row.month !== flightMonthKey) return -1;
-      return scoreSpecificity([row.station, row.month]);
-    });
+    const fuelPriceRule = findFuelPriceForStations(config, [depStn, arrStn], flightMonthKey);
 
     const plfFactor = selectPlfFactor(plfRule, getFlightLoadFactor(flight));
     const fuelIndexFactor = toNumber(fuelIndexRule?.fuelConsumptionIndex) || 1;
@@ -1812,6 +1957,23 @@ const enrichDirectCosts = (flights, config) => {
 
     flight.engineFuelConsumption = baseFuelConsumption;
     flight.engineFuel = baseFuelConsumption;
+    flight.engineFuelConsumptionKg = baseFuelConsumption;
+    flight.engineFuelKg = baseFuelConsumption;
+    flight.engineFuelLitres = fuelPriceRule?.kgPerLtr ? round2(baseFuelConsumption / toNumber(fuelPriceRule.kgPerLtr)) : 0;
+    if (flight.costDebug) {
+      flight.costDebug.fuel = {
+        baseFuelRow: fuelRule || null,
+        fuelIndexRow: fuelIndexRule || null,
+        plfEffectRow: plfRule || null,
+        fuelPriceRow: fuelPriceRule || null,
+        baseFuelKg: round2(fuelRule?.fuelConsumptionKg || 0),
+        fuelIndex: fuelIndexFactor,
+        plfEffect: plfFactor,
+        engineFuelKg: baseFuelConsumption,
+      };
+      if (!fuelRule) addDebugMissing(flight, `No fuel consumption row for ${sector} / ${acftReg} / ${flightMonthKey}`);
+      if (baseFuelConsumption > 0 && !fuelPriceRule) addDebugMissing(flight, `No fuel price row for ${depStn} / ${flightMonthKey}`);
+    }
     applyCostField(
       flight,
       "engineFuelCost",
@@ -1820,6 +1982,32 @@ const enrichDirectCosts = (flights, config) => {
       config.reportingCurrency,
       fuelPriceRule?.costRCCY || 0
     );
+
+    const apuRule = pickBest(config.apuUsage || [], (row) => scoreApuUsageRule(row, flight));
+    if (apuRule) {
+      const apuFuelKg = round2(toNumber(apuRule.apuHours) * toNumber(apuRule.consumptionPerApuHour));
+      const apuPriceRule = findFuelPriceForStations(config, [arrStn, depStn], flightMonthKey);
+      const apuCost = apuPriceRule ? calculateFuelCost(apuFuelKg, apuPriceRule) : apuFuelKg;
+      flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + apuFuelKg);
+      flight.apuFuelKg = round2((flight.apuFuelKg || 0) + apuFuelKg);
+      flight.apuFuelLitres = round2((flight.apuFuelLitres || 0) + (apuPriceRule?.kgPerLtr ? apuFuelKg / toNumber(apuPriceRule.kgPerLtr) : 0));
+      flight.apuFuelCostDirect = round2((flight.apuFuelCostDirect || 0) + apuCost);
+      addAllocation(flight, "apuFuelCost", apuCost, apuPriceRule?.ccy || apuRule.ccy, config.reportingCurrency, apuPriceRule?.costRCCY || apuRule.costRCCY);
+      if (flight.costDebug) {
+        flight.costDebug.apu = {
+          matchedApuRow: apuRule,
+          fuelPriceRow: apuPriceRule || null,
+          apuFuelKg,
+          apuFuelLitres: apuPriceRule?.kgPerLtr ? round2(apuFuelKg / toNumber(apuPriceRule.kgPerLtr)) : 0,
+          directCost: apuCost,
+          allocatedCost: flight.apuFuelCostAllocated || 0,
+        };
+        if (apuFuelKg > 0 && !apuPriceRule) addDebugMissing(flight, `No APU fuel price row for ${arrStn} / ${flightMonthKey}`);
+      }
+    } else if (flight.costDebug) {
+      flight.costDebug.apu = { matchedApuRow: null, fuelPriceRow: null, apuFuelKg: 0, apuFuelLitres: 0, directCost: 0, allocatedCost: 0 };
+      addDebugMissing(flight, `No APU usage row for ${arrStn} / ${acftReg}`);
+    }
 
     const mrDerived = resolveMaintenanceReserveRate(flight, config);
     if (mrDerived.amount > 0) {
@@ -1860,6 +2048,8 @@ const enrichDirectCosts = (flights, config) => {
       depStn,
       variant,
       acftReg,
+      pn,
+      msn,
     });
     if (transitRule) {
       applyCostField(
@@ -1874,11 +2064,15 @@ const enrichDirectCosts = (flights, config) => {
 
     const matchingOtherMxRows = (config.otherMx || []).filter((row) => (
       matchesOtherMxRow(row, { flightDate, depStn, variant, acftReg, pn, msn }) &&
-      (row.costPerBh || row.costPerDeparture || row.costPerMonth)
+      (row.costPerBh || row.costPerFh || row.costPerDeparture || row.costPerMonth)
     ));
     if (matchingOtherMxRows.length > 0) {
       const perBhTotal = matchingOtherMxRows.reduce(
         (sum, row) => sum + ((row.costPerBh || 0) * bh),
+        0
+      );
+      const perFhTotal = matchingOtherMxRows.reduce(
+        (sum, row) => sum + ((row.costPerFh || 0) * fh),
         0
       );
       const perDepTotal = matchingOtherMxRows.reduce(
@@ -1891,13 +2085,13 @@ const enrichDirectCosts = (flights, config) => {
       );
       const ccy = matchingOtherMxRows.find((row) => row.ccy)?.ccy || "";
       const costRCCY = matchingOtherMxRows.find((row) => row.costRCCY)?.costRCCY || 0;
-      flight.otherMaintenance1 = round2(perBhTotal);
+      flight.otherMaintenance1 = round2(perBhTotal + perFhTotal);
       flight.otherMaintenance2 = round2(perDepTotal);
       flight.otherMaintenance3 = round2(perMonthTotal);
       applyCostField(
         flight,
         "otherMaintenance",
-        perBhTotal + perDepTotal,
+        perBhTotal + perFhTotal + perDepTotal,
         ccy,
         config.reportingCurrency,
         costRCCY
@@ -1961,20 +2155,28 @@ const enrichDirectCosts = (flights, config) => {
       if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
       return scoreSpecificity([row.arrStn, row.mtow, row.variant, row.month, row.fromDate || row.toDate]) * 10;
     });
-    flight.aptLandingCost = round2(landingRule?.cost || 0);
+    const landingCost = getAirportMtowTieredCost(landingRule, mtow);
     const otherAirportCost = getAirportMtowTieredCost(otherAirportRule, mtow);
-    flight.aptOtherCost = round2(
-      otherAirportCost ?? (avsecRule?.cost || 0)
-    );
+    flight.aptLandingCost = round2(landingCost ?? 0);
     flight.aptHandlingCost = round2(handlingRule?.cost || 0);
+    flight.aptAvsecCost = round2(avsecRule?.cost || 0);
+    flight.aptOtherCost = round2(otherAirportCost ?? 0);
     applyCostField(
       flight,
       "airport",
-      flight.aptLandingCost + flight.aptHandlingCost + flight.aptOtherCost,
+      flight.aptLandingCost + flight.aptHandlingCost + flight.aptAvsecCost + flight.aptOtherCost,
       landingRule?.ccy || handlingRule?.ccy || otherAirportRule?.ccy || avsecRule?.ccy || "",
       config.reportingCurrency,
       landingRule?.costRCCY || handlingRule?.costRCCY || otherAirportRule?.costRCCY || avsecRule?.costRCCY
     );
+    if (flight.costDebug) {
+      flight.costDebug.navigation = { enrRule: enrRule || null, termRule: termRule || null, mtowUsed: mtow, navEnr: flight.navEnr, navTrml: flight.navTrml };
+      flight.costDebug.airport = { landingRule: landingRule || null, handlingRule: handlingRule || null, avsecRule: avsecRule || null, otherAirportRule: otherAirportRule || null, mtowUsed: mtow };
+      if (!mtow) addDebugMissing(flight, `No MTOW found for ${acftReg || msn || variant} on ${flight.date}`);
+      if (!enrRule) addDebugMissing(flight, `No nav ENR row for sector ${sector}`);
+      if (!termRule) addDebugMissing(flight, `No nav terminal row for ${arrStn}`);
+      if (!landingRule) addDebugMissing(flight, `No airport landing row for ${arrStn} / MTOW ${mtow}`);
+    }
 
     const matchingOtherDocs = (config.otherDoc || []).filter((row) => {
       if (!matchesOptional(row.sector, sector)) return false;
@@ -1982,6 +2184,7 @@ const enrichDirectCosts = (flights, config) => {
       if (!matchesOptional(row.arrStn, arrStn)) return false;
       if (!matchesOptional(row.variant, variant)) return false;
       if (!matchesOptional(row.acftRegn, acftReg)) return false;
+      if (!matchesOptional(row.pn, pn)) return false;
       if (!matchesOptional(row.sn, msn)) return false;
       return isWithinRange(flightDate, row.fromDate, row.toDate);
     }).sort((a, b) => {
@@ -1990,17 +2193,29 @@ const enrichDirectCosts = (flights, config) => {
       return scoreB - scoreA;
     });
 
-    flight.otherDoc1 = round2(matchingOtherDocs[0]?.cost || 0);
-    flight.otherDoc2 = round2(matchingOtherDocs[1]?.cost || 0);
-    flight.otherDoc3 = round2(matchingOtherDocs[2]?.cost || 0);
+    const calcOtherDoc = (row) => {
+      if (!row || row.per === "MONTH") return 0;
+      if (row.per === "BH") return row.cost * bh;
+      if (row.per === "FH") return row.cost * fh;
+      if (row.per === "FT") return row.cost * ftEffective;
+      return row.cost * departures;
+    };
+    const directOtherDocRows = matchingOtherDocs.filter((row) => row.per !== "MONTH");
+    const directOtherDocAmounts = directOtherDocRows.map(calcOtherDoc);
+    flight.otherDoc1 = round2(directOtherDocAmounts[0] || 0);
+    flight.otherDoc2 = round2(directOtherDocAmounts[1] || 0);
+    flight.otherDoc3 = round2(directOtherDocAmounts[2] || 0);
     applyCostField(
       flight,
       "otherDoc",
-      matchingOtherDocs.reduce((sum, row) => sum + row.cost, 0),
-      matchingOtherDocs[0]?.ccy || "",
+      directOtherDocAmounts.reduce((sum, value) => sum + value, 0),
+      directOtherDocRows[0]?.ccy || "",
       config.reportingCurrency,
-      matchingOtherDocs[0]?.costRCCY
+      directOtherDocRows[0]?.costRCCY
     );
+    if (flight.costDebug) {
+      flight.costDebug.otherDoc = { matchingRows: directOtherDocRows, amounts: directOtherDocAmounts.map(round2) };
+    }
 
     applyCostField(flight, "crewAllowances", 0, "", config.reportingCurrency, 0);
     applyCostField(flight, "layoverCost", 0, "", config.reportingCurrency, 0);
@@ -2022,27 +2237,30 @@ const enrichAllocatedCosts = (flights, config) => {
 
   config.apuUsage.forEach((row) => {
     const isAdditionalUse = isAdditionalApuUseRow(row);
+    if (!isAdditionalUse) return;
     const monthFlights = flights.filter((flight) => {
       const flightDate = getFlightDate(flight);
+      const rowMonth = normalizeMonthKey(row.fromDate || row.toDate);
+      const sameAdditionalMonth = isAdditionalUse && rowMonth && getFlightMonthKey(flight) === rowMonth;
       return (isAdditionalUse || getFlightArr(flight) === row.arrStn) &&
         matchesOptional(row.variant, getFlightVariant(flight)) &&
         matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
-        isWithinRange(flightDate, row.fromDate, row.toDate);
+        (sameAdditionalMonth || isWithinRange(flightDate, row.fromDate, row.toDate));
     });
 
     if (!monthFlights.length) return;
 
-    const priceSourceFlight = isAdditionalUse
-      ? getLatestFlightForAircraft(monthFlights, monthFlights[0] || row)
-      : monthFlights[0];
-    const priceRule = pickBest(config.ccyFuel, (price) => {
-      if (!matchesOptional(price.station, priceSourceFlight ? getFlightDep(priceSourceFlight) : "")) return -1;
-      if (price.month && price.month !== getFlightMonthKey(priceSourceFlight || monthFlights[0])) return -1;
-      return scoreSpecificity([price.station, price.month]);
-    });
+    const eventLikeFlight = {
+      date: row.fromDate || row.toDate || monthFlights[0]?.date,
+      aircraft: { registration: row.acftRegn || monthFlights[0]?.aircraft?.registration },
+      acftRegn: row.acftRegn,
+    };
+    const priceSourceFlight = getLatestFlightForAircraft(flights, eventLikeFlight, { requireBeforeOrOnDate: true }) || monthFlights[0];
+    const priceRule = findFuelPriceForStations(config, [getFlightDep(priceSourceFlight), getFlightArr(priceSourceFlight)], getFlightMonthKey(priceSourceFlight || monthFlights[0]));
     const pricePerKg = getPricePerKg(priceRule);
     const totalKg = row.apuHours > 0 ? row.apuHours * row.consumptionPerApuHour : row.consumptionPerApuHour;
     const poolAmount = pricePerKg > 0 ? totalKg * pricePerKg : totalKg;
+    const beforeValues = new Map(monthFlights.map((flight) => [flight, flight.apuFuelCostAllocated || 0]));
     distributePool(
       monthFlights,
       "apuFuelCost",
@@ -2052,6 +2270,17 @@ const enrichAllocatedCosts = (flights, config) => {
       row.basis || getAllocationBasis(config, "APUFUELCOST"),
       priceRule?.costRCCY || row.costRCCY
     );
+    monthFlights.forEach((flight) => {
+      flight.apuFuelCostAllocated = round2((flight.apuFuelCost || 0) - (flight.apuFuelCostDirect || 0));
+      const allocatedCost = round2((flight.apuFuelCostAllocated || 0) - (beforeValues.get(flight) || 0));
+      if (poolAmount > 0 && allocatedCost > 0) {
+        const kgShare = round2((totalKg * allocatedCost) / poolAmount);
+        flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + kgShare);
+        flight.apuFuelKg = round2((flight.apuFuelKg || 0) + kgShare);
+        flight.apuFuelLitres = round2((flight.apuFuelLitres || 0) + (priceRule?.kgPerLtr ? kgShare / toNumber(priceRule.kgPerLtr) : 0));
+      }
+      if (flight.costDebug?.apu) flight.costDebug.apu.allocatedCost = flight.apuFuelCostAllocated;
+    });
   });
 
   const monthlyReserveRows = (config.maintenanceReserveSchedule || []).filter((row) => normalizeMetric(row.driver) === "MONTH" && toNumber(row.contribution) > 0);
@@ -2107,7 +2336,7 @@ const enrichAllocatedCosts = (flights, config) => {
         group.amount,
         group.currency,
         config.reportingCurrency,
-        "BH",
+        getAllocationBasis(config, "MRMONTHLY"),
         group.reportingAmount
       );
     });
@@ -2143,19 +2372,26 @@ const enrichAllocatedCosts = (flights, config) => {
   Object.values(schGroups).forEach((events) => {
     const sorted = [...events].sort((a, b) => (parseDate(a.date)?.getTime() || 0) - (parseDate(b.date)?.getTime() || 0));
     sorted.forEach((event, index) => {
-      const startDate = parseDate(event.date) || masterStart;
-      const endDate = parseDate(sorted[index + 1]?.date) || masterEnd;
+      const previousDate = parseDate(sorted[index - 1]?.date);
+      const eventDate = parseDate(event.date);
+      const startDate = previousDate || eventDate || masterStart;
+      const endDate = eventDate || masterEnd;
       const eligibleFlights = flights.filter((flight) => {
         const flightDate = getFlightDate(flight);
         if (!flightDate || !startDate || !endDate) return false;
         if (flightDate < startDate || flightDate > endDate) return false;
+        if (!matchesOptional(event.pn, getFlightPartNumber(flight))) return false;
         return matchesOptional(event.msnEsnApun, getFlightMsn(flight)) ||
-          matchesOptional(event.msnEsnApun, getFlightRegistration(flight));
+          matchesOptional(event.msnEsnApun, getFlightRegistration(flight)) ||
+          (flight.snList || []).includes(normalize(event.msnEsnApun));
       });
+      const qualifyingAmount = toNumber(event.remaining) > 0
+        ? toNumber(event.remaining)
+        : Math.max(toNumber(event.cost) - toNumber(event.mrDrawdown), 0) || toNumber(event.cost);
       distributePool(
         eligibleFlights,
         "qualifyingSchMxEvents",
-        event.cost,
+        qualifyingAmount,
         event.ccy,
         config.reportingCurrency,
         getAllocationBasis(config, "QUALIFYINGSCHMXEVENTS"),
@@ -2188,6 +2424,30 @@ const enrichAllocatedCosts = (flights, config) => {
     );
   });
 
+  config.otherDoc.forEach((row) => {
+    if (row.per !== "MONTH") return;
+    const eligibleFlights = flights.filter((flight) => {
+      const flightDate = getFlightDate(flight);
+      if (!matchesOptional(row.sector, getFlightSector(flight))) return false;
+      if (!matchesOptional(row.depStn, getFlightDep(flight))) return false;
+      if (!matchesOptional(row.arrStn, getFlightArr(flight))) return false;
+      if (!matchesOptional(row.variant, getFlightVariant(flight))) return false;
+      if (!matchesOptional(row.acftRegn, getFlightRegistration(flight))) return false;
+      if (!matchesOptional(row.pn, getFlightPartNumber(flight))) return false;
+      if (!matchesOptional(row.sn, getFlightMsn(flight))) return false;
+      return isWithinRange(flightDate, row.fromDate, row.toDate);
+    });
+    distributeMonthlyPoolByBasis(
+      eligibleFlights,
+      "otherDoc",
+      row.cost,
+      row.ccy,
+      config.reportingCurrency,
+      getAllocationBasis(config, "OTHERDOC"),
+      row.costRCCY
+    );
+  });
+
   config.rotableChanges.forEach((row) => {
     const rowMonth = row.month || normalizeMonthKey(row.date);
     const eligibleFlights = flights.filter((flight) => {
@@ -2208,6 +2468,8 @@ const enrichAllocatedCosts = (flights, config) => {
 
 const applyCompatibilityAliases = (flight) => {
   flight.mrContribution = flight.maintenanceReserveContribution;
+  flight.mrContributionCCY = flight.maintenanceReserveContributionCCY;
+  flight.mrContributionRCCY = flight.maintenanceReserveContributionRCCY;
   flight.transitMx = flight.transitMaintenance;
   flight.otherMx = flight.otherMaintenance;
   flight.majorSchMx = flight.qualifyingSchMxEvents;
@@ -2215,15 +2477,47 @@ const applyCompatibilityAliases = (flight) => {
   flight.crewPositioning = flight.crewPositioningCost;
 };
 
+const applyTotals = (flight, reportingCurrency) => {
+  const total = COST_FIELDS
+    .filter((field) => field !== "totalCost")
+    .reduce((sum, field) => sum + toNumber(flight[field]), 0);
+  const totalRccy = COST_FIELDS
+    .filter((field) => field !== "totalCost")
+    .reduce((sum, field) => sum + toNumber(flight[`${field}RCCY`]), 0);
+  flight.totalCost = round2(total);
+  flight.totalCostCCY = reportingCurrency || "";
+  flight.totalCostRCCY = round2(totalRccy);
+};
+
 const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
   const config = rawConfig?.__normalized ? rawConfig : normalizeCostConfig(rawConfig);
 
-  const flights = (inputFlights || []).map((flight) => initializeFlight(flight, config.reportingCurrency));
+  const debugCosts = Boolean(rawConfig?.debugCosts || rawConfig?.debug);
+  const flights = (inputFlights || []).map((flight) => {
+    const next = initializeFlight(flight, config.reportingCurrency);
+    next.__costFxRates = config.fxRates || [];
+    if (debugCosts) {
+      next.costDebug = {
+        fuel: {},
+        apu: {},
+        maintenance: {},
+        navigation: {},
+        airport: {},
+        otherDoc: {},
+        missingLookups: [],
+      };
+    }
+    return next;
+  });
 
   flights.forEach((flight) => applySnContext(flight, config));
   enrichDirectCosts(flights, config);
   enrichAllocatedCosts(flights, config);
-  flights.forEach(applyCompatibilityAliases);
+  flights.forEach((flight) => {
+    applyCompatibilityAliases(flight);
+    applyTotals(flight, config.reportingCurrency);
+    delete flight.__costFxRates;
+  });
 
   return flights;
 };

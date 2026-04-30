@@ -1,0 +1,133 @@
+const assert = require("node:assert/strict");
+const { test } = require("node:test");
+
+const { computeFlightCosts, computeFlightCostsBatch } = require("../utils/costLogic");
+
+const approx = (actual, expected, tolerance = 0.02) => {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} not within ${tolerance} of ${expected}`);
+};
+
+const baseFlight = {
+  date: "2026-04-16",
+  flight: "A103",
+  sector: "CCU-BOM",
+  depStn: "CCU",
+  arrStn: "BOM",
+  variant: "A320",
+  acftType: "A320",
+  aircraft: { registration: "VT-ABC", msn: "5825" },
+  msn: "5825",
+  bh: 2.8333,
+  fh: 2.6167,
+  ft: "",
+  pax: 171,
+  seats: 180,
+  paxLF: 95,
+  domIntl: "dom",
+  dist: 895,
+};
+
+const baseConfig = {
+  reportingCurrency: "USD",
+  fxRates: [{ pair: "INR/USD", month: "04/26", rate: 0.012 }],
+  fleet: [{ regn: "VT-ABC", sn: "5825", variant: "A320", mtow: 77000, entry: "2026-01-01" }],
+  fuelConsum: [{ sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 8000 }],
+  fuelConsumIndex: [{ acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1 }],
+  plfEffect: [{ sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p80: 1, p90: 1.02, p95: 1.034375, p98: 1.04, p100: 1.04 }],
+  ccyFuel: [{ station: "CCU", month: "04/26", kgPerLtr: 0.78, intoPlaneRate: 92500, ccy: "INR" }],
+};
+
+test("engine fuel consumption and cost follow table x index x PLF and station fuel price", () => {
+  const row = computeFlightCosts(baseFlight, baseConfig);
+  assert.equal(row.engineFuelConsumptionKg, 8275);
+  assert.equal(row.engineFuelKg, 8275);
+  approx(row.engineFuelCost, (8275 / 0.78 / 1000) * 92500);
+});
+
+test("direct APU fuel uses arrival station price with departure fallback", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    apuUsage: [{ arrStn: "BOM", acftRegn: "VT-ABC", apuHours: 0.75, consumptionPerApuHour: 255 }],
+  });
+  assert.equal(row.apuFuelConsumptionKg, 191.25);
+  approx(row.apuFuelLitres, 191.25 / 0.78);
+  approx(row.apuFuelCostDirect, (191.25 / 0.78 / 1000) * 92500);
+});
+
+test("additional APU usage allocates by configured departures and preserves pool total", () => {
+  const flights = [
+    baseFlight,
+    { ...baseFlight, flight: "A104", date: "2026-04-17", bh: 1, fh: 1, aircraft: { registration: "VT-ABC", msn: "5825" } },
+  ];
+  const rows = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    allocationTable: [{ costCode: "APUFUELCOST", basis: "DEPARTURES" }],
+    apuUsage: [{ addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 2, consumptionPerApuHour: 280 }],
+  });
+  const expectedPool = (560 / 0.78 / 1000) * 92500;
+  approx(rows.reduce((sum, row) => sum + row.apuFuelCostAllocated, 0), expectedPool);
+  approx(rows[0].apuFuelCostAllocated, expectedPool / 2);
+});
+
+test("maintenance reserve FH contribution uses flight FH driver", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    leasedReserve: [{ acftRegn: "VT-ABC", sn: "5825", setRate: 290, driver: "FH", ccy: "USD", asOnDate: "2026-01-01" }],
+  });
+  approx(row.maintenanceReserveContribution, 758.84);
+});
+
+test("navigation uses nearest MTOW tier for ENR and terminal", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    navEnr: [{ sector: "CCU-BOM", ccy: "USD", "73000": 10, "77000": 20, "79000": 30 }],
+    navTerm: [{ arrStn: "BOM", ccy: "USD", "73000": 4, "77000": 5, "79000": 6 }],
+  });
+  assert.equal(row.mtowUsed, 77000);
+  assert.equal(row.navigation, 25);
+});
+
+test("domestic airport handling uses airportDom and landing MTOW tier", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    airportLanding: [{ arrStn: "BOM", ccy: "USD", "77000": 100 }],
+    airportDom: [{ arrStn: "BOM", variant: "A320", ccy: "USD", cost: 25 }],
+    airportIntl: [{ arrStn: "BOM", variant: "A320", ccy: "USD", cost: 999 }],
+  });
+  assert.equal(row.aptLandingCost, 100);
+  assert.equal(row.aptHandlingCost, 25);
+  assert.equal(row.airport, 125);
+});
+
+test("other DOC per BH uses flight block hours", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    otherDoc: [{ sector: "CCU-BOM", per: "BH", cost: 100, ccy: "USD" }],
+  });
+  approx(row.otherDoc, 283.33);
+});
+
+test("FX converts local currency to reporting currency", () => {
+  const row = computeFlightCosts(baseFlight, {
+    reportingCurrency: "USD",
+    fxRates: [{ pair: "INR/USD", month: "04/26", rate: 0.012 }],
+    transitMx: [{ depStn: "CCU", acftRegn: "VT-ABC", costPerDeparture: 1000, ccy: "INR" }],
+  });
+  assert.equal(row.transitMaintenanceRCCY, 12);
+});
+
+test("total RCCY equals the sum of component RCCY fields", () => {
+  const row = computeFlightCosts(baseFlight, {
+    ...baseConfig,
+    transitMx: [{ depStn: "CCU", acftRegn: "VT-ABC", costPerDeparture: 100, ccy: "USD" }],
+    otherDoc: [{ sector: "CCU-BOM", per: "BH", cost: 10, ccy: "USD" }],
+  });
+  const expected = [
+    "engineFuelCostRCCY", "apuFuelCostRCCY", "maintenanceReserveContributionRCCY",
+    "mrMonthlyRCCY", "qualifyingSchMxEventsRCCY", "transitMaintenanceRCCY",
+    "otherMaintenanceRCCY", "otherMxExpensesRCCY", "rotableChangesRCCY",
+    "navigationRCCY", "airportRCCY", "otherDocRCCY", "crewAllowancesRCCY",
+    "layoverCostRCCY", "crewPositioningCostRCCY",
+  ].reduce((sum, key) => Number((sum + (row[key] || 0)).toFixed(2)), 0);
+  assert.equal(row.totalCostRCCY, expected);
+});

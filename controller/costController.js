@@ -2,6 +2,7 @@ const CostConfig = require("../model/costConfigSchema");
 const Flights = require("../model/flight");
 const Utilisation = require("../model/utilisation");
 const MaintenanceReserve = require("../model/maintenanceReserveSchema");
+const Fleet = require("../model/fleet");
 const {
   normalizeCostConfig,
   computeFlightCostsBatch,
@@ -173,11 +174,20 @@ exports.getCostPageData = async (req, res) => {
     const flights = await Flights.find(matchQuery).lean();
 
     // 3. Fetch Cost Config 
-    const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId }).lean() || {});
-    const mrContext = await buildMaintenanceReserveContext(userId, flights);
+    const [rawCostConfig, fleetRows, mrContext] = await Promise.all([
+      CostConfig.findOne({ userId }).lean(),
+      Fleet.find({ userId }).lean(),
+      buildMaintenanceReserveContext(userId, flights),
+    ]);
+    const costConfig = normalizeCostConfig({ ...(rawCostConfig || {}), fleet: fleetRows });
 
     // 4. Compute Costs
-    let enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext });
+    let enrichedFlights = computeFlightCostsBatch(flights, {
+      ...costConfig,
+      ...mrContext,
+      fleet: fleetRows,
+      debugCosts: req.query?.debug === "true" || req.body?.debug === true || costConfig.debugCosts === true,
+    });
 
     if (sn?.length) {
       const selectedSn = new Set(sn.map((item) => String(item.value ?? item).trim().toUpperCase()).filter(Boolean));
@@ -192,5 +202,70 @@ exports.getCostPageData = async (req, res) => {
   } catch (error) {
     console.error("Error computing cost page data:", error);
     res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+exports.recalculateAndSaveCostPageData = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const matchQuery = { userId };
+    const { label, from, to, sector, variant, flight, userTag1, userTag2 } = req.body || {};
+
+    if (label && label.value !== "both") matchQuery.domIntl = label.value.toLowerCase();
+    const applyArrayFilter = (field, filterArray) => {
+      if (filterArray?.length) matchQuery[field] = { $in: filterArray.map((item) => item.value) };
+    };
+
+    applyArrayFilter("depStn", from);
+    applyArrayFilter("arrStn", to);
+    applyArrayFilter("sector", sector);
+    applyArrayFilter("variant", variant);
+    applyArrayFilter("flight", flight);
+    applyArrayFilter("userTag1", userTag1);
+    applyArrayFilter("userTag2", userTag2);
+
+    const flights = await Flights.find(matchQuery).lean();
+    const [rawCostConfig, fleetRows, mrContext] = await Promise.all([
+      CostConfig.findOne({ userId }).lean(),
+      Fleet.find({ userId }).lean(),
+      buildMaintenanceReserveContext(userId, flights),
+    ]);
+    const costConfig = normalizeCostConfig({ ...(rawCostConfig || {}), fleet: fleetRows });
+    const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext, fleet: fleetRows });
+
+    const costColumns = [
+      "engineFuelConsumptionKg", "engineFuelConsumption", "engineFuelKg", "engineFuelLitres",
+      "engineFuelCost", "engineFuelCostCCY", "engineFuelCostRCCY",
+      "apuFuelConsumptionKg", "apuFuelKg", "apuFuelLitres", "apuFuelCostDirect", "apuFuelCostAllocated",
+      "apuFuelCost", "apuFuelCostCCY", "apuFuelCostRCCY",
+      "maintenanceReserveContribution", "maintenanceReserveContributionCCY", "maintenanceReserveContributionRCCY",
+      "mrContribution", "mrContributionCCY", "mrContributionRCCY",
+      "mrMonthly", "mrMonthlyCCY", "mrMonthlyRCCY",
+      "qualifyingSchMxEvents", "qualifyingSchMxEventsCCY", "qualifyingSchMxEventsRCCY",
+      "transitMaintenance", "transitMaintenanceCCY", "transitMaintenanceRCCY",
+      "otherMaintenance", "otherMaintenanceCCY", "otherMaintenanceRCCY",
+      "otherMxExpenses", "otherMxExpensesCCY", "otherMxExpensesRCCY",
+      "rotableChanges", "rotableChangesCCY", "rotableChangesRCCY",
+      "navigation", "navigationCCY", "navigationRCCY", "navEnr", "navTrml",
+      "airport", "airportCCY", "airportRCCY", "aptLandingCost", "aptHandlingCost", "aptAvsecCost", "aptOtherCost",
+      "otherDoc", "otherDocCCY", "otherDocRCCY", "otherDoc1", "otherDoc2", "otherDoc3",
+      "crewAllowances", "crewAllowancesCCY", "crewAllowancesRCCY",
+      "layoverCost", "layoverCostCCY", "layoverCostRCCY",
+      "crewPositioningCost", "crewPositioningCostCCY", "crewPositioningCostRCCY",
+      "totalCost", "totalCostCCY", "totalCostRCCY", "ftEffective", "mtowUsed",
+    ];
+
+    await Promise.all(enrichedFlights.map((row) => {
+      const $set = {};
+      costColumns.forEach((key) => {
+        if (row[key] !== undefined) $set[key] = row[key];
+      });
+      return Flights.updateOne({ _id: row._id, userId }, { $set });
+    }));
+
+    res.status(200).json({ success: true, updated: enrichedFlights.length });
+  } catch (error) {
+    console.error("Error recalculating and saving cost page data:", error);
+    res.status(500).json({ success: false, message: "Internal Server Error" });
   }
 };

@@ -98,6 +98,7 @@ user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
 user.get("/cost-config", verifyToken, costController.getCostConfig);
 user.post("/cost-config", verifyToken, jsonParser, costController.saveCostConfig);
 user.post("/cost-page-data", verifyToken, jsonParser, costController.getCostPageData);
+user.post("/cost-page-data/recalculate-and-save", verifyToken, jsonParser, costController.recalculateAndSaveCostPageData);
 
 user.get("/apu-fuel-costs", verifyToken, apuFuelController.getApuFuelCosts);
 user.post("/apu-fuel-costs", verifyToken, jsonParser, apuFuelController.bulkSaveApuFuelCosts);
