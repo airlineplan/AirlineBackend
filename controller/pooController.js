@@ -1146,8 +1146,8 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
         const filters = {
             userId,
             date: {
-                $gte: moment(date).startOf("day").toDate(),
-                $lte: moment(date).endOf("day").toDate(),
+                $gte: moment(date).subtract(1, 'days').startOf("day").toDate(),
+                $lte: moment(date).subtract(1, 'days').endOf("day").toDate(),
             },
         };
 
@@ -1169,11 +1169,9 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
     return { firstFlight, secondFlight };
 }
 
-async function buildPooDataset({ userId, poo, date, dateFrom, dateTo, includeAllPoos = false }) {
-    const startInput = dateFrom || date;
-    const endInput = dateTo || dateFrom || date;
-    const dayStart = moment(startInput).startOf("day").toDate();
-    const dayEnd = moment(endInput).endOf("day").toDate();
+async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
+    const dayStart = moment(date).subtract(1, 'days').startOf("day").toDate();
+    const dayEnd = moment(date).subtract(1, 'days').endOf("day").toDate();
     const normalizedPoo = normalizeStation(poo);
     const normalizedUserId = normalizeUserId(userId);
 
@@ -1294,7 +1292,7 @@ async function buildPooDataset({ userId, poo, date, dateFrom, dateTo, includeAll
                 revenueConfig,
                 fxRateMap,
                 poo: normalizedCode,
-                date: startInput,
+                date: date,
             });
         }
         return currencyContextByPoo[normalizedCode];
@@ -1658,8 +1656,8 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
         return [];
     }
 
-    const dayStart = moment(date).startOf("day").toDate();
-    const dayEnd = moment(date).endOf("day").toDate();
+    const dayStart = moment(date).subtract(1, 'days').startOf("day").toDate();
+    const dayEnd = moment(date).subtract(1, 'days').endOf("day").toDate();
     const [sectorMap, stations, rawRevenueConfig] = await Promise.all([
         getSectorInfoMap(userId),
         Station.find({ userId }).lean(),
@@ -1882,8 +1880,6 @@ exports.getPooData = async (req, res) => {
         const {
             poo,
             date,
-            dateFrom,
-            dateTo,
             flightNumber,
             sector,
             variant,
@@ -1894,15 +1890,10 @@ exports.getPooData = async (req, res) => {
         const filter = { userId };
 
         if (poo) filter.poo = normalizeStation(poo);
-        if (dateFrom || dateTo) {
+        if (date) {
             filter.date = {
-                $gte: moment(dateFrom || dateTo).startOf("day").toDate(),
-                $lte: moment(dateTo || dateFrom).endOf("day").toDate(),
-            };
-        } else if (date) {
-            filter.date = {
-                $gte: moment(date).startOf("day").toDate(),
-                $lte: moment(date).endOf("day").toDate(),
+                $gte: moment(date).subtract(1, 'days').startOf("day").toDate(),
+                $lte: moment(date).subtract(1, 'days').endOf("day").toDate(),
             };
         }
         if (flightNumber) filter.flightNumber = flightNumber;
@@ -1935,14 +1926,13 @@ exports.getPooData = async (req, res) => {
 exports.populatePoo = async (req, res) => {
     try {
         const userId = normalizeUserId(req.user.id);
-        const { poo, date, dateFrom, dateTo } = req.body;
-        const startInput = dateFrom || date;
+        const { poo, date } = req.body;
 
-        if (!startInput) {
-            return res.status(400).json({ message: "Date or date range is required" });
+        if (!date) {
+            return res.status(400).json({ message: "Date is required" });
         }
 
-        const dataset = await buildPooDataset({ userId, poo, date, dateFrom, dateTo, includeAllPoos: true });
+        const dataset = await buildPooDataset({ userId, poo, date, includeAllPoos: true });
 
         if (!dataset.rows.length) {
             await PooTable.deleteMany({
