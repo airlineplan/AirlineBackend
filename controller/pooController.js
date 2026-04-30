@@ -1789,13 +1789,25 @@ async function applyUpdatesForDate({ userId, updates }) {
         throw new Error("One or more target POO rows were not found");
     }
 
+    const relatedFlightIds = [
+        ...new Set(
+            rows
+                .flatMap((row) => [row.flightId, row.connectedFlightId])
+                .filter(Boolean)
+                .map(String)
+        ),
+    ];
+    const relatedOdGroupKeys = [
+        ...new Set(rows.map((row) => row.odGroupKey).filter(Boolean)),
+    ];
+
     const workingRows = await PooTable.find({
         userId,
         $or: [
             { _id: { $in: editIds } },
-            { flightId: { $in: rows.map((row) => row.flightId) } },
-            { connectedFlightId: { $in: rows.map((row) => row.flightId) } },
-            { odGroupKey: { $in: rows.map((row) => row.odGroupKey).filter(Boolean) } },
+            { flightId: { $in: relatedFlightIds } },
+            { connectedFlightId: { $in: relatedFlightIds } },
+            { odGroupKey: { $in: relatedOdGroupKeys } },
         ],
     });
 
@@ -2469,5 +2481,6 @@ exports.__testables__ = {
     buildExplicitConnectionEdges,
     mergeConnectionEdges,
     applyTrafficUpdates,
+    applyUpdatesForDate,
     assignSerialNumbers,
 };

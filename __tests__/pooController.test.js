@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const pooController = require("../controller/pooController");
+const PooTable = require("../model/pooTable");
 
 const {
     calculateProrateRatio,
@@ -12,6 +13,7 @@ const {
     buildSystemConnectionRows,
     buildExplicitConnectionEdges,
     applyTrafficUpdates,
+    applyUpdatesForDate,
     assignSerialNumbers,
 } = pooController.__testables__;
 
@@ -1302,4 +1304,146 @@ test("applies the 4 Mar DEL POO example across leg, behind, and beyond rows", ()
     assert.equal(byId.get("del-dxb-beyond").timeInclLayover, "09:30");
     assert.equal(byId.get("a101-bom").pax, 64);
     assert.equal(byId.get("a102-bom").pax, 121);
+});
+
+test("loads connected flight leg buckets before applying an OD edit", async () => {
+    const rows = [
+        makeStateRow({
+            _id: "a100-del",
+            trafficType: "leg",
+            flightId: "f1",
+            poo: "DEL",
+            od: "DEL-BOM",
+            odOrigin: "DEL",
+            odDestination: "BOM",
+            sector: "DEL-BOM",
+            pax: 65,
+            cargoT: 0.1,
+            maxPax: 153,
+            maxCargoT: 0.6,
+        }),
+        makeStateRow({
+            _id: "a100-bom",
+            trafficType: "leg",
+            flightId: "f1",
+            poo: "BOM",
+            od: "DEL-BOM",
+            odOrigin: "DEL",
+            odDestination: "BOM",
+            sector: "DEL-BOM",
+            pax: 88,
+            cargoT: 0.5,
+            maxPax: 153,
+            maxCargoT: 0.6,
+        }),
+        makeStateRow({
+            _id: "a101-bom",
+            trafficType: "leg",
+            flightId: "f2",
+            poo: "BOM",
+            od: "BOM-HYD",
+            odOrigin: "BOM",
+            odDestination: "HYD",
+            sector: "BOM-HYD",
+            pax: 64,
+            cargoT: 0.7,
+            maxPax: 128,
+            maxCargoT: 1.4,
+        }),
+        makeStateRow({
+            _id: "a101-hyd",
+            trafficType: "leg",
+            flightId: "f2",
+            poo: "HYD",
+            od: "BOM-HYD",
+            odOrigin: "BOM",
+            odDestination: "HYD",
+            sector: "BOM-HYD",
+            pax: 64,
+            cargoT: 0.7,
+            maxPax: 128,
+            maxCargoT: 1.4,
+        }),
+        makeStateRow({
+            _id: "del-hyd-behind",
+            trafficType: "behind",
+            flightId: "f1",
+            connectedFlightId: "f2",
+            poo: "DEL",
+            od: "DEL-HYD",
+            odOrigin: "DEL",
+            odDestination: "HYD",
+            sector: "DEL-BOM",
+            identifier: "Behind",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            pax: 0,
+            cargoT: 0,
+            maxPax: 128,
+            maxCargoT: 0.6,
+            stops: 1,
+        }),
+        makeStateRow({
+            _id: "del-hyd-beyond",
+            trafficType: "beyond",
+            flightId: "f2",
+            connectedFlightId: "f1",
+            poo: "DEL",
+            od: "DEL-HYD",
+            odOrigin: "DEL",
+            odDestination: "HYD",
+            sector: "BOM-HYD",
+            identifier: "Beyond",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            pax: 0,
+            cargoT: 0,
+            maxPax: 128,
+            maxCargoT: 0.6,
+            stops: 1,
+        }),
+    ];
+
+    const originalFind = PooTable.find;
+    const originalBulkWrite = PooTable.bulkWrite;
+    const originalDeleteMany = PooTable.deleteMany;
+    const findQueries = [];
+    let persistedRows = [];
+
+    PooTable.find = async (query) => {
+        findQueries.push(query);
+        if (findQueries.length === 1) {
+            return [rows.find((row) => row._id === "del-hyd-behind")];
+        }
+        if (findQueries.length === 2) {
+            return rows;
+        }
+        return persistedRows;
+    };
+    PooTable.bulkWrite = async (ops) => {
+        persistedRows = ops.map((op) => ({
+            _id: op.updateOne.filter._id,
+            ...op.updateOne.update.$set,
+        }));
+    };
+    PooTable.deleteMany = async () => ({ deletedCount: 0 });
+
+    try {
+        const updatedRows = await applyUpdatesForDate({
+            userId: "user-1",
+            updates: [{ _id: "del-hyd-behind", pax: 5, cargoT: 0 }],
+        });
+
+        const workingRowsQuery = findQueries[1];
+        const flightScope = workingRowsQuery.$or.find((clause) => clause.flightId)?.flightId.$in;
+        assert.deepEqual(flightScope.sort(), ["f1", "f2"]);
+
+        const byId = new Map(updatedRows.map((row) => [row._id, row]));
+        assert.equal(byId.get("a100-del").pax, 60);
+        assert.equal(byId.get("a101-hyd").pax, 59);
+        assert.equal(byId.get("del-hyd-behind").pax, 5);
+        assert.equal(byId.get("del-hyd-beyond").pax, 5);
+    } finally {
+        PooTable.find = originalFind;
+        PooTable.bulkWrite = originalBulkWrite;
+        PooTable.deleteMany = originalDeleteMany;
+    }
 });
