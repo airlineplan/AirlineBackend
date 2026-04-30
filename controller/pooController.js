@@ -494,7 +494,14 @@ function calculateLegShare(row, fieldName) {
     if (row.stops !== 1) {
         return 1;
     }
-    const firstLegRatio = calculateProrateRatio(row, fieldName);
+    const explicitRatio = parseNumber(row[fieldName]);
+    if (explicitRatio <= 0) {
+        const totalGcd = parseNumber(row.odViaGcd);
+        if (totalGcd <= 0) return 0;
+        return Math.min(parseNumber(row.sectorGcd) / totalGcd, 1);
+    }
+
+    const firstLegRatio = Math.min(explicitRatio, 1);
     if (
         row.trafficType === TRAFFIC_TYPES.BEHIND ||
         row.trafficType === TRAFFIC_TYPES.TRANSIT_FL
@@ -1667,7 +1674,7 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
 
 async function ensureTransitRows({ userId, date, transitDraft }) {
     if (!transitDraft || !transitDraft.poo) {
-        return [];
+        return { rows: [], createdRowKeys: [] };
     }
 
     const dateRange = buildSelectedDateRange(date);
@@ -1693,6 +1700,17 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
     if (!firstFlight || !secondFlight) {
         throw new Error("Transit flights were not found for the selected date");
     }
+    if (normalizeStation(firstFlight.arrStn) !== normalizeStation(secondFlight.depStn)) {
+        throw buildValidationError([
+            {
+                rowId: "",
+                rowKey: "",
+                field: "transitDraft",
+                code: "INVALID_TRANSIT_SEQUENCE",
+                message: "Transit flights must be consecutive through the same station",
+            },
+        ]);
+    }
 
     const existingRecords = await PooTable.find({
         userId,
@@ -1716,6 +1734,14 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
         }),
         shouldReset: false,
     });
+    const existingTransitRowKeys = new Set(
+        existingRecords
+            .filter((row) => transitRows.some((transitRow) => transitRow.rowKey === row.rowKey))
+            .map((row) => row.rowKey)
+    );
+    const createdRowKeys = transitRows
+        .map((row) => row.rowKey)
+        .filter((rowKey) => !existingTransitRowKeys.has(rowKey));
 
     const bulkOps = transitRows.map((row) => ({
         updateOne: {
@@ -1729,10 +1755,12 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
         await PooTable.bulkWrite(bulkOps, { ordered: true });
     }
 
-    return PooTable.find({
+    const rows = await PooTable.find({
         userId,
         rowKey: { $in: transitRows.map((row) => row.rowKey) },
     });
+
+    return { rows, createdRowKeys };
 }
 
 function buildApplySignature(row) {
@@ -2143,8 +2171,9 @@ exports.populatePoo = async (req, res) => {
 };
 
 exports.updatePooRecords = async (req, res) => {
+    const userId = req.user.id;
+    let createdTransitRowKeys = [];
     try {
-        const userId = req.user.id;
         const {
             records = [],
             transitDraft = null,
@@ -2154,11 +2183,13 @@ exports.updatePooRecords = async (req, res) => {
 
         let createdTransitRows = [];
         if (transitDraft) {
-            createdTransitRows = await ensureTransitRows({
+            const transitResult = await ensureTransitRows({
                 userId,
                 date: transitDraft.date,
                 transitDraft,
             });
+            createdTransitRows = transitResult.rows;
+            createdTransitRowKeys = transitResult.createdRowKeys;
         }
 
         const normalizedUpdates = [...records];
@@ -2267,6 +2298,16 @@ exports.updatePooRecords = async (req, res) => {
             skippedDates,
         });
     } catch (error) {
+        if (createdTransitRowKeys.length) {
+            try {
+                await PooTable.deleteMany({
+                    userId,
+                    rowKey: { $in: createdTransitRowKeys },
+                });
+            } catch (cleanupError) {
+                console.error("🔥 Error rolling back transit POO rows:", cleanupError);
+            }
+        }
         console.error("🔥 Error updating POO records:", error);
         res.status(400).json({
             message: error.message || "Failed to update POO records",

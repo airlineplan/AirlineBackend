@@ -543,6 +543,37 @@ test("uses leg revenue as the OD basis when applySSPricing is enabled", () => {
     assert.equal(row.fnlRccyTotalRev, 25);
 });
 
+test("default one-stop proration uses each row sector GCD when no explicit ratio is entered", () => {
+    const behind = recalculateRevenue({
+        stops: 1,
+        trafficType: "behind",
+        pax: 10,
+        cargoT: 1,
+        sectorGcd: 1200,
+        odViaGcd: 1800,
+        odFare: 900,
+        odRate: 90,
+        fareProrateRatioL1L2: 0,
+        rateProrateRatioL1L2: 0,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+    const beyond = recalculateRevenue({
+        ...behind,
+        trafficType: "beyond",
+        sectorGcd: 600,
+        legFare: 0,
+        legRate: 0,
+    });
+
+    assert.equal(behind.legFare, 600);
+    assert.equal(behind.legRate, 60);
+    assert.equal(beyond.legFare, 300);
+    assert.equal(beyond.legRate, 30);
+    assert.equal(behind.odPaxRev, 9000);
+    assert.equal(beyond.odPaxRev, 9000);
+});
+
 test("OD revenue aggregation dedupes one-stop behind and beyond rows", () => {
     const rows = [
         makeStateRow({
