@@ -551,6 +551,55 @@ test("rebalances the paired leg when a direct leg is edited", () => {
     assert.equal(bomRow.pax, 45);
 });
 
+test("moves a direct leg pax and cargo delta into the alternative POO leg row", () => {
+    const finalRows = applyTrafficUpdates(
+        [
+            makeStateRow({
+                _id: "a100-del",
+                trafficType: "leg",
+                flightId: "A100-2026-03-04",
+                poo: "DEL",
+                od: "DEL-BOM",
+                odOrigin: "DEL",
+                odDestination: "BOM",
+                sector: "DEL-BOM",
+                flightNumber: "A 100",
+                rowKey: "system|leg|DEL|A100-2026-03-04|none|leg::A100-2026-03-04",
+                odGroupKey: "leg::A100-2026-03-04",
+                pax: 77,
+                cargoT: 0.3,
+                maxPax: 153,
+                maxCargoT: 0.6,
+            }),
+            makeStateRow({
+                _id: "a100-bom",
+                trafficType: "leg",
+                flightId: "A100-2026-03-04",
+                poo: "BOM",
+                od: "DEL-BOM",
+                odOrigin: "DEL",
+                odDestination: "BOM",
+                sector: "DEL-BOM",
+                flightNumber: "A 100",
+                rowKey: "system|leg|BOM|A100-2026-03-04|none|leg::A100-2026-03-04",
+                odGroupKey: "leg::A100-2026-03-04",
+                pax: 76,
+                cargoT: 0.3,
+                maxPax: 153,
+                maxCargoT: 0.6,
+            }),
+        ],
+        [{ _id: "a100-del", pax: 65, cargoT: 0.1 }]
+    );
+
+    const byId = new Map(finalRows.map((row) => [row._id, row]));
+
+    assert.equal(byId.get("a100-del").pax, 65);
+    assert.equal(byId.get("a100-del").cargoT, 0.1);
+    assert.equal(byId.get("a100-bom").pax, 88);
+    assert.equal(byId.get("a100-bom").cargoT, 0.5);
+});
+
 test("rebalance connection traffic across both legs in a two-leg OD", () => {
     const finalRows = applyTrafficUpdates(
         [
