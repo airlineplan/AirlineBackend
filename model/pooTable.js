@@ -25,6 +25,10 @@ const pooTableSchema = new mongoose.Schema({
     identifier: { type: String, trim: true },
     sector: { type: String, trim: true },
     legDI: { type: String, trim: true }, // Leg Domestic/International
+    depStn: { type: String, trim: true, default: "" },
+    arrStn: { type: String, trim: true, default: "" },
+    userTag1: { type: String, trim: true, default: "" },
+    userTag2: { type: String, trim: true, default: "" },
 
     // Flight Details
     date: { type: Date },
@@ -113,6 +117,14 @@ pooTableSchema.index(
 
 pooTableSchema.index(
     { userId: 1, date: 1, odGroupKey: 1, poo: 1 }
+);
+
+pooTableSchema.index(
+    { userId: 1, depStn: 1, arrStn: 1, sector: 1, flightNumber: 1, date: 1 }
+);
+
+pooTableSchema.index(
+    { userId: 1, userTag1: 1, userTag2: 1 }
 );
 
 const PooTable = mongoose.model('PooTable', pooTableSchema);

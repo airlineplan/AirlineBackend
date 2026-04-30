@@ -282,6 +282,11 @@ user.post("/poo/update", verifyToken, jsonParser, pooController.updatePooRecords
 user.delete("/poo", verifyToken, jsonParser, pooController.deletePooRecords);
 user.get("/revenue/config", verifyToken, pooController.getRevenueConfig);
 user.post("/revenue/config", verifyToken, jsonParser, pooController.saveRevenueConfig);
+user.get("/revenue-config", verifyToken, pooController.getRevenueConfig);
+user.post("/revenue-config", verifyToken, jsonParser, pooController.saveRevenueConfig);
+user.post("/revenue-config/reporting-currency", verifyToken, jsonParser, pooController.saveReportingCurrency);
+user.post("/revenue-config/fx-rates", verifyToken, jsonParser, pooController.saveFxRates);
 user.get("/revenue", verifyToken, pooController.getRevenueData);
+user.post("/revenue/backfill-master-fields-to-poo", verifyToken, jsonParser, pooController.backfillMasterFieldsToPoo);
 
 module.exports = user;

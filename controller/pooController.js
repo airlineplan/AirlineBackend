@@ -111,6 +111,42 @@ function formatDateKey(date) {
     return moment(date).format("YYYY-MM-DD");
 }
 
+function normalizeDateKey(value) {
+    const parsed = moment.utc(value);
+    return parsed.isValid() ? parsed.format("YYYY-MM-DD") : String(value || "").trim();
+}
+
+function getCarriedForwardFxRate(fxRates = [], pair, dateKey) {
+    const normalizedPair = String(pair || "").trim().toUpperCase();
+    const targetKey = normalizeDateKey(dateKey);
+    if (!normalizedPair || !targetKey) return 1;
+
+    const matches = (Array.isArray(fxRates) ? fxRates : [])
+        .map((row) => ({
+            pair: String(row?.pair || "").trim().toUpperCase(),
+            dateKey: normalizeDateKey(row?.dateKey),
+            rate: parseNumber(row?.rate, 1),
+        }))
+        .filter((row) => row.pair === normalizedPair && row.dateKey && row.rate > 0)
+        .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+
+    let selected = null;
+    for (const row of matches) {
+        if (row.dateKey <= targetKey) selected = row;
+        if (row.dateKey > targetKey) break;
+    }
+
+    return selected ? selected.rate : 1;
+}
+
+function convertLocalToReporting(amount, localCcy, reportingCurrency, dateKey, fxRates = []) {
+    const local = normalizeCurrencyCode(localCcy);
+    const reporting = normalizeCurrencyCode(reportingCurrency) || "USD";
+    if (!local || local === reporting) return roundToTwo(amount);
+    // FX direction is LOCAL/REPORTING. Local-to-reporting is multiplication only.
+    return roundToTwo(parseNumber(amount) * getCarriedForwardFxRate(fxRates, `${local}/${reporting}`, dateKey));
+}
+
 function buildSelectedDateRange(date) {
     return {
         $gte: moment.utc(date).startOf("day").toDate(),
@@ -295,7 +331,7 @@ function resolveCurrencyContext({ stationCurrencyMap, revenueConfig, fxRateMap, 
     const rate =
         pooCcy === reportingCurrency
             ? 1
-            : (fxRateMap.get(`${pair}::${dateKey}`) || 1);
+            : (fxRateMap.get(`${pair}::${dateKey}`) || getCarriedForwardFxRate(revenueConfig.fxRates, pair, dateKey));
 
     return {
         pooCcy,
@@ -338,6 +374,8 @@ function buildFlightSnapshot(flight, sectorMap, userId = "") {
         behind1: parseNumber(flight.behind1, 0),
         behind2: parseNumber(flight.behind2, 0),
         variant: String(flight.variant || "").trim(),
+        userTag1: String(flight.userTag1 || "").trim(),
+        userTag2: String(flight.userTag2 || "").trim(),
         std: String(flight.std || sectorInfo.std || "").trim(),
         sta: String(flight.sta || sectorInfo.sta || "").trim(),
         bt: String(flight.bt || "").trim(),
@@ -427,6 +465,10 @@ function createWorkingState(record) {
         odOrigin: normalizeStation(record.odOrigin),
         odDestination: normalizeStation(record.odDestination),
         sector: record.sector,
+        depStn: normalizeStation(record.depStn),
+        arrStn: normalizeStation(record.arrStn),
+        userTag1: String(record.userTag1 || "").trim(),
+        userTag2: String(record.userTag2 || "").trim(),
         flightId: record.flightId,
         connectedFlightId: record.connectedFlightId || null,
         flightNumber: record.flightNumber,
@@ -663,6 +705,10 @@ function buildLegRows({
         odDI: snapshot.odDI,
         sector: snapshot.sector,
         legDI: snapshot.legDI,
+        depStn: snapshot.depStn,
+        arrStn: snapshot.arrStn,
+        userTag1: snapshot.userTag1,
+        userTag2: snapshot.userTag2,
         date: snapshot.date,
         day: snapshot.day,
         flightNumber: snapshot.flightNumber,
@@ -812,6 +858,10 @@ function buildSystemConnectionRows({
             identifier: "Behind",
             sector: firstSnapshot.sector,
             legDI: firstSnapshot.legDI,
+            depStn: firstSnapshot.depStn,
+            arrStn: firstSnapshot.arrStn,
+            userTag1: firstSnapshot.userTag1,
+            userTag2: firstSnapshot.userTag2,
             date: firstSnapshot.date,
             day: firstSnapshot.day,
             flightNumber: firstSnapshot.flightNumber,
@@ -873,6 +923,10 @@ function buildSystemConnectionRows({
             identifier: "Beyond",
             sector: secondSnapshot.sector,
             legDI: secondSnapshot.legDI,
+            depStn: secondSnapshot.depStn,
+            arrStn: secondSnapshot.arrStn,
+            userTag1: secondSnapshot.userTag1,
+            userTag2: secondSnapshot.userTag2,
             date: secondSnapshot.date,
             day: secondSnapshot.day,
             flightNumber: secondSnapshot.flightNumber,
@@ -977,6 +1031,10 @@ function buildUserTransitRows({
             identifier: "Transit FL",
             sector: firstSnapshot.sector,
             legDI: firstSnapshot.legDI,
+            depStn: firstSnapshot.depStn,
+            arrStn: firstSnapshot.arrStn,
+            userTag1: firstSnapshot.userTag1,
+            userTag2: firstSnapshot.userTag2,
             date: firstSnapshot.date,
             day: firstSnapshot.day,
             flightNumber: firstSnapshot.flightNumber,
@@ -1038,6 +1096,10 @@ function buildUserTransitRows({
             identifier: "Transit SL",
             sector: secondSnapshot.sector,
             legDI: secondSnapshot.legDI,
+            depStn: secondSnapshot.depStn,
+            arrStn: secondSnapshot.arrStn,
+            userTag1: secondSnapshot.userTag1,
+            userTag2: secondSnapshot.userTag2,
             date: secondSnapshot.date,
             day: secondSnapshot.day,
             flightNumber: secondSnapshot.flightNumber,
@@ -1905,6 +1967,13 @@ function buildRevenueAggregateResponse(rows, groupByFields, periodicity) {
                 totalRev: 0,
                 fnlRccyPaxRev: 0,
                 fnlRccyCargoRev: 0,
+                fnlRccyTotalRev: 0,
+                odPaxRev: 0,
+                odCargoRev: 0,
+                odTotalRev: 0,
+                legPaxRev: 0,
+                legCargoRev: 0,
+                legTotalRev: 0,
                 count: 0,
             });
         }
@@ -1919,6 +1988,13 @@ function buildRevenueAggregateResponse(rows, groupByFields, periodicity) {
         bucket.totalRev += parseNumber(useSectorBasis ? row.rccyLegTotalRev : row.fnlRccyTotalRev);
         bucket.fnlRccyPaxRev += parseNumber(useSectorBasis ? row.rccyLegPaxRev : row.fnlRccyPaxRev);
         bucket.fnlRccyCargoRev += parseNumber(useSectorBasis ? row.rccyLegCargoRev : row.fnlRccyCargoRev);
+        bucket.fnlRccyTotalRev += parseNumber(useSectorBasis ? row.rccyLegTotalRev : row.fnlRccyTotalRev);
+        bucket.odPaxRev += parseNumber(row.odPaxRev);
+        bucket.odCargoRev += parseNumber(row.odCargoRev);
+        bucket.odTotalRev += parseNumber(row.odTotalRev);
+        bucket.legPaxRev += parseNumber(row.legPaxRev);
+        bucket.legCargoRev += parseNumber(row.legCargoRev);
+        bucket.legTotalRev += parseNumber(row.legTotalRev);
         bucket.count += 1;
     });
 
@@ -1937,6 +2013,13 @@ function buildRevenueAggregateResponse(rows, groupByFields, periodicity) {
                 totalRev: roundToTwo(bucket.totalRev),
                 fnlRccyPaxRev: roundToTwo(bucket.fnlRccyPaxRev),
                 fnlRccyCargoRev: roundToTwo(bucket.fnlRccyCargoRev),
+                fnlRccyTotalRev: roundToTwo(bucket.fnlRccyTotalRev),
+                odPaxRev: roundToTwo(bucket.odPaxRev),
+                odCargoRev: roundToTwo(bucket.odCargoRev),
+                odTotalRev: roundToTwo(bucket.odTotalRev),
+                legPaxRev: roundToTwo(bucket.legPaxRev),
+                legCargoRev: roundToTwo(bucket.legCargoRev),
+                legTotalRev: roundToTwo(bucket.legTotalRev),
                 count: bucket.count,
             };
         });
@@ -2019,6 +2102,10 @@ async function applyUpdatesForDate({ userId, updates }) {
                             odRate: row.odRate,
                             fareProrateRatioL1L2: row.fareProrateRatioL1L2,
                             rateProrateRatioL1L2: row.rateProrateRatioL1L2,
+                            depStn: row.depStn,
+                            arrStn: row.arrStn,
+                            userTag1: row.userTag1,
+                            userTag2: row.userTag2,
                             pooCcy: row.pooCcy,
                             pooCcyToRccy: row.pooCcyToRccy,
                             reportingCurrency: row.reportingCurrency,
@@ -2316,6 +2403,141 @@ exports.updatePooRecords = async (req, res) => {
     }
 };
 
+function buildBlankAwareClause(field, rawValues, normalizer = (value) => String(value || "").trim()) {
+    const values = String(rawValues || "")
+        .split(",")
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    if (!values.length) return null;
+
+    const wantsBlank = values.includes(BLANK_OPTION_VALUE) || values.includes("(blank)");
+    const concrete = values
+        .filter((value) => value !== BLANK_OPTION_VALUE && value !== "(blank)")
+        .map(normalizer)
+        .filter(Boolean);
+
+    if (wantsBlank && concrete.length) {
+        return {
+            $or: [
+                { [field]: { $in: concrete } },
+                { [field]: { $exists: false } },
+                { [field]: null },
+                { [field]: "" },
+            ],
+        };
+    }
+    if (wantsBlank) {
+        return { $or: [{ [field]: { $exists: false } }, { [field]: null }, { [field]: "" }] };
+    }
+    return { [field]: { $in: concrete } };
+}
+
+async function backfillMasterFieldsToPooRows(userId) {
+    const [pooRows, flights] = await Promise.all([
+        PooTable.find({ userId }).select("_id date sector flightNumber depStn arrStn userTag1 userTag2 variant").lean(),
+        Flight.find({ userId }).select("date sector flight depStn arrStn userTag1 userTag2 variant").lean(),
+    ]);
+
+    const flightMap = new Map();
+    flights.forEach((flight) => {
+        const key = [
+            normalizeDateKey(flight.date),
+            String(flight.sector || "").trim().toUpperCase(),
+            String(flight.flight || "").trim(),
+        ].join("|");
+        flightMap.set(key, flight);
+    });
+
+    const ops = [];
+    pooRows.forEach((row) => {
+        const key = [
+            normalizeDateKey(row.date),
+            String(row.sector || "").trim().toUpperCase(),
+            String(row.flightNumber || "").trim(),
+        ].join("|");
+        const flight = flightMap.get(key);
+        if (!flight) return;
+
+        ops.push({
+            updateOne: {
+                filter: { _id: row._id, userId },
+                update: {
+                    $set: {
+                        depStn: normalizeStation(flight.depStn),
+                        arrStn: normalizeStation(flight.arrStn),
+                        userTag1: String(flight.userTag1 || "").trim(),
+                        userTag2: String(flight.userTag2 || "").trim(),
+                        variant: String(row.variant || "").trim() || String(flight.variant || "").trim(),
+                    },
+                },
+            },
+        });
+    });
+
+    if (ops.length) {
+        await PooTable.bulkWrite(ops, { ordered: false });
+    }
+
+    return { matchedRows: ops.length, totalPooRows: pooRows.length };
+}
+
+async function recalculatePooRevenueForConfig(userId, revenueConfig) {
+    const rows = await PooTable.find({ userId });
+    if (!rows.length) return 0;
+
+    const ops = rows.map((doc) => {
+        const row = doc.toObject();
+        const reportingCurrency = revenueConfig.reportingCurrency || "USD";
+        const localCcy = normalizeCurrencyCode(row.pooCcy) || reportingCurrency;
+        const dateKey = normalizeDateKey(row.date);
+        const pair = `${localCcy}/${reportingCurrency}`;
+        const rate = localCcy === reportingCurrency ? 1 : getCarriedForwardFxRate(revenueConfig.fxRates, pair, dateKey);
+        const recalculated = recalculateRevenue({
+            ...row,
+            pooCcy: localCcy,
+            pooCcyToRccy: rate,
+            reportingCurrency,
+            reportingCurrencySource: "financial_config",
+        });
+        return {
+            updateOne: {
+                filter: { _id: doc._id, userId },
+                update: {
+                    $set: {
+                        pooCcy: recalculated.pooCcy,
+                        pooCcyToRccy: recalculated.pooCcyToRccy,
+                        reportingCurrency: recalculated.reportingCurrency,
+                        reportingCurrencySource: recalculated.reportingCurrencySource,
+                        rccyLegPaxRev: recalculated.rccyLegPaxRev,
+                        rccyLegCargoRev: recalculated.rccyLegCargoRev,
+                        rccyLegTotalRev: recalculated.rccyLegTotalRev,
+                        rccyOdPaxRev: recalculated.rccyOdPaxRev,
+                        rccyOdCargoRev: recalculated.rccyOdCargoRev,
+                        rccyOdTotalRev: recalculated.rccyOdTotalRev,
+                        fnlRccyPaxRev: recalculated.fnlRccyPaxRev,
+                        fnlRccyCargoRev: recalculated.fnlRccyCargoRev,
+                        fnlRccyTotalRev: recalculated.fnlRccyTotalRev,
+                    },
+                },
+            },
+        };
+    });
+
+    await PooTable.bulkWrite(ops, { ordered: false });
+    return ops.length;
+}
+
+exports.backfillMasterFieldsToPoo = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const result = await backfillMasterFieldsToPooRows(userId);
+        res.status(200).json({ success: true, ...result });
+    } catch (error) {
+        console.error("Error backfilling POO master fields:", error);
+        res.status(500).json({ success: false, message: "Failed to backfill POO master fields", error: error.message });
+    }
+};
+
 exports.getRevenueConfig = async (req, res) => {
     try {
         const userId = req.user.id;
@@ -2336,10 +2558,48 @@ exports.saveRevenueConfig = async (req, res) => {
             { $set: payload },
             { upsert: true, new: true }
         );
+        await recalculatePooRevenueForConfig(userId, normalizeRevenueConfig(config.toObject()));
         res.status(200).json({ success: true, data: normalizeRevenueConfig(config.toObject()) });
     } catch (error) {
         console.error("🔥 Error saving revenue config:", error);
         res.status(500).json({ success: false, message: "Failed to save revenue config" });
+    }
+};
+
+exports.saveReportingCurrency = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
+        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "USD";
+        const payload = normalizeRevenueConfig({
+            ...current,
+            reportingCurrency,
+            currencyCodes: [...new Set([reportingCurrency, ...current.currencyCodes])],
+            fxRates: Array.isArray(req.body?.fxRates) ? req.body.fxRates : current.fxRates,
+        });
+        const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });
+        await recalculatePooRevenueForConfig(userId, normalizeRevenueConfig(config.toObject()));
+        res.status(200).json({ success: true, data: normalizeRevenueConfig(config.toObject()) });
+    } catch (error) {
+        console.error("🔥 Error saving reporting currency:", error);
+        res.status(500).json({ success: false, message: "Failed to save reporting currency" });
+    }
+};
+
+exports.saveFxRates = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
+        const payload = normalizeRevenueConfig({
+            ...current,
+            fxRates: Array.isArray(req.body?.fxRates) ? req.body.fxRates : [],
+        });
+        const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });
+        await recalculatePooRevenueForConfig(userId, normalizeRevenueConfig(config.toObject()));
+        res.status(200).json({ success: true, data: normalizeRevenueConfig(config.toObject()) });
+    } catch (error) {
+        console.error("🔥 Error saving FX rates:", error);
+        res.status(500).json({ success: false, message: "Failed to save FX rates" });
     }
 };
 
@@ -2408,17 +2668,31 @@ exports.getRevenueData = async (req, res) => {
             });
         }
 
-        if (poo) andClauses.push({ poo: { $in: poo.split(",").map(normalizeStation) } });
-        if (od) andClauses.push({ od: { $in: od.split(",").map((item) => item.trim().toUpperCase()) } });
-        if (odDI) andClauses.push({ odDI: { $in: odDI.split(",").map(normalizeDomIntl) } });
-        if (legDI) andClauses.push({ legDI: { $in: legDI.split(",").map(normalizeDomIntl) } });
-        if (sector) andClauses.push({ sector: { $in: sector.split(",").map((item) => item.trim().toUpperCase()) } });
+        [
+            ["poo", poo, normalizeStation],
+            ["od", od, (item) => item.trim().toUpperCase()],
+            ["odDI", odDI, normalizeDomIntl],
+            ["legDI", legDI, normalizeDomIntl],
+            ["sector", sector, (item) => item.trim().toUpperCase()],
+            ["depStn", from, normalizeStation],
+            ["arrStn", to, normalizeStation],
+            ["userTag1", userTag1],
+            ["userTag2", userTag2],
+        ].forEach(([field, raw, normalizer]) => {
+            const clause = buildBlankAwareClause(field, raw, normalizer);
+            if (clause) andClauses.push(clause);
+        });
         const normalizedDirectFlights = String(flightNumber || flight || "").split(",").map((item) => item.trim()).filter(Boolean);
         if (normalizedDirectFlights.length > 0) andClauses.push({ flightNumber: { $in: normalizedDirectFlights } });
-        if (variant) andClauses.push({ variant: { $in: variant.split(",").map((item) => item.trim()) } });
-        if (trafficType) andClauses.push({ trafficType: { $in: trafficType.split(",").map((item) => item.trim()) } });
-        if (identifier) andClauses.push({ identifier: { $in: identifier.split(",").map((item) => item.trim()) } });
-        if (al) andClauses.push({ al: { $in: al.split(",").map((item) => item.trim().toUpperCase()) } });
+        [
+            ["variant", variant],
+            ["trafficType", trafficType],
+            ["identifier", identifier],
+            ["al", al, (item) => item.trim().toUpperCase()],
+        ].forEach(([field, raw, normalizer]) => {
+            const clause = buildBlankAwareClause(field, raw, normalizer);
+            if (clause) andClauses.push(clause);
+        });
 
         const requestedStops = String(stop || stops || "")
             .split(",")
@@ -2479,49 +2753,6 @@ exports.getRevenueData = async (req, res) => {
 
         const trafficClassClauses = buildRevenueSelectionClauses(String(trafficClass || "").split(","), "trafficClass");
         if (trafficClassClauses.length > 0) andClauses.push({ $or: trafficClassClauses });
-
-        const dataFilterClauses = [];
-        const normalizedFrom = String(from || "").split(",").map((item) => normalizeStation(item)).filter(Boolean);
-        const normalizedTo = String(to || "").split(",").map((item) => normalizeStation(item)).filter(Boolean);
-        const normalizedFlights = String(flight || flightNumber || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
-        const normalizedVariants = String(variant || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
-        const normalizedUserTag1 = String(userTag1 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
-        const normalizedUserTag2 = String(userTag2 || "").split(",").map((item) => String(item || "").trim()).filter(Boolean);
-
-        if (normalizedFrom.length > 0) andClauses.push({ odOrigin: { $in: normalizedFrom } });
-        if (normalizedTo.length > 0) andClauses.push({ odDestination: { $in: normalizedTo } });
-        if (normalizedFlights.length > 0) dataFilterClauses.push({ flight: { $in: normalizedFlights } });
-        if (normalizedVariants.length > 0) dataFilterClauses.push({ variant: { $in: normalizedVariants } });
-        if (normalizedUserTag1.length > 0) dataFilterClauses.push({ userTag1: { $in: normalizedUserTag1 } });
-        if (normalizedUserTag2.length > 0) dataFilterClauses.push({ userTag2: { $in: normalizedUserTag2 } });
-
-        if (dataFilterClauses.length > 0) {
-            const dataMatch = { userId };
-            const normalizedRevenueLabel = normalizeRevenueLabel(label);
-
-            if (String(label || "").trim().toLowerCase() !== "both" && normalizedRevenueLabel) {
-                dataMatch.domINTL = normalizedRevenueLabel;
-            }
-
-            dataMatch.$and = dataFilterClauses;
-
-            const matchingData = await Data.find(dataMatch).select("flight depStn arrStn sector");
-
-            const allowedFlights = [...new Set(matchingData.map((row) => String(row.flight || "").trim()).filter(Boolean))];
-            const allowedSectors = [...new Set(matchingData.map((row) => String(row.sector || "").trim().toUpperCase()).filter(Boolean))];
-
-            if (matchingData.length === 0) {
-                andClauses.push({ _id: null });
-            }
-
-            if (allowedFlights.length > 0) {
-                andClauses.push({ flightNumber: { $in: allowedFlights } });
-            }
-
-            if (allowedSectors.length > 0) {
-                andClauses.push({ sector: { $in: allowedSectors } });
-            }
-        }
 
         if (andClauses.length > 0) {
             match.$and = andClauses;

@@ -1431,10 +1431,12 @@ const normalizeFxRates = (rates = []) => (Array.isArray(rates) ? rates : []).map
   const from = normalize(pick(row, ["from", "ccy", "currency", "source"]));
   const to = normalize(pick(row, ["to", "rccy", "reportingCurrency", "target"]));
   const pair = normalize(pick(row, ["pair"]));
+  const rawDateKey = pick(row, ["dateKey", "date", "effectiveDate", "period"]);
+  const exactDate = toDayKey(rawDateKey);
   return {
     pair: pair || (from && to ? `${from}/${to}` : ""),
-    dateKey: normalizeMonthKey(pick(row, ["dateKey", "month", "date", "period"])),
-    exactDate: toDayKey(pick(row, ["date", "effectiveDate"])),
+    dateKey: normalizeMonthKey(pick(row, ["month", "period"]) || rawDateKey),
+    exactDate,
     rate: toNumber(pick(row, ["rate", "fxRate", "value"])),
   };
 }).filter((row) => row.pair && row.rate > 0);
@@ -1443,12 +1445,18 @@ const findFxRate = (fxRates, currency, reportingCurrency, date) => {
   const pair = `${normalize(currency)}/${normalize(reportingCurrency)}`;
   const dayKey = toDayKey(date);
   const monthKey = normalizeMonthKey(date);
-  const rates = normalizeFxRates(fxRates).filter((row) => row.pair === pair);
+  const rates = normalizeFxRates(fxRates)
+    .filter((row) => row.pair === pair)
+    .sort((a, b) => String(a.exactDate || a.dateKey).localeCompare(String(b.exactDate || b.dateKey)));
+  const carriedForward = [...rates]
+    .filter((row) => row.exactDate && dayKey && row.exactDate <= dayKey)
+    .pop();
   return (
     rates.find((row) => row.exactDate && row.exactDate === dayKey)?.rate ||
+    carriedForward?.rate ||
     rates.find((row) => row.dateKey && row.dateKey === monthKey)?.rate ||
     rates.find((row) => !row.dateKey && !row.exactDate)?.rate ||
-    0
+    1
   );
 };
 

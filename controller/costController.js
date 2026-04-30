@@ -1,4 +1,5 @@
 const CostConfig = require("../model/costConfigSchema");
+const RevenueConfig = require("../model/revenueConfigSchema");
 const Flights = require("../model/flight");
 const Utilisation = require("../model/utilisation");
 const MaintenanceReserve = require("../model/maintenanceReserveSchema");
@@ -174,12 +175,18 @@ exports.getCostPageData = async (req, res) => {
     const flights = await Flights.find(matchQuery).lean();
 
     // 3. Fetch Cost Config 
-    const [rawCostConfig, fleetRows, mrContext] = await Promise.all([
+    const [rawCostConfig, rawRevenueConfig, fleetRows, mrContext] = await Promise.all([
       CostConfig.findOne({ userId }).lean(),
+      RevenueConfig.findOne({ userId }).lean(),
       Fleet.find({ userId }).lean(),
       buildMaintenanceReserveContext(userId, flights),
     ]);
-    const costConfig = normalizeCostConfig({ ...(rawCostConfig || {}), fleet: fleetRows });
+    const costConfig = normalizeCostConfig({
+      ...(rawCostConfig || {}),
+      reportingCurrency: rawRevenueConfig?.reportingCurrency || rawCostConfig?.reportingCurrency,
+      fxRates: rawRevenueConfig?.fxRates || rawCostConfig?.fxRates,
+      fleet: fleetRows,
+    });
 
     // 4. Compute Costs
     let enrichedFlights = computeFlightCostsBatch(flights, {
@@ -225,12 +232,18 @@ exports.recalculateAndSaveCostPageData = async (req, res) => {
     applyArrayFilter("userTag2", userTag2);
 
     const flights = await Flights.find(matchQuery).lean();
-    const [rawCostConfig, fleetRows, mrContext] = await Promise.all([
+    const [rawCostConfig, rawRevenueConfig, fleetRows, mrContext] = await Promise.all([
       CostConfig.findOne({ userId }).lean(),
+      RevenueConfig.findOne({ userId }).lean(),
       Fleet.find({ userId }).lean(),
       buildMaintenanceReserveContext(userId, flights),
     ]);
-    const costConfig = normalizeCostConfig({ ...(rawCostConfig || {}), fleet: fleetRows });
+    const costConfig = normalizeCostConfig({
+      ...(rawCostConfig || {}),
+      reportingCurrency: rawRevenueConfig?.reportingCurrency || rawCostConfig?.reportingCurrency,
+      fxRates: rawRevenueConfig?.fxRates || rawCostConfig?.fxRates,
+      fleet: fleetRows,
+    });
     const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext, fleet: fleetRows });
 
     const costColumns = [

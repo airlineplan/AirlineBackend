@@ -12,6 +12,7 @@ const RotationDetails = require("../model/rotationDetails");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const CostConfig = require("../model/costConfigSchema");
+const RevenueConfig = require("../model/revenueConfigSchema");
 const csv = require("csvtojson");
 const xlsx = require("xlsx");
 const exceljs = require("exceljs");
@@ -26,7 +27,8 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
-const { normalizeCostConfig } = require("../utils/costLogic");
+const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 
 const createConnections = require('../helper/createConnections');
 
@@ -235,9 +237,17 @@ const populateDashboardDropDowns = async (req, res) => {
           identifier: { $addToSet: "$identifier" },
           stops: { $addToSet: "$stops" },
           al: { $addToSet: "$al" },
+          depStn: { $addToSet: "$depStn" },
+          arrStn: { $addToSet: "$arrStn" },
+          sector: { $addToSet: "$sector" },
+          flightNumber: { $addToSet: "$flightNumber" },
+          variant: { $addToSet: "$variant" },
+          userTag1: { $addToSet: "$userTag1" },
+          userTag2: { $addToSet: "$userTag2" },
+          trafficType: { $addToSet: "$trafficType" },
         },
       },
-      { $project: { _id: 0, poo: 1, od: 1, odDI: 1, legDI: 1, identifier: 1, stops: 1, al: 1 } },
+      { $project: { _id: 0, poo: 1, od: 1, odDI: 1, legDI: 1, identifier: 1, stops: 1, al: 1, depStn: 1, arrStn: 1, sector: 1, flightNumber: 1, variant: 1, userTag1: 1, userTag2: 1, trafficType: 1 } },
     ]);
 
     const distinctSnValues = await Fleet.aggregate([
@@ -263,12 +273,12 @@ const populateDashboardDropDowns = async (req, res) => {
 
     const data = {
       flight: formatOptions(
-        Array.from(new Set([...(flightList || []), ...(dataValues.flight ?? [])]))
+        Array.from(new Set([...(flightList || []), ...(dataValues.flight ?? []), ...(distinctPooValues?.[0]?.flightNumber ?? [])]))
       ),
-      from: formatOptions(dataValues.from ?? []),
-      to: formatOptions(dataValues.to ?? []),
-      variant: formatOptions(dataValues.variant ?? []),
-      sector: formatOptions(filteredSectors),
+      from: formatOptions(Array.from(new Set([...(dataValues.from ?? []), ...(distinctPooValues?.[0]?.depStn ?? [])]))),
+      to: formatOptions(Array.from(new Set([...(dataValues.to ?? []), ...(distinctPooValues?.[0]?.arrStn ?? [])]))),
+      variant: formatOptions(Array.from(new Set([...(dataValues.variant ?? []), ...(distinctPooValues?.[0]?.variant ?? [])]))),
+      sector: formatOptions(Array.from(new Set([...(filteredSectors ?? []), ...(distinctPooValues?.[0]?.sector ?? [])]))),
       sn: formatOptions(distinctSnValues?.[0]?.sn ?? []),
       poo: formatOptions(distinctPooValues?.[0]?.poo ?? []),
       od: formatOptions(distinctPooValues?.[0]?.od ?? []),
@@ -277,8 +287,9 @@ const populateDashboardDropDowns = async (req, res) => {
       identifier: formatOptions(distinctPooValues?.[0]?.identifier ?? []),
       stop: stopOptions,
       al: formatOptions(distinctPooValues?.[0]?.al ?? []),
-      userTag1: formatOptions(dataValues.userTag1 ?? []),
-      userTag2: formatOptions(dataValues.userTag2 ?? []),
+      userTag1: formatOptions(Array.from(new Set([...(dataValues.userTag1 ?? []), ...(distinctPooValues?.[0]?.userTag1 ?? [])]))),
+      userTag2: formatOptions(Array.from(new Set([...(dataValues.userTag2 ?? []), ...(distinctPooValues?.[0]?.userTag2 ?? [])]))),
+      trafficType: formatOptions(distinctPooValues?.[0]?.trafficType ?? []),
     };
 
     return res.json(data);
@@ -290,8 +301,6 @@ const populateDashboardDropDowns = async (req, res) => {
 const getDashboardData = async (req, res) => {
 
   let { from, to, variant, sector, flight, userTag1, userTag2, label, periodicity } = req.query;
-
-  console.log("from" + from + " to" + to + " variant" + variant + " sector" + sector + " flight" + flight + " periodicity" + periodicity + " label" + label);
 
   if (!periodicity || !label) {
     return res.status(400).json({ error: "Missing label or periodicity" });
@@ -362,48 +371,30 @@ const getDashboardData = async (req, res) => {
   if (normalizedTo.length > 0) {
     flightsQuery.arrStn = { $in: normalizedTo };
   }
-
-  const dataFilterClauses = [];
-  if (normalizedFrom.length > 0) dataFilterClauses.push({ depStn: { $in: normalizedFrom } });
-  if (normalizedTo.length > 0) dataFilterClauses.push({ arrStn: { $in: normalizedTo } });
-  if (normalizedSector.length > 0) dataFilterClauses.push({ sector: { $in: normalizedSector } });
-  if (normalizedVariant.length > 0) dataFilterClauses.push({ variant: { $in: normalizedVariant } });
-  if (normalizedFlight.length > 0) dataFilterClauses.push({ flight: { $in: normalizedFlight } });
-  if (normalizedUserTag1.length > 0) dataFilterClauses.push({ userTag1: { $in: normalizedUserTag1 } });
-  if (normalizedUserTag2.length > 0) dataFilterClauses.push({ userTag2: { $in: normalizedUserTag2 } });
-
-  if (dataFilterClauses.length > 0 || label !== "both") {
-    const dataMatch = { userId: id };
-    const normalizedRevenueLabel = normalizeRevenueLabel(label);
-    if (label !== "both" && normalizedRevenueLabel) {
-      dataMatch.domINTL = normalizedRevenueLabel;
-    }
-    if (dataFilterClauses.length > 0) {
-      dataMatch.$and = dataFilterClauses;
-    }
-
-    const matchingData = await Data.find(dataMatch).select("flight depStn arrStn sector");
-    const allowedFlights = [...new Set(matchingData.map((row) => String(row.flight || "").trim()).filter(Boolean))];
-    const allowedSectors = [...new Set(matchingData.map((row) => String(row.sector || "").trim().toUpperCase()).filter(Boolean))];
-
-    if (matchingData.length === 0) {
-      revenueQuery.$and = [{ _id: null }];
-    } else {
-      const revenueClauses = [];
-      if (allowedFlights.length > 0) revenueClauses.push({ flightNumber: { $in: allowedFlights } });
-      if (allowedSectors.length > 0) revenueClauses.push({ sector: { $in: allowedSectors } });
-      if (revenueClauses.length > 0) {
-        revenueQuery.$and = revenueClauses;
-      }
-    }
-  }
+  if (normalizedFrom.length > 0) revenueQuery.depStn = { $in: normalizedFrom };
+  if (normalizedTo.length > 0) revenueQuery.arrStn = { $in: normalizedTo };
+  if (normalizedSector.length > 0) revenueQuery.sector = { $in: normalizedSector };
+  if (normalizedVariant.length > 0) revenueQuery.variant = { $in: normalizedVariant };
+  if (normalizedFlight.length > 0) revenueQuery.flightNumber = { $in: normalizedFlight };
+  if (normalizedUserTag1.length > 0) revenueQuery.userTag1 = { $in: normalizedUserTag1 };
+  if (normalizedUserTag2.length > 0) revenueQuery.userTag2 = { $in: normalizedUserTag2 };
 
   try {
 
-      const datas = await Data.find(datequery);
+      const [datas, flightRange] = await Promise.all([
+        Data.find(datequery),
+        Flights.aggregate([
+          { $match: { userId: id } },
+          { $group: { _id: null, minDate: { $min: "$date" }, maxDate: { $max: "$date" } } },
+        ]),
+      ]);
       // Calculate the start and end dates based on the periodicity
-      let startDate = startOfUtcDay(new Date(Math.min(...datas.map((data) => data.effFromDt))));
-      let endDate = startOfUtcDay(new Date(Math.max(...datas.map((data) => data.effToDt))));
+      let startDate = flightRange?.[0]?.minDate
+        ? startOfUtcDay(new Date(flightRange[0].minDate))
+        : startOfUtcDay(new Date(Math.min(...datas.map((data) => data.effFromDt))));
+      let endDate = flightRange?.[0]?.maxDate
+        ? startOfUtcDay(new Date(flightRange[0].maxDate))
+        : startOfUtcDay(new Date(Math.max(...datas.map((data) => data.effToDt))));
 
       let timeZone;
       if (Array.isArray(datas) && datas.length > 0) {
@@ -433,11 +424,19 @@ const getDashboardData = async (req, res) => {
         periods = generateDailyDates(startDate, endDate);
       }
 
-      const [revenueRows, costConfigDoc] = await Promise.all([
+      const [revenueRows, costConfigDoc, revenueConfigDoc, fleetRows] = await Promise.all([
         PooTable.find(revenueQuery).lean(),
         CostConfig.findOne({ userId: id }).lean(),
+        RevenueConfig.findOne({ userId: id }).lean(),
+        Fleet.find({ userId: id }).lean(),
       ]);
-      const costConfig = normalizeCostConfig(costConfigDoc || {});
+      const revenueConfig = revenueConfigDoc || {};
+      const costConfig = normalizeCostConfig({
+        ...(costConfigDoc || {}),
+        reportingCurrency: revenueConfig.reportingCurrency || costConfigDoc?.reportingCurrency,
+        fxRates: revenueConfig.fxRates || costConfigDoc?.fxRates,
+        fleet: fleetRows,
+      });
       const schMxEvents = Array.isArray(costConfig.schMxEvents) ? costConfig.schMxEvents : [];
 
       try {
@@ -484,7 +483,13 @@ const getDashboardData = async (req, res) => {
           //   ]
           // });
 
-          const flightsInPeriod = await Flights.find(flightsQuery);
+          let flightsInPeriod = await Flights.find(flightsQuery).lean();
+          const mrContext = await buildMaintenanceReserveContext(id, flightsInPeriod);
+          flightsInPeriod = computeFlightCostsBatch(flightsInPeriod, {
+            ...costConfig,
+            ...mrContext,
+            fleet: fleetRows,
+          });
 
           const uniqueStations = new Set();
           flightsInPeriod.forEach((flight) => {
@@ -781,12 +786,14 @@ const getDashboardData = async (req, res) => {
           const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
           const otherMaintenanceUtilisationRCCY = sumRowFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
           const otherMaintenanceCalendarRCCY = sumNumericField(flightsInPeriod, "otherMaintenance3");
+          const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
           const rotableChangesRCCY = rotableChangesInPeriod.reduce((total, row) => total + toNumericValue(row?.costRCCY ?? row?.cost), 0);
           const totalMaintenanceCostRCCY =
             totalMrContributionRCCY +
             qualifyingSchMxEventsRCCY +
             transitMaintenanceRCCY +
             otherMaintenanceRCCY +
+            otherMxExpensesRCCY +
             rotableChangesRCCY;
 
           const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
@@ -806,8 +813,10 @@ const getDashboardData = async (req, res) => {
             airportRCCY +
             navigationRCCY +
             otherDocRCCY;
+          const grossProfitLossRCCY = fnlRccyTotalRev - totalDocRCCY;
 
           resultData.push({
+            startDate: periodStartDate.toString(),
             endDate: periodEndDate.toString(),
             destinations: parseInt(uniqueStations.size).toLocaleString(),
             departures: parseInt(flightsInPeriod.length).toLocaleString(),
@@ -842,6 +851,8 @@ const getDashboardData = async (req, res) => {
             fnlRccyCargoRev,
             fnlRccyTotalRev,
             engineFuelConsumption,
+            engineFuelConsumptionKg: sumNumericField(flightsInPeriod, "engineFuelConsumptionKg"),
+            apuFuelConsumptionKg: sumNumericField(flightsInPeriod, "apuFuelConsumptionKg"),
             engineFuelCostRCCY,
             apuFuelCostRCCY,
             totalFuelCostRCCY,
@@ -858,6 +869,7 @@ const getDashboardData = async (req, res) => {
             otherMaintenanceRCCY,
             otherMaintenanceUtilisationRCCY,
             otherMaintenanceCalendarRCCY,
+            otherMxExpensesRCCY,
             rotableChangesRCCY,
             totalMaintenanceCostRCCY,
             crewAllowancesRCCY,
@@ -867,11 +879,48 @@ const getDashboardData = async (req, res) => {
             airportRCCY,
             navigationRCCY,
             otherDocRCCY,
-            totalDocRCCY
+            totalDocRCCY,
+            grossProfitLossRCCY
           });
         }
 
-        res.status(200).json(resultData);
+        const flightsForFxDates = await Flights.find({ userId: id }).select("date").lean();
+        const riskExposureData = {
+          currencies: {},
+          fuel: resultData.map((period) => ({
+            dateKey: moment.utc(period.endDate).format("YYYY-MM-DD"),
+            engineFuelKg: toNumericValue(period.engineFuelConsumptionKg),
+            apuFuelKg: toNumericValue(period.apuFuelConsumptionKg),
+            totalFuelKg: toNumericValue(period.engineFuelConsumptionKg) + toNumericValue(period.apuFuelConsumptionKg),
+          })),
+        };
+
+        revenueRows.forEach((row) => {
+          const ccy = String(row.pooCcy || revenueConfig.reportingCurrency || "").trim().toUpperCase();
+          if (!ccy || ccy === String(revenueConfig.reportingCurrency || "").trim().toUpperCase()) return;
+          if (!riskExposureData.currencies[ccy]) riskExposureData.currencies[ccy] = { periods: [] };
+          riskExposureData.currencies[ccy].periods.push({
+            dateKey: moment.utc(row.date).format("YYYY-MM-DD"),
+            revenue: toNumericValue(row.odTotalRev || row.legTotalRev),
+            cost: 0,
+          });
+        });
+
+        res.status(200).json({
+          data: resultData,
+          periods: resultData.map((period) => ({
+            key: moment.utc(period.endDate).format("YYYY-MM-DD"),
+            startDate: period.startDate,
+            endDate: period.endDate,
+            dateLabel: moment.utc(period.endDate).format("DD MMM YY"),
+            data: period,
+          })),
+          revenueConfig,
+          currencyCodes: revenueConfig.currencyCodes || [],
+          fxRates: revenueConfig.fxRates || [],
+          flightsForFxDates,
+          riskExposureData,
+        });
       }
       catch (error) {
         console.log(error);
