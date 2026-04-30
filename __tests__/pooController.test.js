@@ -7,6 +7,8 @@ const PooTable = require("../model/pooTable");
 const {
     calculateProrateRatio,
     recalculateRevenue,
+    buildSelectedDateRange,
+    buildRevenueAggregateResponse,
     buildEditableResponse,
     buildFlightSnapshot,
     buildLegRows,
@@ -128,7 +130,7 @@ test("buildFlightSnapshot carries a userId fallback into generated POO rows", ()
     assert.ok(rows.every((row) => row.userId === "user-1"));
 });
 
-test("buildFlightSnapshot falls back to seats times cargo capacity when flight pax is missing", () => {
+test("buildFlightSnapshot falls back to seats times pax load factor when flight pax is missing", () => {
     const snapshot = buildFlightSnapshot(
         {
             _id: "flight-fallback",
@@ -141,6 +143,7 @@ test("buildFlightSnapshot falls back to seats times cargo capacity when flight p
             std: "09:00",
             sta: "11:30",
             seats: 200,
+            paxLF: 75,
             CargoCapT: 0.75,
             CargoT: 0.6,
             dist: 1200,
@@ -151,6 +154,14 @@ test("buildFlightSnapshot falls back to seats times cargo capacity when flight p
 
     assert.equal(snapshot.maxPax, 150);
     assert.equal(snapshot.sourcePaxTotal, 150);
+    assert.equal(snapshot.sourcePaxLF, 75);
+});
+
+test("selected POO date range uses the exact selected date", () => {
+    const range = buildSelectedDateRange("2026-03-04");
+
+    assert.equal(range.$gte.toISOString(), "2026-03-04T00:00:00.000Z");
+    assert.equal(range.$lte.toISOString(), "2026-03-04T23:59:59.999Z");
 });
 
 test("assigns leg POO rows in departure-then-arrival order for each flight", () => {
@@ -192,6 +203,96 @@ test("assigns leg POO rows in departure-then-arrival order for each flight", () 
         ordered.map((row) => row.pax),
         [77, 76]
     );
+});
+
+test("capacity increase preserves existing leg split and distributes added traffic", () => {
+    const snapshot = makeConnectionSnapshot({
+        sourcePaxTotal: 160,
+        maxPax: 160,
+        sourceCargoTotal: 0.8,
+        maxCargoT: 0.8,
+    });
+    const existingRows = [
+        makeStateRow({
+            rowKey: "system|leg|DEL|f1|none|leg::f1",
+            flightId: "f1",
+            poo: "DEL",
+            pax: 65,
+            cargoT: 0.2,
+            maxPax: 153,
+            maxCargoT: 0.6,
+            sourcePaxTotal: 153,
+            sourceCargoTotal: 0.6,
+        }),
+        makeStateRow({
+            rowKey: "system|leg|BOM|f1|none|leg::f1",
+            flightId: "f1",
+            poo: "BOM",
+            pax: 88,
+            cargoT: 0.4,
+            maxPax: 153,
+            maxCargoT: 0.6,
+            sourcePaxTotal: 153,
+            sourceCargoTotal: 0.6,
+        }),
+    ];
+    const existingRowsByKey = new Map(existingRows.map((row) => [row.rowKey, row]));
+
+    const { rows, forceReset } = buildLegRows({
+        snapshot,
+        existingRowsByKey,
+        existingRecords: existingRows,
+        currencyContextByPoo: {},
+    });
+
+    assert.equal(forceReset, false);
+    assert.deepEqual(rows.map((row) => row.pax), [69, 91]);
+    assert.deepEqual(rows.map((row) => row.cargoT), [0.3, 0.5]);
+});
+
+test("capacity decrease resets leg traffic to the new equal allocation", () => {
+    const snapshot = makeConnectionSnapshot({
+        sourcePaxTotal: 120,
+        maxPax: 120,
+        sourceCargoTotal: 0.4,
+        maxCargoT: 0.4,
+    });
+    const existingRows = [
+        makeStateRow({
+            rowKey: "system|leg|DEL|f1|none|leg::f1",
+            flightId: "f1",
+            poo: "DEL",
+            pax: 65,
+            cargoT: 0.2,
+            maxPax: 153,
+            maxCargoT: 0.6,
+            sourcePaxTotal: 153,
+            sourceCargoTotal: 0.6,
+        }),
+        makeStateRow({
+            rowKey: "system|leg|BOM|f1|none|leg::f1",
+            flightId: "f1",
+            poo: "BOM",
+            pax: 88,
+            cargoT: 0.4,
+            maxPax: 153,
+            maxCargoT: 0.6,
+            sourcePaxTotal: 153,
+            sourceCargoTotal: 0.6,
+        }),
+    ];
+    const existingRowsByKey = new Map(existingRows.map((row) => [row.rowKey, row]));
+
+    const { rows, forceReset } = buildLegRows({
+        snapshot,
+        existingRowsByKey,
+        existingRecords: existingRows,
+        currencyContextByPoo: {},
+    });
+
+    assert.equal(forceReset, true);
+    assert.deepEqual(rows.map((row) => row.pax), [60, 60]);
+    assert.deepEqual(rows.map((row) => row.cargoT), [0.2, 0.2]);
 });
 
 test("connection rows are generated for both OD endpoint POO values", () => {
@@ -440,6 +541,117 @@ test("uses leg revenue as the OD basis when applySSPricing is enabled", () => {
     assert.equal(row.odCargoRev, 10);
     assert.equal(row.odTotalRev, 25);
     assert.equal(row.fnlRccyTotalRev, 25);
+});
+
+test("OD revenue aggregation dedupes one-stop behind and beyond rows", () => {
+    const rows = [
+        makeStateRow({
+            _id: "del-hyd-behind",
+            trafficType: "behind",
+            poo: "DEL",
+            od: "DEL-HYD",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            date: new Date("2026-03-04T00:00:00.000Z"),
+            pax: 11,
+            cargoT: 0.2,
+            legPaxRev: 57200,
+            legCargoRev: 8267,
+            legTotalRev: 65467,
+            odPaxRev: 85800,
+            odCargoRev: 12400,
+            odTotalRev: 98200,
+            rccyLegPaxRev: 572,
+            rccyLegCargoRev: 83,
+            rccyLegTotalRev: 655,
+            rccyOdPaxRev: 858,
+            rccyOdCargoRev: 124,
+            rccyOdTotalRev: 982,
+            fnlRccyPaxRev: 858,
+            fnlRccyCargoRev: 124,
+            fnlRccyTotalRev: 982,
+        }),
+        makeStateRow({
+            _id: "del-hyd-beyond",
+            trafficType: "beyond",
+            poo: "DEL",
+            od: "DEL-HYD",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            date: new Date("2026-03-04T00:00:00.000Z"),
+            pax: 11,
+            cargoT: 0.2,
+            legPaxRev: 28600,
+            legCargoRev: 4133,
+            legTotalRev: 32733,
+            odPaxRev: 85800,
+            odCargoRev: 12400,
+            odTotalRev: 98200,
+            rccyLegPaxRev: 286,
+            rccyLegCargoRev: 41,
+            rccyLegTotalRev: 327,
+            rccyOdPaxRev: 858,
+            rccyOdCargoRev: 124,
+            rccyOdTotalRev: 982,
+            fnlRccyPaxRev: 858,
+            fnlRccyCargoRev: 124,
+            fnlRccyTotalRev: 982,
+        }),
+    ];
+
+    const aggregate = buildRevenueAggregateResponse(rows, ["poo"], "daily");
+
+    assert.equal(aggregate.data.DEL["2026-03-04"].pax, 11);
+    assert.equal(aggregate.data.DEL["2026-03-04"].cargoT, 0.2);
+    assert.equal(aggregate.data.DEL["2026-03-04"].odRev, 98200);
+    assert.equal(aggregate.data.DEL["2026-03-04"].totalRev, 982);
+    assert.equal(aggregate.data.DEL["2026-03-04"].count, 1);
+});
+
+test("sector revenue aggregation keeps both one-stop leg rows", () => {
+    const rows = [
+        makeStateRow({
+            _id: "del-hyd-behind",
+            trafficType: "behind",
+            poo: "DEL",
+            sector: "DEL-BOM",
+            od: "DEL-HYD",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            date: new Date("2026-03-04T00:00:00.000Z"),
+            pax: 11,
+            cargoT: 0.2,
+            legPaxRev: 57200,
+            legCargoRev: 8267,
+            legTotalRev: 65467,
+            rccyLegPaxRev: 572,
+            rccyLegCargoRev: 83,
+            rccyLegTotalRev: 655,
+            fnlRccyTotalRev: 982,
+        }),
+        makeStateRow({
+            _id: "del-hyd-beyond",
+            trafficType: "beyond",
+            poo: "DEL",
+            sector: "BOM-HYD",
+            od: "DEL-HYD",
+            odGroupKey: "system::DEL-HYD::f1::f2",
+            date: new Date("2026-03-04T00:00:00.000Z"),
+            pax: 11,
+            cargoT: 0.2,
+            legPaxRev: 28600,
+            legCargoRev: 4133,
+            legTotalRev: 32733,
+            rccyLegPaxRev: 286,
+            rccyLegCargoRev: 41,
+            rccyLegTotalRev: 327,
+            fnlRccyTotalRev: 982,
+        }),
+    ];
+
+    const aggregate = buildRevenueAggregateResponse(rows, ["sector"], "daily");
+
+    assert.equal(aggregate.data["DEL-BOM"]["2026-03-04"].totalRev, 655);
+    assert.equal(aggregate.data["BOM-HYD"]["2026-03-04"].totalRev, 327);
+    assert.equal(aggregate.data["DEL-BOM"]["2026-03-04"].count, 1);
+    assert.equal(aggregate.data["BOM-HYD"]["2026-03-04"].count, 1);
 });
 
 test("buildEditableResponse strips legacy revenue fields from the payload", () => {

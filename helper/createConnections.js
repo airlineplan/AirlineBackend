@@ -229,10 +229,9 @@ module.exports = async function createConnections(req, res) {
       console.log(`Queued final batch. Total: ${totalQueued} flights`);
     }
 
-    // Wait for completion in the background and log result
-    Promise.all(jobs.map(job => job.finished()))
-      .then(() => console.log(`All jobs complete. Successfully processed ${totalQueued} flights.`))
-      .catch(err => console.error('Job failure:', err));
+    // Wait for completion so downstream POO refreshes do not read partial connection data.
+    await Promise.all(jobs.map(job => job.finished()));
+    console.log(`All jobs complete. Successfully processed ${totalQueued} flights.`);
 
     res.status(200).json({
       success: true,

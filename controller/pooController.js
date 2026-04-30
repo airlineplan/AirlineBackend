@@ -111,6 +111,13 @@ function formatDateKey(date) {
     return moment(date).format("YYYY-MM-DD");
 }
 
+function buildSelectedDateRange(date) {
+    return {
+        $gte: moment.utc(date).startOf("day").toDate(),
+        $lte: moment.utc(date).endOf("day").toDate(),
+    };
+}
+
 function timeToMinutes(value) {
     const [hours, minutes] = String(value || "")
         .split(":")
@@ -304,8 +311,9 @@ function buildFlightSnapshot(flight, sectorMap, userId = "") {
     const sectorInfo = sectorMap.get(sector) || {};
     const sourceSeats = parseNumber(flight.seats, sectorInfo.paxCapacity || 0);
     const sourceCargoCapT = roundToTwo(parseNumber(flight.CargoCapT, sectorInfo.cargoCapT || 0));
+    const sourcePaxLF = roundToTwo(parseNumber(flight.paxLF, 0));
     const sourcePaxTotal = roundToWhole(
-        parseNumber(flight.pax, sourceSeats * sourceCargoCapT)
+        parseNumber(flight.pax, sourceSeats * (sourcePaxLF / 100))
     );
     const sourceCargoTotal = roundToTwo(parseNumber(flight.CargoT));
 
@@ -339,7 +347,7 @@ function buildFlightSnapshot(flight, sectorMap, userId = "") {
         sourceCargoCapT,
         sourcePaxTotal,
         sourceCargoTotal,
-        sourcePaxLF: sourceSeats > 0 ? roundToTwo((sourcePaxTotal / sourceSeats) * 100) : 0,
+        sourcePaxLF: sourcePaxLF || (sourceSeats > 0 ? roundToTwo((sourcePaxTotal / sourceSeats) * 100) : 0),
         sourceCargoLF: sourceCargoCapT > 0 ? roundToTwo((sourceCargoTotal / sourceCargoCapT) * 100) : 0,
         sectorGcd: parseNumber(flight.dist, sectorInfo.gcd || 0),
         odViaGcd: parseNumber(flight.dist, sectorInfo.gcd || 0),
@@ -615,10 +623,10 @@ function buildLegRows({
     const maxDecreased =
         snapshot.maxPax < prevMetrics.maxPax ||
         snapshot.maxCargoT < prevMetrics.maxCargoT;
-    const sourceChanged =
-        snapshot.sourcePaxTotal !== prevMetrics.sourcePaxTotal ||
-        snapshot.sourceCargoTotal !== prevMetrics.sourceCargoTotal;
-    const forceReset = maxDecreased || sourceChanged;
+    const sourceDecreased =
+        snapshot.sourcePaxTotal < prevMetrics.sourcePaxTotal ||
+        snapshot.sourceCargoTotal < prevMetrics.sourceCargoTotal;
+    const forceReset = maxDecreased || sourceDecreased;
 
     let depPax;
     let arrPax;
@@ -1152,8 +1160,7 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
         const filters = {
             userId,
             date: {
-                $gte: moment(date).subtract(1, 'days').startOf("day").toDate(),
-                $lte: moment(date).subtract(1, 'days').endOf("day").toDate(),
+                ...buildSelectedDateRange(date),
             },
         };
 
@@ -1176,8 +1183,9 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
 }
 
 async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
-    const dayStart = moment(date).subtract(1, 'days').startOf("day").toDate();
-    const dayEnd = moment(date).subtract(1, 'days').endOf("day").toDate();
+    const dateRange = buildSelectedDateRange(date);
+    const dayStart = dateRange.$gte;
+    const dayEnd = dateRange.$lte;
     const normalizedPoo = normalizeStation(poo);
     const normalizedUserId = normalizeUserId(userId);
 
@@ -1662,8 +1670,9 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
         return [];
     }
 
-    const dayStart = moment(date).subtract(1, 'days').startOf("day").toDate();
-    const dayEnd = moment(date).subtract(1, 'days').endOf("day").toDate();
+    const dateRange = buildSelectedDateRange(date);
+    const dayStart = dateRange.$gte;
+    const dayEnd = dateRange.$lte;
     const [sectorMap, stations, rawRevenueConfig] = await Promise.all([
         getSectorInfoMap(userId),
         Station.find({ userId }).lean(),
@@ -1774,6 +1783,140 @@ function buildApplyPayload(row, fields = []) {
         payload[field] = row[field];
         return payload;
     }, {});
+}
+
+function shouldUseSectorRevenueBasis(groupByFields) {
+    const sectorBasisFields = new Set([
+        "sector",
+        "flightNumber",
+        "legDI",
+        "trafficType",
+        "identifier",
+    ]);
+    return groupByFields.some((field) => sectorBasisFields.has(field));
+}
+
+function getAggregatePeriod(date, periodicity) {
+    const parsed = moment(date);
+    const normalized = String(periodicity || "monthly").toLowerCase();
+    if (normalized === "annually") return parsed.format("YYYY");
+    if (normalized === "quarterly") return `${parsed.format("YYYY")}-Q${parsed.quarter()}`;
+    if (normalized === "weekly") return `${parsed.isoWeekYear()}-W${String(parsed.isoWeek()).padStart(2, "0")}`;
+    if (normalized === "daily") return parsed.format("YYYY-MM-DD");
+    return parsed.format("YYYY-MM");
+}
+
+function getRevenueGroupKey(row, groupByFields) {
+    if (groupByFields.length === 1) {
+        const value = row[groupByFields[0]];
+        return value === undefined || value === null || value === "" ? "Unknown" : String(value);
+    }
+
+    return groupByFields
+        .map((field) => {
+            const value = row[field];
+            return value === undefined || value === null || value === "" ? "Unknown" : String(value);
+        })
+        .join(" | ");
+}
+
+function getOdAggregateRows(rows, useSectorBasis) {
+    if (useSectorBasis) return rows;
+
+    const rowsByOdBucket = new Map();
+    rows.forEach((row) => {
+        const key = [
+            normalizeStation(row.poo),
+            row.odGroupKey || row.rowKey || String(row._id || ""),
+        ].join("|");
+        if (!rowsByOdBucket.has(key)) {
+            rowsByOdBucket.set(key, row);
+            return;
+        }
+
+        const current = rowsByOdBucket.get(key);
+        const currentPriority = getOdAggregatePriority(current);
+        const nextPriority = getOdAggregatePriority(row);
+        if (nextPriority < currentPriority) {
+            rowsByOdBucket.set(key, row);
+        }
+    });
+
+    return [...rowsByOdBucket.values()];
+}
+
+function getOdAggregatePriority(row) {
+    if (row.trafficType === TRAFFIC_TYPES.LEG) return 0;
+    if (row.trafficType === TRAFFIC_TYPES.BEHIND || row.trafficType === TRAFFIC_TYPES.TRANSIT_FL) return 1;
+    if (row.trafficType === TRAFFIC_TYPES.BEYOND || row.trafficType === TRAFFIC_TYPES.TRANSIT_SL) return 2;
+    return 3;
+}
+
+function buildRevenueAggregateResponse(rows, groupByFields, periodicity) {
+    const useSectorBasis = shouldUseSectorRevenueBasis(groupByFields);
+    const aggregateRows = getOdAggregateRows(rows, useSectorBasis);
+    const buckets = new Map();
+    const periods = new Set();
+
+    aggregateRows.forEach((row) => {
+        const groupKey = getRevenueGroupKey(row, groupByFields);
+        const period = getAggregatePeriod(row.date, periodicity);
+        const bucketKey = `${groupKey}::${period}`;
+        periods.add(period);
+
+        if (!buckets.has(bucketKey)) {
+            buckets.set(bucketKey, {
+                groupKey,
+                period,
+                pax: 0,
+                cargoT: 0,
+                legRev: 0,
+                odRev: 0,
+                paxRev: 0,
+                cargoRev: 0,
+                totalRev: 0,
+                fnlRccyPaxRev: 0,
+                fnlRccyCargoRev: 0,
+                count: 0,
+            });
+        }
+
+        const bucket = buckets.get(bucketKey);
+        bucket.pax += parseNumber(row.pax);
+        bucket.cargoT += parseNumber(row.cargoT);
+        bucket.legRev += parseNumber(row.legTotalRev);
+        bucket.odRev += parseNumber(row.odTotalRev);
+        bucket.paxRev += parseNumber(useSectorBasis ? row.legPaxRev : row.odPaxRev);
+        bucket.cargoRev += parseNumber(useSectorBasis ? row.legCargoRev : row.odCargoRev);
+        bucket.totalRev += parseNumber(useSectorBasis ? row.rccyLegTotalRev : row.fnlRccyTotalRev);
+        bucket.fnlRccyPaxRev += parseNumber(useSectorBasis ? row.rccyLegPaxRev : row.fnlRccyPaxRev);
+        bucket.fnlRccyCargoRev += parseNumber(useSectorBasis ? row.rccyLegCargoRev : row.fnlRccyCargoRev);
+        bucket.count += 1;
+    });
+
+    const pivoted = {};
+    [...buckets.values()]
+        .sort((a, b) => a.groupKey.localeCompare(b.groupKey) || a.period.localeCompare(b.period))
+        .forEach((bucket) => {
+            if (!pivoted[bucket.groupKey]) pivoted[bucket.groupKey] = {};
+            pivoted[bucket.groupKey][bucket.period] = {
+                pax: roundToTwo(bucket.pax),
+                cargoT: roundToTwo(bucket.cargoT),
+                legRev: roundToTwo(bucket.legRev),
+                odRev: roundToTwo(bucket.odRev),
+                paxRev: roundToTwo(bucket.paxRev),
+                cargoRev: roundToTwo(bucket.cargoRev),
+                totalRev: roundToTwo(bucket.totalRev),
+                fnlRccyPaxRev: roundToTwo(bucket.fnlRccyPaxRev),
+                fnlRccyCargoRev: roundToTwo(bucket.fnlRccyCargoRev),
+                count: bucket.count,
+            };
+        });
+
+    return {
+        data: pivoted,
+        periods: [...periods].sort(),
+    };
 }
 
 async function applyUpdatesForDate({ userId, updates }) {
@@ -1910,8 +2053,7 @@ exports.getPooData = async (req, res) => {
         if (poo) filter.poo = normalizeStation(poo);
         if (date) {
             filter.date = {
-                $gte: moment(date).subtract(1, 'days').startOf("day").toDate(),
-                $lte: moment(date).subtract(1, 'days').endOf("day").toDate(),
+                ...buildSelectedDateRange(date),
             };
         }
         if (flightNumber) filter.flightNumber = flightNumber;
@@ -2368,76 +2510,13 @@ exports.getRevenueData = async (req, res) => {
             .map(normalizeGroupByField)
             .filter(Boolean);
         const safeGroupByFields = groupByFields.length > 0 ? [...new Set(groupByFields)] : ["poo"];
-        const groupKeyExpr = buildRevenueGroupKeyExpression(safeGroupByFields);
-
-        let periodExpr;
-        if (periodicity.toLowerCase() === "annually") {
-            periodExpr = { $dateToString: { format: "%Y", date: "$date" } };
-        } else if (periodicity.toLowerCase() === "quarterly") {
-            periodExpr = {
-                $concat: [
-                    { $toString: { $year: "$date" } },
-                    "-Q",
-                    { $toString: { $ceil: { $divide: [{ $month: "$date" }, 3] } } },
-                ],
-            };
-        } else if (periodicity.toLowerCase() === "weekly") {
-            periodExpr = { $dateToString: { format: "%Y-W%V", date: "$date" } };
-        } else if (periodicity.toLowerCase() === "daily") {
-            periodExpr = { $dateToString: { format: "%Y-%m-%d", date: "$date" } };
-        } else {
-            periodExpr = { $dateToString: { format: "%Y-%m", date: "$date" } };
-        }
-
-        const results = await PooTable.aggregate([
-            { $match: match },
-            {
-                $group: {
-                    _id: {
-                        groupKey: groupKeyExpr,
-                        period: periodExpr,
-                    },
-                    pax: { $sum: "$pax" },
-                    cargoT: { $sum: "$cargoT" },
-                    legRev: { $sum: "$legTotalRev" },
-                    odRev: { $sum: "$odTotalRev" },
-                    paxRev: { $sum: "$odPaxRev" },
-                    cargoRev: { $sum: "$odCargoRev" },
-                    totalRev: { $sum: "$fnlRccyTotalRev" },
-                    fnlRccyPaxRev: { $sum: "$fnlRccyPaxRev" },
-                    fnlRccyCargoRev: { $sum: "$fnlRccyCargoRev" },
-                    count: { $sum: 1 },
-                },
-            },
-            { $sort: { "_id.groupKey": 1, "_id.period": 1 } },
-        ]);
-
-        const pivoted = {};
-        const periods = new Set();
-
-        results.forEach((result) => {
-            const key = result._id.groupKey || "Unknown";
-            const period = result._id.period;
-            periods.add(period);
-            if (!pivoted[key]) pivoted[key] = {};
-            pivoted[key][period] = {
-                pax: roundToTwo(result.pax),
-                cargoT: roundToTwo(result.cargoT),
-                legRev: roundToTwo(result.legRev),
-                odRev: roundToTwo(result.odRev),
-                paxRev: roundToTwo(result.paxRev),
-                cargoRev: roundToTwo(result.cargoRev),
-                totalRev: roundToTwo(result.totalRev),
-                fnlRccyPaxRev: roundToTwo(result.fnlRccyPaxRev),
-                fnlRccyCargoRev: roundToTwo(result.fnlRccyCargoRev),
-                count: result.count,
-            };
-        });
+        const rows = await PooTable.find(match).lean();
+        const aggregate = buildRevenueAggregateResponse(rows, safeGroupByFields, periodicity);
 
         res.status(200).json({
             mode: "aggregate",
-            data: pivoted,
-            periods: [...periods].sort(),
+            data: aggregate.data,
+            periods: aggregate.periods,
             groupBy: safeGroupByFields.join(","),
             periodicity,
         });
@@ -2473,6 +2552,8 @@ exports.deletePooRecords = async (req, res) => {
 exports.__testables__ = {
     calculateProrateRatio,
     recalculateRevenue,
+    buildSelectedDateRange,
+    buildRevenueAggregateResponse,
     buildEditableResponse,
     buildRowMatchKey,
     buildFlightSnapshot,
