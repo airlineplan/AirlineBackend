@@ -10,8 +10,85 @@ const {
     buildFlightSnapshot,
     buildLegRows,
     buildSystemConnectionRows,
+    buildExplicitConnectionEdges,
     applyTrafficUpdates,
+    assignSerialNumbers,
 } = pooController.__testables__;
+
+function makeConnectionSnapshot(overrides = {}) {
+    return {
+        userId: "user-1",
+        flightId: "f1",
+        al: "Own",
+        depStn: "DEL",
+        arrStn: "BOM",
+        sector: "DEL-BOM",
+        odDI: "Dom",
+        legDI: "Dom",
+        date: new Date("2026-03-04T00:00:00.000Z"),
+        day: "Wed",
+        flightNumber: "A 100",
+        variant: "",
+        std: "09:00",
+        sta: "11:30",
+        maxPax: 153,
+        maxCargoT: 0.6,
+        sourcePaxTotal: 153,
+        sourceCargoTotal: 0.6,
+        sourceSeats: 180,
+        sourceCargoCapT: 1.2,
+        sourcePaxLF: 85,
+        sourceCargoLF: 50,
+        sectorGcd: 1200,
+        ...overrides,
+    };
+}
+
+function makeStateRow(overrides = {}) {
+    return {
+        _id: overrides._id,
+        trafficType: overrides.trafficType || "leg",
+        flightId: overrides.flightId || "f1",
+        connectedFlightId: overrides.connectedFlightId || null,
+        poo: overrides.poo || "DEL",
+        od: overrides.od || "DEL-BOM",
+        odOrigin: overrides.odOrigin || "DEL",
+        odDestination: overrides.odDestination || "BOM",
+        odDI: overrides.odDI || "Dom",
+        sector: overrides.sector || "DEL-BOM",
+        legDI: overrides.legDI || "Dom",
+        identifier: overrides.identifier || "Leg",
+        rowKey: overrides.rowKey || overrides._id,
+        odGroupKey: overrides.odGroupKey || `leg::${overrides.flightId || "f1"}`,
+        flightNumber: overrides.flightNumber || "A 100",
+        connectedFlightNumber: overrides.connectedFlightNumber || null,
+        flightList: overrides.flightList || [overrides.flightNumber || "A 100"],
+        timeInclLayover: overrides.timeInclLayover || "00:00",
+        pax: overrides.pax ?? 0,
+        cargoT: overrides.cargoT ?? 0,
+        maxPax: overrides.maxPax ?? 100,
+        maxCargoT: overrides.maxCargoT ?? 10,
+        stops: overrides.stops ?? 0,
+        sourceSeats: overrides.sourceSeats ?? 100,
+        sourceCargoCapT: overrides.sourceCargoCapT ?? 10,
+        sourcePaxTotal: overrides.sourcePaxTotal ?? 0,
+        sourceCargoTotal: overrides.sourceCargoTotal ?? 0,
+        sourcePaxLF: overrides.sourcePaxLF ?? 0,
+        sourceCargoLF: overrides.sourceCargoLF ?? 0,
+        odViaGcd: overrides.odViaGcd ?? 1200,
+        sectorGcd: overrides.sectorGcd ?? 1200,
+        totalGcd: overrides.totalGcd ?? overrides.odViaGcd ?? 1200,
+        legFare: overrides.legFare ?? 0,
+        legRate: overrides.legRate ?? 0,
+        odFare: overrides.odFare ?? 0,
+        odRate: overrides.odRate ?? 0,
+        fareProrateRatioL1L2: overrides.fareProrateRatioL1L2 ?? 0,
+        rateProrateRatioL1L2: overrides.rateProrateRatioL1L2 ?? 0,
+        pooCcyToRccy: overrides.pooCcyToRccy ?? 1,
+        applySSPricing: overrides.applySSPricing ?? false,
+        ...overrides,
+    };
+}
 
 test("buildFlightSnapshot carries a userId fallback into generated POO rows", () => {
     const snapshot = buildFlightSnapshot(
@@ -43,64 +120,100 @@ test("buildFlightSnapshot carries a userId fallback into generated POO rows", ()
     });
 
     assert.equal(snapshot.userId, "user-1");
+    assert.equal(snapshot.maxPax, 153);
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.map((row) => row.poo).sort(), ["BOM", "DEL"]);
     assert.ok(rows.every((row) => row.userId === "user-1"));
 });
 
-test("connection rows are generated for both OD endpoint POO values", () => {
-    const firstSnapshot = {
-        userId: "user-1",
-        flightId: "f1",
-        al: "Own",
-        depStn: "DEL",
-        arrStn: "BOM",
-        sector: "DEL-BOM",
-        odDI: "Dom",
-        legDI: "Dom",
-        date: new Date("2026-03-04T00:00:00.000Z"),
-        day: "Wed",
-        flightNumber: "A 100",
-        variant: "",
-        std: "09:00",
-        sta: "11:30",
-        maxPax: 180,
-        maxCargoT: 1.2,
-        sourcePaxTotal: 153,
-        sourceCargoTotal: 0.6,
-        sourceSeats: 180,
-        sourceCargoCapT: 1.2,
-        sourcePaxLF: 85,
-        sourceCargoLF: 50,
-        sectorGcd: 1200,
-    };
-    const secondSnapshot = {
-        userId: "user-1",
-        flightId: "f2",
-        al: "Own",
-        depStn: "BOM",
-        arrStn: "HYD",
-        sector: "BOM-HYD",
-        odDI: "Dom",
-        legDI: "Dom",
-        date: new Date("2026-03-04T00:00:00.000Z"),
-        day: "Wed",
-        flightNumber: "A 101",
-        variant: "",
-        std: "14:30",
-        sta: "16:10",
-        maxPax: 144,
-        maxCargoT: 1.4,
-        sourcePaxTotal: 128,
-        sourceCargoTotal: 1.4,
-        sourceSeats: 144,
-        sourceCargoCapT: 1.4,
-        sourcePaxLF: 89,
-        sourceCargoLF: 100,
-        sectorGcd: 600,
-    };
+test("buildFlightSnapshot falls back to seats times cargo capacity when flight pax is missing", () => {
+    const snapshot = buildFlightSnapshot(
+        {
+            _id: "flight-fallback",
+            depStn: "DEL",
+            arrStn: "BOM",
+            domIntl: "dom",
+            date: new Date("2026-03-01T00:00:00.000Z"),
+            day: "Sun",
+            flight: "A 201",
+            std: "09:00",
+            sta: "11:30",
+            seats: 200,
+            CargoCapT: 0.75,
+            CargoT: 0.6,
+            dist: 1200,
+        },
+        new Map(),
+        "user-1"
+    );
 
-    const rows = ["DEL", "HYD"].flatMap((pagePoo) =>
+    assert.equal(snapshot.maxPax, 150);
+    assert.equal(snapshot.sourcePaxTotal, 150);
+});
+
+test("assigns leg POO rows in departure-then-arrival order for each flight", () => {
+    const snapshot = buildFlightSnapshot(
+        {
+            _id: "flight-order",
+            depStn: "DEL",
+            arrStn: "BOM",
+            domIntl: "dom",
+            date: new Date("2026-03-01T00:00:00.000Z"),
+            day: "Sun",
+            flight: "A 200",
+            std: "09:00",
+            sta: "11:30",
+            seats: 180,
+            CargoCapT: 1.2,
+            pax: 153,
+            CargoT: 0.6,
+            dist: 1200,
+        },
+        new Map(),
+        "user-1"
+    );
+
+    const { rows } = buildLegRows({
+        snapshot,
+        existingRowsByKey: new Map(),
+        existingRecords: [],
+        currencyContextByPoo: {},
+    });
+
+    const ordered = assignSerialNumbers([rows[1], rows[0]]);
+
+    assert.deepEqual(
+        ordered.map((row) => row.poo),
+        ["DEL", "BOM"]
+    );
+    assert.deepEqual(
+        ordered.map((row) => row.pax),
+        [77, 76]
+    );
+});
+
+test("connection rows are generated for both OD endpoint POO values", () => {
+    const firstSnapshot = makeConnectionSnapshot();
+    const secondSnapshot = makeConnectionSnapshot({
+        flightId: "f2",
+        depStn: "BOM",
+        arrStn: "DXB",
+        sector: "BOM-DXB",
+        odDI: "Intl",
+        legDI: "Intl",
+        flightNumber: "A 102",
+        maxPax: 243,
+        maxCargoT: 7.7,
+        sourcePaxTotal: 243,
+        sourceCargoTotal: 7.7,
+        sourceSeats: 296,
+        sourceCargoCapT: 8.5,
+        sourcePaxLF: 89,
+        sourceCargoLF: 91,
+        sectorGcd: 1900,
+    });
+
+    const rows = ["DEL", "DXB"].flatMap((pagePoo) =>
         buildSystemConnectionRows({
             pagePoo,
             firstSnapshot,
@@ -112,8 +225,133 @@ test("connection rows are generated for both OD endpoint POO values", () => {
     );
 
     assert.equal(rows.length, 4);
-    assert.deepEqual(rows.map((row) => row.poo).sort(), ["DEL", "DEL", "HYD", "HYD"]);
+    assert.deepEqual(rows.map((row) => row.poo).sort(), ["DEL", "DEL", "DXB", "DXB"]);
     assert.ok(rows.every((row) => row.userId === "user-1"));
+    assert.ok(rows.every((row) => row.od === "DEL-DXB"));
+    assert.ok(rows.every((row) => row.odOrigin === "DEL"));
+    assert.ok(rows.every((row) => row.odDestination === "DXB"));
+    assert.ok(rows.every((row) => row.odDI === "Intl"));
+    assert.ok(rows.every((row) => row.stops === 1));
+    assert.ok(rows.every((row) => row.maxPax === 153));
+    assert.ok(rows.every((row) => row.maxCargoT === 0.6));
+    assert.deepEqual(
+        rows.filter((row) => row.trafficType === "behind").map((row) => row.sector),
+        ["DEL-BOM", "DEL-BOM"]
+    );
+    assert.deepEqual(
+        rows.filter((row) => row.trafficType === "beyond").map((row) => row.sector),
+        ["BOM-DXB", "BOM-DXB"]
+    );
+});
+
+test("builds raw POO rows from the March fixture explicit behind and beyond references", () => {
+    const fixtureFlights = [
+        [1, "2026-03-01", "Sun", "A 100", "DEL", "09:00", "11:30", "BOM", "Dom", 1200, 180, 1.2, 153, 0.6, null, null, null, null],
+        [2, "2026-03-02", "Mon", "A 100", "DEL", "09:00", "11:30", "BOM", "Dom", 1200, 180, 1.2, 153, 0.6, null, 13, null, null],
+        [3, "2026-03-04", "Wed", "A 100", "DEL", "09:00", "11:30", "BOM", "Dom", 1200, 180, 1.2, 153, 0.6, 6, 15, null, null],
+        [4, "2026-03-06", "Fri", "A 100", "DEL", "09:00", "11:30", "BOM", "Dom", 1200, 180, 1.2, 153, 0.6, 8, 17, null, null],
+        [5, "2026-03-03", "Tue", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, 11, null, null, null],
+        [6, "2026-03-04", "Wed", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, null, null, 3, null],
+        [7, "2026-03-05", "Thu", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, null, null, null, null],
+        [8, "2026-03-06", "Fri", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, null, null, 4, null],
+        [9, "2026-03-09", "Mon", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, null, null, null, null],
+        [10, "2026-03-10", "Tue", "A 101", "BOM", "14:30", "16:10", "HYD", "Dom", 600, 144, 1.4, 128, 1.4, null, null, null, null],
+        [11, "2026-03-04", "Wed", "A 200", "HYD", "18:00", "23:15", "BKK", "Intl", 2400, 189, 1.3, 142, 0.4, null, null, 5, null],
+        [12, "2026-03-07", "Sat", "A 200", "HYD", "18:00", "23:15", "BKK", "Intl", 2400, 189, 1.3, 142, 0.4, null, null, null, null],
+        [13, "2026-03-02", "Mon", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, 2, null],
+        [14, "2026-03-03", "Tue", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [15, "2026-03-04", "Wed", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, 3, null],
+        [16, "2026-03-05", "Thu", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [17, "2026-03-06", "Fri", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, 4, null],
+        [18, "2026-03-07", "Sat", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [19, "2026-03-08", "Sun", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [20, "2026-03-09", "Mon", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [21, "2026-03-10", "Tue", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [22, "2026-03-11", "Wed", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+        [23, "2026-03-12", "Thu", "A 102", "BOM", "15:00", "17:00", "DXB", "Intl", 1900, 296, 8.5, 243, 7.7, null, null, null, null],
+    ].map(([serial, date, day, flight, depStn, std, sta, arrStn, domIntl, dist, seats, CargoCapT, pax, CargoT, beyond1, beyond2, behind1, behind2]) => ({
+        _id: `flight-${serial}`,
+        userId: "user-1",
+        sourceSerialNo: serial,
+        date: new Date(`${date}T00:00:00.000Z`),
+        day,
+        flight,
+        depStn,
+        std,
+        bt: "00:00",
+        sta,
+        arrStn,
+        domIntl,
+        dist,
+        seats,
+        CargoCapT,
+        pax,
+        CargoT,
+        beyond1,
+        beyond2,
+        behind1,
+        behind2,
+    }));
+
+    const flightsById = new Map(fixtureFlights.map((flight) => [flight._id, flight]));
+    const snapshots = new Map(
+        fixtureFlights.map((flight) => [flight._id, buildFlightSnapshot(flight, new Map(), "user-1")])
+    );
+
+    const legRows = fixtureFlights.flatMap((flight) => buildLegRows({
+        snapshot: snapshots.get(flight._id),
+        existingRowsByKey: new Map(),
+        existingRecords: [],
+        currencyContextByPoo: {},
+    }).rows);
+
+    const connectionRows = buildExplicitConnectionEdges(flightsById).flatMap((edge) => {
+        const firstSnapshot = snapshots.get(edge.flightID);
+        const secondSnapshot = snapshots.get(edge.beyondOD);
+        return [firstSnapshot.depStn, secondSnapshot.arrStn].flatMap((pagePoo) =>
+            buildSystemConnectionRows({
+                pagePoo,
+                firstSnapshot,
+                secondSnapshot,
+                existingRowsByKey: new Map(),
+                shouldReset: false,
+                pageCurrencyContext: {},
+            })
+        );
+    });
+
+    const rows = assignSerialNumbers([...legRows, ...connectionRows]);
+    const rowFor = (criteria) => rows.find((row) =>
+        Object.entries(criteria).every(([key, value]) => row[key] === value)
+    );
+    const rowsFor = (criteria) => rows.filter((row) =>
+        Object.entries(criteria).every(([key, value]) => row[key] === value)
+    );
+
+    assert.equal(rowsFor({ trafficType: "leg" }).length, 46);
+    assert.equal(rowFor({ trafficType: "leg", poo: "DEL", od: "DEL-BOM", flightNumber: "A 100" }).pax, 77);
+    assert.equal(rowFor({ trafficType: "leg", poo: "BOM", od: "DEL-BOM", flightNumber: "A 100" }).pax, 76);
+    assert.equal(rowFor({ trafficType: "leg", poo: "BOM", od: "BOM-HYD", flightNumber: "A 101" }).cargoT, 0.7);
+    assert.equal(rowFor({ trafficType: "leg", poo: "BOM", od: "BOM-DXB", flightNumber: "A 102" }).cargoT, 3.8);
+    assert.equal(rowFor({ trafficType: "leg", poo: "DXB", od: "BOM-DXB", flightNumber: "A 102" }).cargoT, 3.9);
+
+    assert.equal(rowsFor({ od: "DEL-HYD", trafficType: "behind" }).length, 4);
+    assert.equal(rowsFor({ od: "DEL-HYD", trafficType: "beyond" }).length, 4);
+    assert.equal(rowsFor({ od: "BOM-BKK", trafficType: "behind" }).length, 2);
+    assert.equal(rowsFor({ od: "BOM-BKK", trafficType: "beyond" }).length, 2);
+    assert.equal(rowsFor({ od: "DEL-DXB", trafficType: "behind" }).length, 6);
+    assert.equal(rowsFor({ od: "DEL-DXB", trafficType: "beyond" }).length, 6);
+
+    const delDxbBehind = rowFor({ od: "DEL-DXB", trafficType: "behind", poo: "DEL", flightNumber: "A 100" });
+    const delDxbBeyond = rowFor({ od: "DEL-DXB", trafficType: "beyond", poo: "DXB", flightNumber: "A 102" });
+    assert.equal(delDxbBehind.sector, "DEL-BOM");
+    assert.equal(delDxbBeyond.sector, "BOM-DXB");
+    assert.equal(delDxbBeyond.odDI, "Intl");
+    assert.equal(delDxbBeyond.legDI, "Intl");
+    assert.equal(delDxbBeyond.maxPax, 153);
+    assert.equal(delDxbBeyond.maxCargoT, 0.6);
+    assert.equal(delDxbBeyond.pax, 0);
+    assert.equal(delDxbBeyond.cargoT, 0);
 });
 
 test("calculates proration from the field-specific ratio before GCD fallback", () => {
@@ -485,6 +723,106 @@ test("rebalance connection traffic across both legs in a two-leg OD", () => {
     assert.equal(finalRows.find((row) => row._id === "conn-second").pax, 5);
     assert.equal(finalRows.find((row) => row._id === "del-leg").pax, 15);
     assert.equal(finalRows.find((row) => row._id === "maa-leg").pax, 25);
+});
+
+test("connection edits mirror only rows for the same endpoint POO", () => {
+    const firstSnapshot = makeConnectionSnapshot();
+    const secondSnapshot = makeConnectionSnapshot({
+        flightId: "f2",
+        depStn: "BOM",
+        arrStn: "DXB",
+        sector: "BOM-DXB",
+        odDI: "Intl",
+        legDI: "Intl",
+        flightNumber: "A 102",
+        maxPax: 243,
+        maxCargoT: 7.7,
+        sourcePaxTotal: 243,
+        sourceCargoTotal: 7.7,
+        sourceSeats: 296,
+        sourceCargoCapT: 8.5,
+        sectorGcd: 1900,
+    });
+
+    const connectionRows = ["DEL", "DXB"]
+        .flatMap((pagePoo) =>
+            buildSystemConnectionRows({
+                pagePoo,
+                firstSnapshot,
+                secondSnapshot,
+                existingRowsByKey: new Map(),
+                shouldReset: false,
+                pageCurrencyContext: {},
+            })
+        )
+        .map((row) => makeStateRow({
+            ...row,
+            _id: `${row.poo.toLowerCase()}-${row.trafficType}`,
+        }));
+
+    const finalRows = applyTrafficUpdates(
+        [
+            makeStateRow({
+                _id: "leg-del",
+                flightId: "f1",
+                poo: "DEL",
+                od: "DEL-BOM",
+                odOrigin: "DEL",
+                odDestination: "BOM",
+                sector: "DEL-BOM",
+                pax: 20,
+                cargoT: 2,
+            }),
+            makeStateRow({
+                _id: "leg-bom-f1",
+                flightId: "f1",
+                poo: "BOM",
+                od: "DEL-BOM",
+                odOrigin: "DEL",
+                odDestination: "BOM",
+                sector: "DEL-BOM",
+                pax: 20,
+                cargoT: 2,
+            }),
+            makeStateRow({
+                _id: "leg-bom-f2",
+                flightId: "f2",
+                poo: "BOM",
+                od: "BOM-DXB",
+                odOrigin: "BOM",
+                odDestination: "DXB",
+                odDI: "Intl",
+                sector: "BOM-DXB",
+                legDI: "Intl",
+                pax: 30,
+                cargoT: 3,
+            }),
+            makeStateRow({
+                _id: "leg-dxb",
+                flightId: "f2",
+                poo: "DXB",
+                od: "BOM-DXB",
+                odOrigin: "BOM",
+                odDestination: "DXB",
+                odDI: "Intl",
+                sector: "BOM-DXB",
+                legDI: "Intl",
+                pax: 30,
+                cargoT: 3,
+            }),
+            ...connectionRows,
+        ],
+        [{ _id: "del-behind", pax: 5, cargoT: 0.1 }]
+    );
+
+    const byId = new Map(finalRows.map((row) => [row._id, row]));
+
+    assert.equal(byId.get("del-behind").pax, 5);
+    assert.equal(byId.get("del-beyond").pax, 5);
+    assert.equal(byId.get("dxb-behind").pax, 0);
+    assert.equal(byId.get("dxb-beyond").pax, 0);
+    assert.equal(byId.get("leg-del").pax, 15);
+    assert.equal(byId.get("leg-dxb").pax, 25);
 });
 
 test("rejects an edit when the balancing bucket does not have enough capacity", () => {

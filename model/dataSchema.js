@@ -15,6 +15,9 @@ const dataSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  sourceSerialNo: {
+    type: Number,
+  },
   depStn: {
     type: String,
     required: true,
@@ -78,6 +81,18 @@ const dataSchema = new mongoose.Schema({
   },
   rotationNumber: {
     type: String
+  },
+  beyond1: {
+    type: Number,
+  },
+  beyond2: {
+    type: Number,
+  },
+  behind1: {
+    type: Number,
+  },
+  behind2: {
+    type: Number,
   },
   addedByRotation: {
     type: String
@@ -485,6 +500,7 @@ async function createFlgts(doc) {
         date: flightDate,
         day: dayOfWeek,
         flight: doc.flight,
+        sourceSerialNo: doc.sourceSerialNo,
         depStn: doc.depStn,
         std: doc.std,
         bt: doc.bt,
@@ -518,6 +534,10 @@ async function createFlgts(doc) {
         fh: fh,
         ft: ft,
         acftType: doc.variant,
+        beyond1: doc.beyond1,
+        beyond2: doc.beyond2,
+        behind1: doc.behind1,
+        behind2: doc.behind2,
       });
 
       try {
@@ -625,6 +645,13 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       data.flight = doc.flight;
       updatedFields.push('flight');
     }
+
+    ["sourceSerialNo", "beyond1", "beyond2", "behind1", "behind2"].forEach((field) => {
+      if (String(doc[field] || "") !== String(data[field] || "")) {
+        data[field] = doc[field];
+        updatedFields.push(field);
+      }
+    });
 
     if (doc.effToDt.toString() !== data.toDt.toString()) {
       data.toDt = doc.effToDt;
@@ -752,6 +779,7 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
           date: flightDate,
           day: dayOfWeek,
           flight: doc.flight,
+          sourceSerialNo: data.sourceSerialNo,
           depStn: data.sector1,
           std: data.std,
           bt: data.bt,
@@ -778,7 +806,11 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
           networkId: data.networkId,
           effFromDt: doc.effFromDt,
           effToDt: doc.effToDt,
-          dow: doc.dow
+          dow: doc.dow,
+          beyond1: data.beyond1,
+          beyond2: data.beyond2,
+          behind1: data.behind1,
+          behind2: data.behind2
         };
 
         if (

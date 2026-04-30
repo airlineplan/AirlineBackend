@@ -89,6 +89,7 @@ const CHUNK_SIZE = 1000;
                                 sta: processed.sta,
                                 dow: processed.dow,
                                 flight: processed.flight,
+                                sourceSerialNo: processed.sourceSerialNo,
                                 std: processed.std,
                                 networkId: dataId,
                                 userId,
@@ -105,6 +106,10 @@ const CHUNK_SIZE = 1000;
                                 userTag2: processed.userTag2,
                                 remarks1: processed.remarks1,
                                 remarks2: processed.remarks2,
+                                beyond1: processed.beyond1,
+                                beyond2: processed.beyond2,
+                                behind1: processed.behind1,
+                                behind2: processed.behind2,
                                 bh: bhDecimal,
                                 fh: fhDecimal
                             }
@@ -186,17 +191,24 @@ function formatDecimal(value) {
     return value || 0;
 }
 
+function parseOptionalNumber(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
 function validateRow(row) {
     return (row.flight && /^[a-zA-Z0-9]{1,8}$/.test(row.flight) && /^[a-zA-Z0-9]{1,4}$/.test(row.depStn) && /^[a-zA-Z0-9]{1,4}$/.test(row.arrStn));
 }
 
 function processExcelRow(row) {
     return {
-        flight: row["Flight #"],
+        sourceSerialNo: parseOptionalNumber(row["S.No"] ?? row["S No"] ?? row["SNo"] ?? row["Serial No"]),
+        flight: row["Flight #"] ?? row["Flight No"],
         depStn: row["Dep Stn"],
-        std: parseExcelTime(row["STD (LT)"]),
+        std: parseExcelTime(row["STD (LT)"] ?? row["STD"]),
         bt: parseExcelTime(row["BT"]),
-        sta: parseExcelTime(row["STA(LT)"]),
+        sta: parseExcelTime(row["STA(LT)"] ?? row["STA"]),
         arrStn: row["Arr Stn"],
         variant: row["Variant"],
         acftType: row["ACFT Type"] || row["Variant"] || "",
@@ -212,7 +224,11 @@ function processExcelRow(row) {
         paxCapacity: formatDecimal(row["Pax Capacity"]),
         CargoCapT: formatDecimal(row["Cargo Cap T"]),
         paxLF: formatDecimal(row["Pax SF%"]),
-        cargoLF: formatDecimal(row["Cargo LF%"])
+        cargoLF: formatDecimal(row["Cargo LF%"]),
+        beyond1: parseOptionalNumber(row["Beyond 1"]),
+        beyond2: parseOptionalNumber(row["Beyond 2"]),
+        behind1: parseOptionalNumber(row["Behind 1"]),
+        behind2: parseOptionalNumber(row["Behind 2"])
     };
 }
 
@@ -299,11 +315,16 @@ async function generateFlightsBulk(dataDocs) {
                             effFromDt: doc.effFromDt,
                             effToDt: doc.effToDt,
                             dow: doc.dow,
-                            userTag1: doc.userTag1,
-                            userTag2: doc.userTag2,
-                            remarks1: doc.remarks1,
-                            remarks2: doc.remarks2,
-                            seats: paxCapacity,
+                                userTag1: doc.userTag1,
+                                userTag2: doc.userTag2,
+                                remarks1: doc.remarks1,
+                                remarks2: doc.remarks2,
+                                sourceSerialNo: doc.sourceSerialNo,
+                                beyond1: doc.beyond1,
+                                beyond2: doc.beyond2,
+                                behind1: doc.behind1,
+                                behind2: doc.behind2,
+                                seats: paxCapacity,
                             CargoCapT: CargoCapT,
                             dist: gcd,
                             pax: paxCapacity * (paxLF / 100),

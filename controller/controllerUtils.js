@@ -65,6 +65,12 @@ function isValidDow(dow) {
 }
 
 function processExcelRow(row) {
+  const optionalNumber = (value) => {
+    if (value === undefined || value === null || value === "") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
   function convertDecimalTimeToHours(decimalTime) {
     if (typeof decimalTime === "string") {
       decimalTime = decimalTime.replace(/( AM| PM)/g, "");
@@ -82,11 +88,12 @@ function processExcelRow(row) {
     return `${formattedHours}:${formattedMinutes}`;
   }
   return {
-    flight: row["Flight #"],
+    sourceSerialNo: optionalNumber(row["S.No"] ?? row["S No"] ?? row["SNo"] ?? row["Serial No"]),
+    flight: row["Flight #"] ?? row["Flight No"],
     depStn: row["Dep Stn"],
-    std: convertDecimalTimeToHours(row["STD (LT)"]),
+    std: convertDecimalTimeToHours(row["STD (LT)"] ?? row["STD"]),
     bt: convertDecimalTimeToHours(row["BT"]),
-    sta: convertDecimalTimeToHours(row["STA(LT)"]),
+    sta: convertDecimalTimeToHours(row["STA(LT)"] ?? row["STA"]),
     arrStn: row["Arr Stn"],
     variant: row["Variant"],
     effFromDt: getJsDateFromExcel(row["Eff from Dt"]),
@@ -102,6 +109,10 @@ function processExcelRow(row) {
     cargoCapT: row["Cargo Cap T"],
     paxSF: row["Pax SF%"],
     cargoLF: row["Cargo LF%"],
+    beyond1: optionalNumber(row["Beyond 1"]),
+    beyond2: optionalNumber(row["Beyond 2"]),
+    behind1: optionalNumber(row["Behind 1"]),
+    behind2: optionalNumber(row["Behind 2"]),
   };
 }
 const deleteConnections = async (ids) => {

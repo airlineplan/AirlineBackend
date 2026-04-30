@@ -79,21 +79,25 @@ function roundToTwo(value) {
     return Number(parseNumber(value).toFixed(2));
 }
 
+function roundToOne(value) {
+    return Number(parseNumber(value).toFixed(1));
+}
+
 function roundToWhole(value) {
     return Math.round(parseNumber(value));
 }
 
 function splitPaxValue(total) {
     const normalized = roundToWhole(total);
-    const arrival = Math.floor(normalized / 2);
-    const departure = normalized - arrival;
+    const departure = Math.round(normalized / 2);
+    const arrival = normalized - departure;
     return [departure, arrival];
 }
 
 function splitCargoValue(total) {
-    const normalized = roundToTwo(total);
-    const arrival = roundToTwo(normalized / 2);
-    const departure = roundToTwo(normalized - arrival);
+    const normalized = roundToOne(total);
+    const departure = Math.floor((normalized / 2) * 10) / 10;
+    const arrival = roundToOne(normalized - departure);
     return [departure, arrival];
 }
 
@@ -294,7 +298,9 @@ function buildFlightSnapshot(flight, sectorMap, userId = "") {
     const sectorInfo = sectorMap.get(sector) || {};
     const sourceSeats = parseNumber(flight.seats, sectorInfo.paxCapacity || 0);
     const sourceCargoCapT = roundToTwo(parseNumber(flight.CargoCapT, sectorInfo.cargoCapT || 0));
-    const sourcePaxTotal = roundToWhole(parseNumber(flight.pax));
+    const sourcePaxTotal = roundToWhole(
+        parseNumber(flight.pax, sourceSeats * sourceCargoCapT)
+    );
     const sourceCargoTotal = roundToTwo(parseNumber(flight.CargoT));
 
     return {
@@ -312,12 +318,17 @@ function buildFlightSnapshot(flight, sectorMap, userId = "") {
         date: flight.date,
         day: flight.day,
         flightNumber: String(flight.flight || "").trim(),
+        sourceSerialNo: parseNumber(flight.sourceSerialNo, 0),
+        beyond1: parseNumber(flight.beyond1, 0),
+        beyond2: parseNumber(flight.beyond2, 0),
+        behind1: parseNumber(flight.behind1, 0),
+        behind2: parseNumber(flight.behind2, 0),
         variant: String(flight.variant || "").trim(),
         std: String(flight.std || sectorInfo.std || "").trim(),
         sta: String(flight.sta || sectorInfo.sta || "").trim(),
         bt: String(flight.bt || "").trim(),
-        maxPax: sourceSeats,
-        maxCargoT: sourceCargoCapT,
+        maxPax: sourcePaxTotal,
+        maxCargoT: sourceCargoTotal,
         sourceSeats,
         sourceCargoCapT,
         sourcePaxTotal,
@@ -342,6 +353,10 @@ function getSharedConnectionLimits(firstSnapshot, secondSnapshot) {
         maxPax: Math.min(parseNumber(firstSnapshot.maxPax), parseNumber(secondSnapshot.maxPax)),
         maxCargoT: roundToTwo(Math.min(parseNumber(firstSnapshot.maxCargoT), parseNumber(secondSnapshot.maxCargoT))),
     };
+}
+
+function isIntlSnapshot(snapshot) {
+    return normalizeDomIntl(snapshot?.odDI || snapshot?.legDI) === "Intl";
 }
 
 function buildRowKey({
@@ -722,7 +737,7 @@ function buildSystemConnectionRows({
     pageCurrencyContext = {},
 }) {
     const od = `${firstSnapshot.depStn}-${secondSnapshot.arrStn}`;
-    const odDI = firstSnapshot.odDI === "Intl" || secondSnapshot.odDI === "Intl" ? "Intl" : "Dom";
+    const odDI = isIntlSnapshot(firstSnapshot) || isIntlSnapshot(secondSnapshot) ? "Intl" : "Dom";
     const sharedLimits = getSharedConnectionLimits(firstSnapshot, secondSnapshot);
     const odGroupKey = buildConnectionGroupKey({
         firstFlightId: firstSnapshot.flightId,
@@ -1047,6 +1062,15 @@ function assignSerialNumbers(rows) {
     const sorted = [...rows].sort((a, b) => {
         const groupCompare = (a.odGroupKey || "").localeCompare(b.odGroupKey || "");
         if (groupCompare !== 0) return groupCompare;
+
+        const isLegA = a.trafficType === TRAFFIC_TYPES.LEG;
+        const isLegB = b.trafficType === TRAFFIC_TYPES.LEG;
+        if (isLegA && isLegB) {
+            const aOrder = normalizeStation(a.poo) === normalizeStation(a.odOrigin) ? 0 : normalizeStation(a.poo) === normalizeStation(a.odDestination) ? 1 : 2;
+            const bOrder = normalizeStation(b.poo) === normalizeStation(b.odOrigin) ? 0 : normalizeStation(b.poo) === normalizeStation(b.odDestination) ? 1 : 2;
+            if (aOrder !== bOrder) return aOrder - bOrder;
+        }
+
         const pooCompare = a.poo.localeCompare(b.poo);
         if (pooCompare !== 0) return pooCompare;
         return a.identifier.localeCompare(b.identifier);
@@ -1057,6 +1081,61 @@ function assignSerialNumbers(rows) {
     });
 
     return sorted;
+}
+
+function getReferenceNumbers(flight, fields) {
+    return fields
+        .map((field) => parseNumber(flight[field], 0))
+        .filter((value) => value > 0);
+}
+
+function buildExplicitConnectionEdges(flightsById) {
+    const flights = [...flightsById.values()];
+    const flightsBySerial = new Map();
+
+    flights.forEach((flight) => {
+        const serial = parseNumber(flight.sourceSerialNo, 0);
+        if (serial > 0) flightsBySerial.set(serial, flight);
+    });
+
+    const edges = [];
+    const seen = new Set();
+    const addEdge = (firstFlight, secondFlight) => {
+        if (!firstFlight || !secondFlight) return;
+        const key = `${String(firstFlight._id)}::${String(secondFlight._id)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        edges.push({
+            flightID: String(firstFlight._id),
+            beyondOD: String(secondFlight._id),
+            source: "explicit",
+        });
+    };
+
+    flights.forEach((flight) => {
+        getReferenceNumbers(flight, ["beyond1", "beyond2"]).forEach((serial) => {
+            addEdge(flight, flightsBySerial.get(serial));
+        });
+        getReferenceNumbers(flight, ["behind1", "behind2"]).forEach((serial) => {
+            addEdge(flightsBySerial.get(serial), flight);
+        });
+    });
+
+    return edges;
+}
+
+function mergeConnectionEdges(explicitEdges, generatedEdges) {
+    const explicitKeys = new Set(
+        explicitEdges.map((edge) => `${String(edge.flightID)}::${String(edge.beyondOD)}`)
+    );
+    const merged = [...explicitEdges];
+
+    generatedEdges.forEach((edge) => {
+        const key = `${String(edge.flightID)}::${String(edge.beyondOD)}`;
+        if (!explicitKeys.has(key)) merged.push(edge);
+    });
+
+    return merged;
 }
 
 async function resolveFlightsForTransitDraft({ userId, date, transitDraft, flightsById }) {
@@ -1090,9 +1169,11 @@ async function resolveFlightsForTransitDraft({ userId, date, transitDraft, fligh
     return { firstFlight, secondFlight };
 }
 
-async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
-    const dayStart = moment(date).startOf("day").toDate();
-    const dayEnd = moment(date).endOf("day").toDate();
+async function buildPooDataset({ userId, poo, date, dateFrom, dateTo, includeAllPoos = false }) {
+    const startInput = dateFrom || date;
+    const endInput = dateTo || dateFrom || date;
+    const dayStart = moment(startInput).startOf("day").toDate();
+    const dayEnd = moment(endInput).endOf("day").toDate();
     const normalizedPoo = normalizeStation(poo);
     const normalizedUserId = normalizeUserId(userId);
 
@@ -1105,7 +1186,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         Flight.find({
             userId: normalizedUserId,
             date: { $gte: dayStart, $lte: dayEnd },
-            ...(includeAllPoos ? {} : {
+            ...(includeAllPoos || !normalizedPoo ? {} : {
                 $or: [
                     { depStn: normalizedPoo },
                     { arrStn: normalizedPoo },
@@ -1122,8 +1203,33 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
     const existingRowsByKey = new Map(existingRecords.map((record) => [record.rowKey, record]));
     const flightsById = new Map(directFlights.map((flight) => [String(flight._id), flight]));
 
+    const referencedSerials = [
+        ...new Set(
+            directFlights.flatMap((flight) => [
+                ...getReferenceNumbers(flight, ["beyond1", "beyond2"]),
+                ...getReferenceNumbers(flight, ["behind1", "behind2"]),
+            ])
+        ),
+    ];
+
+    if (referencedSerials.length) {
+        const knownSerials = new Set(
+            [...flightsById.values()].map((flight) => parseNumber(flight.sourceSerialNo, 0)).filter((serial) => serial > 0)
+        );
+        const missingSerials = referencedSerials.filter((serial) => !knownSerials.has(serial));
+        if (missingSerials.length) {
+            const explicitFlights = await Flight.find({
+                userId: normalizedUserId,
+                sourceSerialNo: { $in: missingSerials },
+            }).lean();
+            explicitFlights.forEach((flight) => {
+                flightsById.set(String(flight._id), flight);
+            });
+        }
+    }
+
     const directFlightIds = directFlights.map((flight) => String(flight._id));
-    const connectionEdges = directFlightIds.length
+    const generatedConnectionEdges = directFlightIds.length
         ? await Connections.find({
             userId: normalizedUserId,
             $or: [
@@ -1132,6 +1238,8 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
             ],
         }).lean()
         : [];
+    const explicitConnectionEdges = buildExplicitConnectionEdges(flightsById);
+    const connectionEdges = mergeConnectionEdges(explicitConnectionEdges, generatedConnectionEdges);
 
     const connectionFlightIds = [
         ...new Set(
@@ -1166,7 +1274,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         const extraFlights = await Flight.find({
             userId: normalizedUserId,
             _id: { $in: missingFlightIds },
-            date: { $gte: dayStart, $lte: dayEnd },
+                date: { $gte: dayStart, $lte: dayEnd },
         }).lean();
         extraFlights.forEach((flight) => {
             flightsById.set(String(flight._id), flight);
@@ -1186,7 +1294,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
                 revenueConfig,
                 fxRateMap,
                 poo: normalizedCode,
-                date,
+                date: startInput,
             });
         }
         return currencyContextByPoo[normalizedCode];
@@ -1217,16 +1325,10 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         const secondSnapshot = snapshots.get(String(secondFlight._id));
         if (!firstSnapshot || !secondSnapshot) return;
 
+        const connectionEndpoints = [firstSnapshot.depStn, secondSnapshot.arrStn];
         const connectionPoos = includeAllPoos
-            ? [firstSnapshot.depStn, secondSnapshot.arrStn]
-            : [normalizedPoo].filter((pagePoo) =>
-                pagePoo === firstSnapshot.depStn ||
-                pagePoo === firstSnapshot.arrStn ||
-                pagePoo === secondSnapshot.depStn ||
-                pagePoo === secondSnapshot.arrStn ||
-                pagePoo === firstSnapshot.odOrigin ||
-                pagePoo === secondSnapshot.odDestination
-            );
+            ? connectionEndpoints
+            : [normalizedPoo].filter((pagePoo) => connectionEndpoints.includes(pagePoo));
 
         [...new Set(connectionPoos)].forEach((pagePoo) => {
             rows.push(...buildSystemConnectionRows({
@@ -1475,7 +1577,9 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
             current.trafficType === TRAFFIC_TYPES.TRANSIT_FL ||
             current.trafficType === TRAFFIC_TYPES.TRANSIT_SL
         ) {
-            const groupRows = groupRowsByOdKey.get(current.odGroupKey) || [];
+            const groupRows = (groupRowsByOdKey.get(current.odGroupKey) || []).filter(
+                (row) => normalizeStation(row.poo) === normalizeStation(current.poo)
+            );
             const firstRow = groupRows.find(
                 (row) =>
                     row.trafficType === TRAFFIC_TYPES.BEHIND ||
@@ -1778,6 +1882,8 @@ exports.getPooData = async (req, res) => {
         const {
             poo,
             date,
+            dateFrom,
+            dateTo,
             flightNumber,
             sector,
             variant,
@@ -1788,7 +1894,12 @@ exports.getPooData = async (req, res) => {
         const filter = { userId };
 
         if (poo) filter.poo = normalizeStation(poo);
-        if (date) {
+        if (dateFrom || dateTo) {
+            filter.date = {
+                $gte: moment(dateFrom || dateTo).startOf("day").toDate(),
+                $lte: moment(dateTo || dateFrom).endOf("day").toDate(),
+            };
+        } else if (date) {
             filter.date = {
                 $gte: moment(date).startOf("day").toDate(),
                 $lte: moment(date).endOf("day").toDate(),
@@ -1824,13 +1935,14 @@ exports.getPooData = async (req, res) => {
 exports.populatePoo = async (req, res) => {
     try {
         const userId = normalizeUserId(req.user.id);
-        const { poo, date } = req.body;
+        const { poo, date, dateFrom, dateTo } = req.body;
+        const startInput = dateFrom || date;
 
-        if (!poo || !date) {
-            return res.status(400).json({ message: "POO station and date are required" });
+        if (!startInput) {
+            return res.status(400).json({ message: "Date or date range is required" });
         }
 
-        const dataset = await buildPooDataset({ userId, poo, date, includeAllPoos: true });
+        const dataset = await buildPooDataset({ userId, poo, date, dateFrom, dateTo, includeAllPoos: true });
 
         if (!dataset.rows.length) {
             await PooTable.deleteMany({
@@ -1866,7 +1978,7 @@ exports.populatePoo = async (req, res) => {
 
         const savedRows = await PooTable.find({
             userId,
-            poo: dataset.normalizedPoo,
+            ...(dataset.normalizedPoo ? { poo: dataset.normalizedPoo } : {}),
             date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
         });
 
@@ -2358,5 +2470,8 @@ exports.__testables__ = {
     buildFlightSnapshot,
     buildLegRows,
     buildSystemConnectionRows,
+    buildExplicitConnectionEdges,
+    mergeConnectionEdges,
     applyTrafficUpdates,
+    assignSerialNumbers,
 };
