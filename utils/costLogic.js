@@ -1199,6 +1199,36 @@ const normalizeStationCost = (rows = [], stationKey) => {
   return normalized.filter((row) => row[stationKey] || row.cost);
 };
 
+const normalizeOtherDoc = (rows = []) => rows.map((row) => ({
+  label: pick(row, ["label", "lbl"]),
+  sector: normalize(pick(row, ["sector", "sec"])),
+  depStn: normalize(pick(row, ["depStn", "dep"])),
+  arrStn: normalize(pick(row, ["arrStn", "arr"])),
+  variantOrAcftRegn: normalize(pick(row, ["variantOrAcftRegn", "variantAcftRegn", "variant", "acftRegn", "acftReg"])),
+  per: normalizeMetric(pick(row, ["per"])),
+  cost: toNumber(pick(row, ["cost"])),
+  fromDate: pick(row, ["fromDate", "fdate"]),
+  toDate: pick(row, ["toDate", "tdate"]),
+  ccy: normalize(pick(row, ["ccy", "currency"])),
+  costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+})).filter((row) => row.label || row.sector || row.depStn || row.arrStn || row.variantOrAcftRegn);
+
+const matchesOtherDocAircraft = (row, { variant, acftRegn }) => {
+  const combined = normalize(pick(row, ["variantOrAcftRegn", "variantAcftRegn"]));
+  if (combined) {
+    return combined === variant || combined === acftRegn;
+  }
+
+  const rowVariant = normalize(row?.variant);
+  const rowAcftRegn = normalize(row?.acftRegn);
+  if (rowVariant && rowAcftRegn) {
+    return rowVariant === variant && rowAcftRegn === acftRegn;
+  }
+  if (rowVariant) return rowVariant === variant;
+  if (rowAcftRegn) return rowAcftRegn === acftRegn;
+  return true;
+};
+
 const normalizeNavigationCost = (rows = [], stationKey, tiers = DEFAULT_NAV_MTOW_TIERS) => rows.map((row) => {
   const tierRates = {};
   const navTiers = normalizeNavMtowTiers(tiers);
@@ -1307,23 +1337,6 @@ const normalizeFleetRows = (rows = []) => rows.map((row) => ({
   category: normalize(pick(row, ["category"])),
 })).filter((row) => row.regn || row.sn || row.mtow);
 
-const normalizeOtherDoc = (rows = []) => rows.map((row) => ({
-  label: pick(row, ["label", "lbl"]),
-  sector: normalize(pick(row, ["sector", "sec"])),
-  depStn: normalize(pick(row, ["depStn", "dep"])),
-  arrStn: normalize(pick(row, ["arrStn", "arr"])),
-  variant: normalize(pick(row, ["variant", "var"])),
-  acftRegn: normalize(pick(row, ["acftRegn", "acftReg"])),
-  pn: normalize(pick(row, ["pn"])),
-  sn: normalize(pick(row, ["sn", "msn"])),
-  per: normalizeMetric(pick(row, ["per"])),
-  cost: toNumber(pick(row, ["cost"])),
-  fromDate: pick(row, ["fromDate", "fdate"]),
-  toDate: pick(row, ["toDate", "tdate"]),
-  ccy: normalize(pick(row, ["ccy", "currency"])),
-  costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).filter((row) => row.label || row.sector || row.depStn || row.arrStn || row.variant || row.acftRegn || row.pn || row.sn);
-
 const normalizeRotableChanges = (rows = []) => rows.map((row) => ({
   ...row,
   label: pick(row, ["label", "lbl"]),
@@ -1362,6 +1375,7 @@ const normalizeCostConfig = (config = {}) => {
     schMxEvents: normalizeSchMxEvents(config.schMxEvents || []),
     transitMx: normalizeTransitMx(config.transitMx || []),
     otherMx: normalizeOtherMx(config.otherMx || []),
+    otherDoc: normalizeOtherDoc(config.otherDoc || []),
     rotableChanges: normalizeRotableChanges(config.rotableChanges || []),
     navMtowTiers,
     navEnr: normalizeNavigationCost(config.navEnr || [], "sector", navMtowTiers),
@@ -1371,7 +1385,6 @@ const normalizeCostConfig = (config = {}) => {
     airportDom: normalizeStationCost(config.airportDom || [], "arrStn"),
     airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
     airportOther: normalizeAirportMtowCost(config.airportOther || [], "arrStn", navMtowTiers),
-    otherDoc: normalizeOtherDoc(config.otherDoc || []),
     aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
     maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
     fleet: normalizeFleetRows(config.fleet || []),
@@ -2190,14 +2203,11 @@ const enrichDirectCosts = (flights, config) => {
       if (!matchesOptional(row.sector, sector)) return false;
       if (!matchesOptional(row.depStn, depStn)) return false;
       if (!matchesOptional(row.arrStn, arrStn)) return false;
-      if (!matchesOptional(row.variant, variant)) return false;
-      if (!matchesOptional(row.acftRegn, acftReg)) return false;
-      if (!matchesOptional(row.pn, pn)) return false;
-      if (!matchesOptional(row.sn, msn)) return false;
+      if (!matchesOtherDocAircraft(row, { variant, acftRegn: acftReg })) return false;
       return isWithinRange(flightDate, row.fromDate, row.toDate);
     }).sort((a, b) => {
-      const scoreA = scoreSpecificity([a.sector, a.depStn, a.arrStn, a.variant, a.acftRegn, a.pn, a.sn, a.fromDate || a.toDate]);
-      const scoreB = scoreSpecificity([b.sector, b.depStn, b.arrStn, b.variant, b.acftRegn, b.pn, b.sn, b.fromDate || b.toDate]);
+      const scoreA = scoreSpecificity([a.sector, a.depStn, a.arrStn, a.variantOrAcftRegn || a.variant || a.acftRegn, a.fromDate || a.toDate]);
+      const scoreB = scoreSpecificity([b.sector, b.depStn, b.arrStn, b.variantOrAcftRegn || b.variant || b.acftRegn, b.fromDate || b.toDate]);
       return scoreB - scoreA;
     });
 
@@ -2432,10 +2442,7 @@ const enrichAllocatedCosts = (flights, config) => {
       if (!matchesOptional(row.sector, getFlightSector(flight))) return false;
       if (!matchesOptional(row.depStn, getFlightDep(flight))) return false;
       if (!matchesOptional(row.arrStn, getFlightArr(flight))) return false;
-      if (!matchesOptional(row.variant, getFlightVariant(flight))) return false;
-      if (!matchesOptional(row.acftRegn, getFlightRegistration(flight))) return false;
-      if (!matchesOptional(row.pn, getFlightPartNumber(flight))) return false;
-      if (!matchesOptional(row.sn, getFlightMsn(flight))) return false;
+      if (!matchesOtherDocAircraft(row, { variant: getFlightVariant(flight), acftRegn: getFlightRegistration(flight) })) return false;
       return isWithinRange(flightDate, row.fromDate, row.toDate);
     });
     distributeMonthlyPoolByBasis(
@@ -2534,6 +2541,7 @@ module.exports = {
   flattenFuelPriceRows,
   normalizeApuUsage,
   normalizeOtherMx,
+  normalizeOtherDoc,
   normalizeFleetRows,
   groupFuelConsumRows,
   groupFuelConsumIndexRows,

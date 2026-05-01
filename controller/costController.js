@@ -14,6 +14,7 @@ const {
   normalizeAllocationTable,
   normalizeApuUsage,
   normalizeOtherMx,
+  normalizeOtherDoc,
   normalizeTransitMx,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
@@ -94,6 +95,7 @@ exports.saveCostConfig = async (req, res) => {
       ccyFuel: flattenFuelPriceRows(configData.ccyFuel || []),
       apuUsage: normalizeApuUsage(configData.apuUsage || []),
       otherMx: normalizeOtherMx(configData.otherMx || []),
+      otherDoc: normalizeOtherDoc(configData.otherDoc || []),
       transitMx: normalizeTransitMx(configData.transitMx || []),
       schMxEvents: hydratedSchMxEvents,
       ...navigationTables,
@@ -134,6 +136,7 @@ exports.getCostConfig = async (req, res) => {
       config.allocationTable = normalizeAllocationTable(config.allocationTable || config.costAllocation || []);
       config.apuUsage = normalizeApuUsage(config.apuUsage || []);
       config.otherMx = normalizeOtherMx(config.otherMx || []);
+      config.otherDoc = normalizeOtherDoc(config.otherDoc || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);
       config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || []);
       config.navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);

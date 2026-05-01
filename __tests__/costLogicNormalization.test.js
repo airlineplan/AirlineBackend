@@ -94,6 +94,18 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
         ccy: "USD",
       },
     ],
+    otherDoc: [
+      {
+        label: "Doc",
+        sector: "CCU-BOM",
+        depStn: "CCU",
+        arrStn: "BOM",
+        variantOrAcftRegn: "VT-IJK",
+        per: "BH",
+        cost: "2",
+        ccy: "INR",
+      },
+    ],
   });
 
   assert.equal(normalized.leasedReserve[0].schMxEvent, "6YSI");
@@ -133,6 +145,12 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherMx[0].sn, "SN-1");
   assert.equal(normalized.otherMx[0].costPerBh, 125);
   assert.equal(normalized.otherMx[0].ccy, "USD");
+
+  assert.equal(normalized.otherDoc[0].label, "Doc");
+  assert.equal(normalized.otherDoc[0].variantOrAcftRegn, "VT-IJK");
+  assert.equal(normalized.otherDoc[0].per, "BH");
+  assert.equal(normalized.otherDoc[0].cost, 2);
+  assert.equal(normalized.otherDoc[0].ccy, "INR");
 });
 
 test("cost enrichment populates MSN, engine ESNs, and APUN from aircraft on-wing rows", () => {

@@ -168,7 +168,7 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
     airportIntl: [{ arrStn: "BOM", mtow: "77000", variant: "A320", cost: "13", ccy: "INR" }],
     airportAvsec: [{ arrStn: "BOM", variant: "A320", cost: "14", ccy: "INR" }],
     airportOther: [{ arrStn: "BOM", ccy: "INR", 73000: "15", 77000: "16" }],
-    otherDoc: [{ label: "Doc", sector: "CCU-BOM", depStn: "CCU", arrStn: "BOM", variant: "A320", per: "BH", cost: "2", ccy: "INR" }],
+    otherDoc: [{ label: "Doc", sector: "CCU-BOM", depStn: "CCU", arrStn: "BOM", variantOrAcftRegn: "A320", per: "BH", cost: "2", ccy: "INR" }],
   };
 
   const saveRes = createMockResponse();
@@ -204,6 +204,7 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.leasedReserve[0].mrAccId, "MR-1");
   assert.equal(data.transitMx[0].sn, "5825");
   assert.equal(data.otherDoc[0].label, "Doc");
+  assert.equal(data.otherDoc[0].variantOrAcftRegn, "A320");
   assert.equal(data.plfEffect[0].rowType, "header");
   assert.ok(Object.prototype.hasOwnProperty.call(data.plfEffect[0], "p56"));
   assert.equal(data.plfEffect.find((row) => row.acftRegn === "VT-ABC").p99, 1.03);
@@ -322,9 +323,9 @@ test("cost page controller computes representative cost inputs into flight cost 
       airportDom: [{ arrStn: "BOM", mtow: 77000, variant: "A320", cost: 12, ccy: "INR" }],
       airportAvsec: [{ arrStn: "BOM", variant: "A320", cost: 13, ccy: "INR" }],
       airportOther: [{ arrStn: "BOM", ccy: "INR", 73000: 15, 77000: 14 }],
-      otherDoc: [{ label: "Doc", sector: "CCU-BOM", per: "BH", cost: 2, ccy: "INR" }],
-    }),
-  ]);
+    otherDoc: [{ label: "Doc", sector: "CCU-BOM", variantOrAcftRegn: "A320", per: "BH", cost: 2, ccy: "INR" }],
+  }),
+]);
 
   const res = createMockResponse();
   await costController.getCostPageData({
