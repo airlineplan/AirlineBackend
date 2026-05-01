@@ -947,7 +947,7 @@ test("APU fuel allocation follows the configured basis", () => {
   assert.equal(enriched[1].apuFuelCostCCY, "INR");
 });
 
-test("generated APU fuel rows use arrival-based APU usage and departure-month fuel price", () => {
+test("generated APU fuel rows use APU usage station and station-month fuel price", () => {
   const row = apuFuelPrivate.buildGeneratedApuFuelRow(
     {
       _id: "flight-1",
@@ -971,7 +971,7 @@ test("generated APU fuel rows use arrival-based APU usage and departure-month fu
       ],
       ccyFuel: [
         {
-          station: "CCU",
+          station: "BOM",
           month: "04/26",
           kgPerLtr: 0.78,
           intoPlaneRate: 92500,
@@ -982,16 +982,21 @@ test("generated APU fuel rows use arrival-based APU usage and departure-month fu
   );
 
   assert.equal(row.arrStn, "BOM");
+  assert.equal(row.stn, "BOM");
   assert.equal(row.acftRegn, "VT-ABC");
   assert.equal(row.apuHr, 0.75);
+  assert.equal(row.apuHrPerDay, 0.75);
   assert.equal(row.consumptionKgPerApuHr, 255);
+  assert.equal(row.kgPerApuHr, 255);
   assert.equal(row.consumptionKg, 191.25);
   assert.equal(row.costPerLtr, 92.5);
+  assert.equal(row.costSourceType, "STN_MONTH");
+  assert.equal(row.costSourceStation, "BOM");
   assert.equal(row.consumptionLitres, 191.25 / 0.78);
   assert.ok(Math.abs(row.totalFuelCost - 22680.28846153846) < 1e-9);
 });
 
-test("generated APU fuel rows keep arrStn blank for additional-use usage rows", () => {
+test("generated APU fuel rows keep Stn aliases for additional-use usage rows", () => {
   const row = apuFuelPrivate.buildGeneratedApuFuelRow(
     {
       _id: "flight-2",
@@ -1006,7 +1011,7 @@ test("generated APU fuel rows keep arrStn blank for additional-use usage rows", 
     {
       apuUsage: [
         {
-          arrStn: "",
+          arrStn: "BOM",
           variant: "737",
           acftRegn: "VT-IJK",
           apuHours: 1.5,
@@ -1018,10 +1023,10 @@ test("generated APU fuel rows keep arrStn blank for additional-use usage rows", 
       ],
       ccyFuel: [
         {
-          station: "CCU",
+          station: "BOM",
           month: "04/26",
           kgPerLtr: 0.78,
-          intoPlaneRate: 94000,
+          intoPlaneRate: 95000,
           ccy: "INR",
         },
       ],
@@ -1052,20 +1057,23 @@ test("generated APU fuel rows keep arrStn blank for additional-use usage rows", 
     ]
   );
 
-  assert.equal(row.arrStn, "");
+  assert.equal(row.arrStn, "BOM");
+  assert.equal(row.stn, "BOM");
   assert.equal(row.acftRegn, "VT-IJK");
   assert.equal(row.apuHr, 1.5);
+  assert.equal(row.apuHrPerDay, 1.5);
   assert.equal(row.consumptionKgPerApuHr, 280);
+  assert.equal(row.kgPerApuHr, 280);
   assert.equal(row.consumptionKg, 420);
-  assert.equal(row.costPerLtr, 94);
-  assert.equal(row.costSourceType, "LAST_DEP_STN_RCCY");
-  assert.equal(row.costSourceStation, "CCU");
+  assert.equal(row.costPerLtr, 95);
+  assert.equal(row.costSourceType, "STN_MONTH");
+  assert.equal(row.costSourceStation, "BOM");
   assert.equal(row.sourceFlightId, "flight-2");
   assert.equal(row.consumptionLitres, 420 / 0.78);
-  assert.ok(Math.abs(row.totalFuelCost - 50615.38461538462) < 1e-9);
+  assert.ok(Math.abs(row.totalFuelCost - 51153.846153846156) < 1e-9);
 });
 
-test("apu fuel allocation for additional-use rows uses the latest performed flight departure station", () => {
+test("apu fuel allocation for additional-use rows uses the row station fuel price", () => {
   const flights = [
     {
       date: "2026-04-20",
@@ -1095,7 +1103,7 @@ test("apu fuel allocation for additional-use rows uses the latest performed flig
     reportingCurrency: "INR",
     apuUsage: [
       {
-        arrStn: "",
+        arrStn: "BOM",
         variant: "737",
         acftRegn: "VT-IJK",
         apuHours: 1.5,
@@ -1120,17 +1128,86 @@ test("apu fuel allocation for additional-use rows uses the latest performed flig
         intoPlaneRate: 94000,
         ccy: "INR",
       },
+      {
+        station: "BOM",
+        month: "04/26",
+        kgPerLtr: 0.78,
+        intoPlaneRate: 95000,
+        ccy: "INR",
+      },
     ],
   });
 
-  assert.equal(enriched[0].apuFuelCost, 25307.69);
-  assert.equal(enriched[1].apuFuelCost, 25307.69);
+  assert.equal(enriched[0].apuFuelCost, 25576.92);
+  assert.equal(enriched[1].apuFuelCost, 25576.93);
   assert.equal(enriched[0].apuFuelCostCCY, "INR");
   assert.equal(enriched[1].apuFuelCostCCY, "INR");
-  assert.equal(enriched[0].apuFuelCost + enriched[1].apuFuelCost, 50615.38);
+  assert.equal(enriched[0].apuFuelCost + enriched[1].apuFuelCost, 51153.85);
 });
 
-test("apu fuel allocation applies additional-use rows without an arrival station", () => {
+test("apu fuel allocation for additional-use rows stays within aircraft-month group", () => {
+  const flights = [
+    {
+      date: "2026-04-20",
+      flight: "F1001",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      bh: 2,
+      aircraft: { registration: "VT-IJK" },
+    },
+    {
+      date: "2026-04-21",
+      flight: "F1002",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      bh: 1,
+      aircraft: { registration: "VT-IJK" },
+    },
+    {
+      date: "2026-04-21",
+      flight: "F2001",
+      depStn: "DEL",
+      arrStn: "BOM",
+      variant: "737",
+      bh: 9,
+      aircraft: { registration: "VT-OTHER" },
+    },
+  ];
+
+  const enriched = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    allocationTable: [{ costCode: "APUFUELCOST", basis: "BH" }],
+    apuUsage: [
+      {
+        arrStn: "BOM",
+        variant: "737",
+        acftRegn: "VT-IJK",
+        apuHours: 1,
+        consumptionPerApuHour: 300,
+        addlnUse: "Y",
+        fromDate: "2026-04-20",
+      },
+    ],
+    ccyFuel: [
+      {
+        station: "BOM",
+        month: "04/26",
+        kgPerLtr: 1,
+        intoPlaneRate: 1000,
+        ccy: "INR",
+      },
+    ],
+  });
+
+  assert.equal(enriched[0].apuFuelCostAllocated, 200);
+  assert.equal(enriched[1].apuFuelCostAllocated, 100);
+  assert.equal(enriched[2].apuFuelCostAllocated, 0);
+  assert.equal(enriched.reduce((sum, row) => sum + row.apuFuelCostAllocated, 0), 300);
+});
+
+test("apu fuel allocation applies additional-use rows with a station alias", () => {
   const flight = {
     date: "2026-04-20",
     depStn: "CCU",
@@ -1146,7 +1223,7 @@ test("apu fuel allocation applies additional-use rows without an arrival station
     reportingCurrency: "INR",
     apuUsage: [
       {
-        arrStn: "",
+        stn: "BOM",
         variant: "737",
         acftRegn: "VT-IJK",
         apuHours: 1.5,
@@ -1158,7 +1235,7 @@ test("apu fuel allocation applies additional-use rows without an arrival station
     ],
     ccyFuel: [
       {
-        station: "CCU",
+        station: "BOM",
         month: "04/26",
         kgPerLtr: 0.78,
         intoPlaneRate: 93000,

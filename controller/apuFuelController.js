@@ -5,7 +5,6 @@ const Flights = require("../model/flight");
 const CostConfig = require("../model/costConfigSchema");
 const {
   normalizeCostConfig,
-  getApuFuelPriceSourceFlight,
 } = require("../utils/costLogic");
 
 const toNumber = (value) => {
@@ -38,9 +37,13 @@ const isWithinRange = (targetDate, fromValue, toValue) => {
 
 const getFlightRegistration = (flight) => trimString(flight?.aircraft?.registration || flight?.acftRegn || flight?.registration);
 const getFlightArrStn = (flight) => normalizeValue(flight?.arrStn);
-const getFlightDepStn = (flight) => normalizeValue(flight?.depStn);
 const getFlightVariant = (flight) => normalizeValue(flight?.variant || flight?.acftType);
 const isAdditionalApuUseRow = (row) => normalizeValue(row?.addlnUse) === "Y";
+const getApuUsageStation = (row) => trimString(row?.stn ?? row?.arrStn);
+const getApuUsageHours = (row) => Number(row?.apuHrPerDay ?? row?.apuHours ?? row?.apuHr ?? 0);
+const getApuUsageConsumptionRate = (row) => Number(
+  row?.kgPerApuHr ?? row?.consumptionKgPerApuHr ?? row?.consumptionPerApuHour ?? 0
+);
 
 const scoreApuUsageRow = (row, flight) => {
   if (!isWithinRange(flight.date, row.fromDate, row.toDate)) return -1;
@@ -51,8 +54,9 @@ const scoreApuUsageRow = (row, flight) => {
   const flightArr = getFlightArrStn(flight);
   const flightVariant = getFlightVariant(flight);
   const flightRegn = getFlightRegistration(flight);
+  const additionalUse = isAdditionalApuUseRow(row);
 
-  if (rowArr && rowArr !== flightArr) return -1;
+  if (!additionalUse && rowArr && rowArr !== flightArr) return -1;
   if (rowVariant && rowVariant !== flightVariant) return -1;
   if (rowRegn && rowRegn !== flightRegn) return -1;
 
@@ -90,16 +94,17 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   if (!flightDate || Number.isNaN(flightDate.getTime())) return null;
 
   const apuUsage = pickBest(costConfig.apuUsage || [], (row) => scoreApuUsageRow(row, flight));
-  const priceSourceFlight = getApuFuelPriceSourceFlight(flight, flights, apuUsage || {});
+  const additionalUse = isAdditionalApuUseRow(apuUsage);
+  const apuStation = apuUsage ? getApuUsageStation(apuUsage) : trimString(flight?.arrStn || "");
+  const priceDate = additionalUse ? (apuUsage?.fromDate || apuUsage?.toDate || flightDate) : flightDate;
   const fuelPrice = pickBest(costConfig.ccyFuel || [], (row) => scoreFuelPriceRow(
     row,
-    getMonthKey(priceSourceFlight?.date || flightDate),
-    getFlightDepStn(priceSourceFlight || flight)
+    getMonthKey(priceDate),
+    normalizeValue(apuStation)
   ));
-  const additionalUse = isAdditionalApuUseRow(apuUsage);
 
-  const apuHr = apuUsage ? Number(apuUsage.apuHrPerDay || 0) : 0;
-  const consumptionKgPerApuHr = apuUsage ? Number(apuUsage.kgPerApuHr || 0) : 0;
+  const apuHr = apuUsage ? getApuUsageHours(apuUsage) : 0;
+  const consumptionKgPerApuHr = apuUsage ? getApuUsageConsumptionRate(apuUsage) : 0;
   const consumptionKg = apuHr * consumptionKgPerApuHr;
   const kgPerLtr = fuelPrice ? Number(fuelPrice.kgPerLtr || 0) : 0;
   const intoPlaneRate = fuelPrice ? Number(fuelPrice.intoPlaneRate || 0) : 0;
@@ -111,21 +116,22 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   return {
     rowKey: String(flight._id || `${flight.flight || ""}-${flightDate.toISOString()}`),
     date: flightDate,
-    stn: additionalUse ? "" : trimString(flight?.arrStn || ""),
+    stn: apuStation,
+    arrStn: apuStation,
     acftRegn: getFlightRegistration(flight),
     apun: trimString(flight?.apun || flight?.aircraft?.apun || ""),
     apuHr: roundToTwo(apuHr),
+    apuHrPerDay: roundToTwo(apuHr),
     consumptionKgPerApuHr: roundToTwo(consumptionKgPerApuHr),
+    kgPerApuHr: roundToTwo(consumptionKgPerApuHr),
     consumptionKg: roundToTwo(consumptionKg),
     consumptionLitres,
     costPerLtr,
     totalFuelCost,
     currency: trimString(fuelPrice?.ccy || apuUsage?.ccy || ""),
-    costSourceType: additionalUse
-      ? "LAST_DEP_STN_RCCY"
-      : (fuelPrice ? "DEP_STN_MONTH" : "UNMATCHED"),
-    costSourceStation: trimString(getFlightDepStn(priceSourceFlight || flight) || flight?.depStn || ""),
-    sourceFlightId: String((priceSourceFlight || flight)?._id || flight._id || ""),
+    costSourceType: fuelPrice ? "STN_MONTH" : "UNMATCHED",
+    costSourceStation: apuStation,
+    sourceFlightId: String(flight?._id || ""),
     remarks: hasMatch ? "" : "No matching APU usage or fuel price row found",
     monthKey: getMonthKey(flightDate),
   };
@@ -139,9 +145,9 @@ const buildGeneratedApuFuelRows = (flights = [], costConfig = {}) => {
 
 const normalizeApuFuelRow = (record, userId) => {
   const date = record?.date ? new Date(record.date) : null;
-  const apuHr = toNumber(record?.apuHr ?? record?.apuHours);
+  const apuHr = toNumber(record?.apuHr ?? record?.apuHrPerDay ?? record?.apuHours);
   const consumptionKgPerApuHr = toNumber(
-    record?.consumptionKgPerApuHr ?? record?.consumptionPerApuHr ?? record?.consumptionPerApuHour
+    record?.consumptionKgPerApuHr ?? record?.kgPerApuHr ?? record?.consumptionPerApuHr ?? record?.consumptionPerApuHour
   );
   const consumptionKg = toNumber(record?.consumptionKg) || (apuHr > 0 ? apuHr * consumptionKgPerApuHr : 0);
   const consumptionLitres = toNumber(record?.consumptionLitres);
@@ -158,20 +164,39 @@ const normalizeApuFuelRow = (record, userId) => {
     userId: String(userId),
     date: date && !Number.isNaN(date.getTime()) ? date : new Date(),
     stn,
+    arrStn: stn,
     acftRegn,
     apun,
     apuHr,
+    apuHrPerDay: apuHr,
     consumptionKgPerApuHr,
+    kgPerApuHr: consumptionKgPerApuHr,
     consumptionKg,
     consumptionLitres,
     costPerLtr,
     totalFuelCost,
     currency: trimString(record?.currency || record?.ccy || "INR") || "INR",
-    costSourceType: trimString(record?.costSourceType || (stn ? "ARR_STN" : "LAST_DEP_STN_RCCY")) || "ARR_STN",
+    costSourceType: trimString(record?.costSourceType || (stn ? "STN_MONTH" : "UNMATCHED")) || "STN_MONTH",
     costSourceStation: trimString(record?.costSourceStation || record?.depStnOfLastFlight || ""),
     sourceFlightId: trimString(record?.sourceFlightId || record?.flightId || ""),
     remarks: trimString(record?.remarks || record?.note || ""),
     monthKey,
+  };
+};
+
+const withApuFuelAliases = (record) => {
+  if (!record) return record;
+  const stn = trimString(record.stn ?? record.arrStn);
+  const apuHr = toNumber(record.apuHr ?? record.apuHrPerDay);
+  const consumptionKgPerApuHr = toNumber(record.consumptionKgPerApuHr ?? record.kgPerApuHr);
+  return {
+    ...record,
+    stn,
+    arrStn: trimString(record.arrStn || stn),
+    apuHr,
+    apuHrPerDay: toNumber(record.apuHrPerDay || apuHr),
+    consumptionKgPerApuHr,
+    kgPerApuHr: toNumber(record.kgPerApuHr || consumptionKgPerApuHr),
   };
 };
 
@@ -182,7 +207,7 @@ exports.getApuFuelCosts = async (req, res) => {
       .sort({ date: 1, createdAt: 1 })
       .lean();
 
-    res.status(200).json({ success: true, data: records });
+    res.status(200).json({ success: true, data: records.map(withApuFuelAliases) });
   } catch (error) {
     console.error("Error fetching APU fuel costs:", error);
     res.status(500).json({ success: false, message: "Failed to fetch APU fuel costs.", error: error.message });
@@ -220,7 +245,7 @@ exports.bulkSaveApuFuelCosts = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "APU fuel consumption & cost table saved successfully.",
-      data: savedRows,
+      data: savedRows.map(withApuFuelAliases),
     });
   } catch (error) {
     console.error("Error saving APU fuel costs:", error);
@@ -262,7 +287,7 @@ exports.rebuildApuFuelCosts = async (req, res) => {
       success: true,
       message: "APU fuel consumption & cost table rebuilt successfully.",
       count: savedRows.length,
-      data: savedRows,
+      data: savedRows.map(withApuFuelAliases),
     });
   } catch (error) {
     console.error("Error rebuilding APU fuel costs:", error);

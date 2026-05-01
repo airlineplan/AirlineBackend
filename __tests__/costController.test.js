@@ -198,6 +198,9 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.deepEqual(data.navMtowTiers, [73000, 77000]);
   assert.equal(data.allocationTable[0].costCode, "APUFUELCOST");
   assert.equal(data.allocationTable[0].basis, "BH");
+  assert.equal(data.apuUsage[0].stn, "BOM");
+  assert.equal(data.apuUsage[0].apuHrPerDay, 0.75);
+  assert.equal(data.apuUsage[0].kgPerApuHr, 255);
   assert.equal(data.leasedReserve[0].mrAccId, "MR-1");
   assert.equal(data.transitMx[0].sn, "5825");
   assert.equal(data.otherDoc[0].label, "Doc");
@@ -300,10 +303,13 @@ test("cost page controller computes representative cost inputs into flight cost 
       fuelConsum: [{ sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 1000 }],
       fuelConsumIndex: [{ acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1 }],
       plfEffect: [{ sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p95: 1 }],
-      ccyFuel: [{ station: "CCU", month: "04/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" }],
+      ccyFuel: [
+        { station: "CCU", month: "04/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" },
+        { station: "BOM", month: "04/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" },
+      ],
       apuUsage: [
         { arrStn: "BOM", acftRegn: "VT-ABC", apuHours: 1, consumptionPerApuHour: 100, ccy: "INR" },
-        { addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 1, consumptionPerApuHour: 50, ccy: "INR" },
+        { arrStn: "BOM", addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 1, consumptionPerApuHour: 50, ccy: "INR" },
       ],
       leasedReserve: [{ acftRegn: "VT-ABC", sn: "5825", setRate: 10, driver: "FH", asOnDate: "2026-01-01", ccy: "INR" }],
       transitMx: [{ depStn: "CCU", sn: "5825", costPerDeparture: 20, ccy: "INR" }],

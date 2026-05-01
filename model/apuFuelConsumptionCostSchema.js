@@ -22,6 +22,12 @@ const apuFuelConsumptionCostSchema = new Schema({
     default: "",
     index: true,
   },
+  arrStn: {
+    type: String,
+    trim: true,
+    default: "",
+    index: true,
+  },
   acftRegn: {
     type: String,
     trim: true,
@@ -38,7 +44,15 @@ const apuFuelConsumptionCostSchema = new Schema({
     type: Number,
     default: 0,
   },
+  apuHrPerDay: {
+    type: Number,
+    default: 0,
+  },
   consumptionKgPerApuHr: {
+    type: Number,
+    default: 0,
+  },
+  kgPerApuHr: {
     type: Number,
     default: 0,
   },

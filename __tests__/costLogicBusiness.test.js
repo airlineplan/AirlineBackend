@@ -69,10 +69,11 @@ test("PLF consumption supports additional percentage bands beyond the default se
   assert.equal(row.engineFuelCost, 1080);
 });
 
-test("direct APU fuel uses arrival station price with departure fallback", () => {
+test("direct APU fuel uses the APU usage station fuel price", () => {
   const row = computeFlightCosts(baseFlight, {
     ...baseConfig,
     apuUsage: [{ arrStn: "BOM", acftRegn: "VT-ABC", apuHours: 0.75, consumptionPerApuHour: 255 }],
+    ccyFuel: [{ station: "BOM", month: "04/26", kgPerLtr: 0.78, intoPlaneRate: 92500, ccy: "INR" }],
   });
   assert.equal(row.apuFuelConsumptionKg, 191.25);
   approx(row.apuFuelLitres, 191.25 / 0.78);
@@ -87,7 +88,8 @@ test("additional APU usage allocates by configured departures and preserves pool
   const rows = computeFlightCostsBatch(flights, {
     ...baseConfig,
     allocationTable: [{ costCode: "APUFUELCOST", basis: "DEPARTURES" }],
-    apuUsage: [{ addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 2, consumptionPerApuHour: 280 }],
+    ccyFuel: [{ station: "BOM", month: "04/26", kgPerLtr: 0.78, intoPlaneRate: 92500, ccy: "INR" }],
+    apuUsage: [{ arrStn: "BOM", addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 2, consumptionPerApuHour: 280 }],
   });
   const expectedPool = (560 / 0.78 / 1000) * 92500;
   approx(rows.reduce((sum, row) => sum + row.apuFuelCostAllocated, 0), expectedPool);
