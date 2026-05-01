@@ -19,6 +19,10 @@ const maintenanceCalendarSchema = new Schema({
     eDsr: { type: Number },
     downDays: { type: Number, default: 0 },
     avgDownda: { type: Number, default: 0 },
+    lastOccurre: { type: Date },
+    nextEstima: { type: Date },
+    occurrence: { type: Number, default: 0 },
+    soTsr: { type: Number },
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true }
 }, { timestamps: true });
 

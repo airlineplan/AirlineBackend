@@ -24,6 +24,42 @@ const buildResetGroupKey = ({ msnEsn, pn, snBn } = {}) => [
     String(snBn || "").trim().toUpperCase()
 ].join("|");
 
+const calendarMetricGroups = {
+    sinceNew: [
+        { limitKey: "eTsn", valueKey: "tsn" },
+        { limitKey: "eCsn", valueKey: "csn" },
+        { limitKey: "eDsn", valueKey: "dsn" }
+    ],
+    restoration: [
+        { limitKey: "eTso", valueKey: "tsoTsr" },
+        { limitKey: "eCso", valueKey: "csoCsr" },
+        { limitKey: "eDso", valueKey: "dsoDsr" }
+    ],
+    replacement: [
+        { limitKey: "eTsr", valueKey: "tsRplmt" },
+        { limitKey: "eCsr", valueKey: "csRplmt" },
+        { limitKey: "eDsr", valueKey: "dsRplmt" }
+    ]
+};
+
+const hasCalendarLimitHit = (cal, projectedValues, metricGroup) => metricGroup.some(({ limitKey, valueKey }) => {
+    const limit = Number(cal?.[limitKey]);
+    const projected = projectedValues?.[valueKey];
+    return Number.isFinite(limit) && limit > 0 && projected !== null && projected !== undefined && projected >= limit;
+});
+
+const getCalendarDowntimeDays = (cal) => {
+    const downDays = Number(cal?.downDays);
+    if (Number.isFinite(downDays) && downDays > 0) return Math.ceil(downDays);
+
+    const avgDowndays = Number(cal?.avgDownda);
+    if (Number.isFinite(avgDowndays) && avgDowndays > 0) return Math.ceil(avgDowndays);
+
+    return 0;
+};
+
+const formatCalendarDate = (value) => value ? moment.utc(value).format("YYYY-MM-DD") : "";
+
 const normalizeResetGroup = ({ msnEsn, pn, snBn } = {}) => ({
     msnEsn: String(msnEsn || "").trim(),
     pn: String(pn || "").trim(),
@@ -181,6 +217,37 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
         ]);
 
     const totalOps = [];
+    const calendarEventState = new Map();
+    const calendarIdsTouched = new Set();
+
+    const recordCalendarEvent = ({ cal, date, triggeredGroups, projectedValues }) => {
+        const key = String(cal._id);
+        const previous = calendarEventState.get(key) || {
+            id: cal._id,
+            occurrence: 0,
+            lastOccurre: null,
+            nextEstima: null,
+            soTsr: null,
+            triggeredSinceNew: false
+        };
+
+        const eventDate = moment.utc(date).startOf("day");
+        const occurrence = previous.occurrence + 1;
+        const soTsr = triggeredGroups.includes("replacement")
+            ? projectedValues.tsRplmt
+            : triggeredGroups.includes("restoration")
+                ? projectedValues.tsoTsr
+                : projectedValues.tsn;
+
+        calendarEventState.set(key, {
+            ...previous,
+            occurrence,
+            lastOccurre: eventDate.toDate(),
+            nextEstima: previous.nextEstima || eventDate.toDate(),
+            soTsr: Number.isFinite(Number(soTsr)) ? Number(soTsr) : previous.soTsr,
+            triggeredSinceNew: previous.triggeredSinceNew || triggeredGroups.includes("sinceNew")
+        });
+    };
 
     for (const group of resetGroups) {
         const { msnEsn, pn, snBn } = group._id;
@@ -303,7 +370,12 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             let currentCsr = currentReset.csRplmt;
             let currentDsr = currentReset.dsRplmt;
 
-            const assetCalendars = allCalendars.filter(c => String(c.calMsn) === String(msnEsn) && String(c.snBn) === String(snBn));
+            const assetCalendars = allCalendars.filter(c =>
+                String(c.calMsn) === String(msnEsn) &&
+                String(c.calPn) === String(pn) &&
+                String(c.snBn) === String(snBn)
+            );
+            assetCalendars.forEach(c => calendarIdsTouched.add(String(c._id)));
             let inMaintenanceUntil = null;
 
             while (currDate.isSameOrBefore(segmentEnd)) {
@@ -367,32 +439,49 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 const projectedCsr = currentCsr !== null ? currentCsr + cycleUsage : null;
                 const projectedDsr = currentDsr !== null ? currentDsr + 1 : null;
 
-                let triggerHit = false;
+                const projectedValues = {
+                    tsn: projectedTsn,
+                    csn: projectedCsn,
+                    dsn: projectedDsn,
+                    tsoTsr: projectedTso,
+                    csoCsr: projectedCso,
+                    dsoDsr: projectedDso,
+                    tsRplmt: projectedTsr,
+                    csRplmt: projectedCsr,
+                    dsRplmt: projectedDsr
+                };
+
+                const triggeredCalendars = [];
                 let downDaysToApply = 0;
 
                 for (const cal of assetCalendars) {
-                    if (
-                        (cal.eTsn && projectedTsn !== null && projectedTsn >= cal.eTsn) ||
-                        (cal.eCsn && projectedCsn !== null && projectedCsn >= cal.eCsn) ||
-                        (cal.eDsn && projectedDsn !== null && projectedDsn >= cal.eDsn) ||
-                        (cal.eTso && projectedTso !== null && projectedTso >= cal.eTso) ||
-                        (cal.eCso && projectedCso !== null && projectedCso >= cal.eCso) ||
-                        (cal.eDso && projectedDso !== null && projectedDso >= cal.eDso) ||
-                        (cal.eTsr && projectedTsr !== null && projectedTsr >= cal.eTsr) ||
-                        (cal.eCsr && projectedCsr !== null && projectedCsr >= cal.eCsr) ||
-                        (cal.eDsr && projectedDsr !== null && projectedDsr >= cal.eDsr)
-                    ) {
-                        triggerHit = true;
-                        downDaysToApply = Math.max(downDaysToApply, cal.downDays || 0);
+                    const state = calendarEventState.get(String(cal._id));
+                    const triggeredGroups = [];
+
+                    if (!state?.triggeredSinceNew && hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.sinceNew)) {
+                        triggeredGroups.push("sinceNew");
+                    }
+
+                    if (hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.restoration)) {
+                        triggeredGroups.push("restoration");
+                    }
+
+                    if (hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.replacement)) {
+                        triggeredGroups.push("replacement");
+                    }
+
+                    if (triggeredGroups.length > 0) {
+                        triggeredCalendars.push({ cal, triggeredGroups });
+                        downDaysToApply = Math.max(downDaysToApply, getCalendarDowntimeDays(cal));
                     }
                 }
 
-                if (triggerHit) {
+                if (triggeredCalendars.length > 0) {
                     await Assignment.updateMany({
                         userId: String(userId),
                         date: {
                             $gte: currDate.toDate(),
-                        $lt: moment.utc(currDate).endOf("day").toDate()
+                            $lt: moment.utc(currDate).endOf("day").toDate()
                         },
                         "aircraft.msn": Number(effectiveMsn)
                     }, {
@@ -407,6 +496,27 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     if (currentDsn !== null) currentDsn += 1;
                     if (currentDso !== null) currentDso += 1;
                     if (currentDsr !== null) currentDsr += 1;
+
+                    for (const { cal, triggeredGroups } of triggeredCalendars) {
+                        recordCalendarEvent({
+                            cal,
+                            date: currDate,
+                            triggeredGroups,
+                            projectedValues
+                        });
+
+                        if (triggeredGroups.includes("restoration")) {
+                            currentTso = 0;
+                            currentCso = 0;
+                            currentDso = 0;
+                        }
+
+                        if (triggeredGroups.includes("replacement")) {
+                            currentTsr = 0;
+                            currentCsr = 0;
+                            currentDsr = 0;
+                        }
+                    }
 
                     totalOps.push({
                         updateOne: {
@@ -474,6 +584,32 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             const chunk = totalOps.slice(i, i + chunkSize);
             await Utilisation.bulkWrite(chunk, { ordered: false });
         }
+    }
+
+    if (calendarIdsTouched.size > 0) {
+        await MaintenanceCalendar.bulkWrite([...calendarIdsTouched].map(calendarId => {
+            const event = calendarEventState.get(calendarId) || {
+                id: calendarId,
+                lastOccurre: null,
+                nextEstima: null,
+                occurrence: 0,
+                soTsr: null
+            };
+
+            return {
+                updateOne: {
+                    filter: { _id: event.id, userId: String(userId) },
+                    update: {
+                        $set: {
+                            lastOccurre: event.lastOccurre,
+                            nextEstima: event.nextEstima,
+                            occurrence: event.occurrence,
+                            soTsr: event.soTsr
+                        }
+                    }
+                }
+            };
+        }));
     }
 
     return {
@@ -1452,7 +1588,11 @@ exports.getCalendar = async (req, res) => {
             eCsr: record.eCsr || "",
             eDsr: record.eDsr || "",
             downDays: record.downDays || 0,
-            avgDownda: record.avgDownda || 0
+            avgDownda: record.avgDownda || 0,
+            lastOccurre: formatCalendarDate(record.lastOccurre),
+            nextEstima: formatCalendarDate(record.nextEstima),
+            occurrence: record.occurrence || "",
+            soTsr: record.soTsr ?? ""
         }));
         res.status(200).json({ success: true, data: formattedRecords });
     } catch (error) {
@@ -1505,6 +1645,10 @@ exports.bulkSaveCalendar = async (req, res) => {
                             eDsr: parseNum(record.eDsr),
                             downDays: parseNum(record.downDays),
                             avgDownda: parseNum(record.avgDownda),
+                            lastOccurre: record.lastOccurre ? moment.utc(record.lastOccurre, moment.ISO_8601, true).startOf("day").toDate() : null,
+                            nextEstima: record.nextEstima ? moment.utc(record.nextEstima, moment.ISO_8601, true).startOf("day").toDate() : null,
+                            occurrence: parseNum(record.occurrence),
+                            soTsr: parseNum(record.soTsr),
                             userId: userId
                         }
                     },
