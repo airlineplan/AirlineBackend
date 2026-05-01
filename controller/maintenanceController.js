@@ -83,10 +83,18 @@ const getFlightDateBounds = async ({ userId } = {}) => {
     return userBounds || null;
 };
 
+const onwingFields = ["pos1Esn", "pos2Esn", "apun"];
+
+const onwingRowHasAsset = (row, assetKey) => {
+    const normalizedAssetKey = String(assetKey || "").trim();
+    if (!row || !normalizedAssetKey) return false;
+    return onwingFields.some(field => String(row[field] || "").trim() === normalizedAssetKey);
+};
+
 const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     const assetKey = String(msnEsn || "").trim();
     const lookupDate = date ? moment.utc(date).endOf("day").toDate() : null;
-    const ownershipFilter = {
+    const historicalOwnershipFilter = {
         $or: [
             { pos1Esn: assetKey },
             { pos2Esn: assetKey },
@@ -95,16 +103,30 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     };
 
     if (userId) {
-        ownershipFilter.userId = String(userId);
+        historicalOwnershipFilter.userId = String(userId);
     }
 
-    if (lookupDate) {
-        ownershipFilter.date = { $lte: lookupDate };
-    }
+    const candidateMsns = assetKey
+        ? await AircraftOnwing.distinct("msn", historicalOwnershipFilter)
+        : [];
 
-    const owningAircraft = assetKey
-        ? await AircraftOnwing.findOne(ownershipFilter).sort({ date: -1 }).lean()
-        : null;
+    const matchingConfigs = [];
+    for (const candidateMsn of candidateMsns) {
+        const latestConfigFilter = { msn: candidateMsn };
+        if (userId) {
+            latestConfigFilter.userId = String(userId);
+        }
+        if (lookupDate) {
+            latestConfigFilter.date = { $lte: lookupDate };
+        }
+
+        const latestConfig = await AircraftOnwing.findOne(latestConfigFilter).sort({ date: -1 }).lean();
+        if (onwingRowHasAsset(latestConfig, assetKey)) {
+            matchingConfigs.push(latestConfig);
+        }
+    }
+    matchingConfigs.sort((a, b) => moment.utc(b.date).valueOf() - moment.utc(a.date).valueOf());
+    const owningAircraft = matchingConfigs[0] || null;
 
     const effectiveMsn = String(owningAircraft?.msn || assetKey).trim();
     const fleetFilter = effectiveMsn ? { sn: effectiveMsn } : {};
@@ -297,10 +319,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
 
                 while (backfillCursor.isAfter(startBoundaryDate)) {
                     const targetDate = moment.utc(backfillCursor).subtract(1, "day").startOf("day");
+                    const backfillUtilizationContext = await getEffectiveUtilisationContext({
+                        userId,
+                        msnEsn,
+                        date: backfillCursor
+                    });
 
                     const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
                         userId,
-                        effectiveMsn,
+                        effectiveMsn: backfillUtilizationContext.effectiveMsn || msnEsn,
                         date: backfillCursor,
                         metric: currentReset.timeMetric,
                         assumptions: utilisationAssumptions
@@ -379,6 +406,13 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             let inMaintenanceUntil = null;
 
             while (currDate.isSameOrBefore(segmentEnd)) {
+                const currentUtilizationContext = await getEffectiveUtilisationContext({
+                    userId,
+                    msnEsn,
+                    date: currDate
+                });
+                const currentEffectiveMsn = currentUtilizationContext.effectiveMsn || msnEsn;
+
                 if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
                     await Assignment.updateMany({
                         userId: String(userId),
@@ -386,7 +420,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             $gte: currDate.toDate(),
                             $lt: moment.utc(currDate).endOf("day").toDate()
                         },
-                        "aircraft.msn": Number(effectiveMsn)
+                        "aircraft.msn": Number(currentEffectiveMsn)
                     }, {
                         $unset: { "aircraft.msn": "", "aircraft.registration": "" },
                         $set: { removedReason: "GROUND_DAY_CONFLICT" }
@@ -421,7 +455,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
 
                 const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
                     userId,
-                    effectiveMsn,
+                    effectiveMsn: currentEffectiveMsn,
                     date: currDate,
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
@@ -483,7 +517,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             $gte: currDate.toDate(),
                             $lt: moment.utc(currDate).endOf("day").toDate()
                         },
-                        "aircraft.msn": Number(effectiveMsn)
+                        "aircraft.msn": Number(currentEffectiveMsn)
                     }, {
                         $unset: { "aircraft.msn": "", "aircraft.registration": "" },
                         $set: { removedReason: "GROUND_DAY_CONFLICT" }
@@ -1134,6 +1168,11 @@ exports.bulkSaveRotables = async (req, res) => {
         const onwingOps = [];
 
         for (const record of rotablesData) {
+            const movementDate = record.date
+                ? moment.utc(record.date, moment.ISO_8601, true).startOf("day")
+                : moment.utc().startOf("day");
+            const persistedMovementDate = movementDate.isValid() ? movementDate.toDate() : moment.utc().startOf("day").toDate();
+
             bulkOperations.push({
                 updateOne: {
                     filter: {
@@ -1141,12 +1180,12 @@ exports.bulkSaveRotables = async (req, res) => {
                         msn: record.msn,
                         pn: record.pn,
                         position: record.position,
-                        date: record.date ? new Date(record.date) : new Date()
+                        date: persistedMovementDate
                     },
                     update: {
                         $set: {
                             label: record.label,
-                            date: record.date ? new Date(record.date) : new Date(),
+                            date: persistedMovementDate,
                             pn: record.pn,
                             msn: record.msn,
                             acftReg: record.acftRegn,
@@ -1162,16 +1201,29 @@ exports.bulkSaveRotables = async (req, res) => {
 
             // Update AircraftOnwing if an Engine is assigned to Position #1 or #2
             if ((record.position === "#1" || record.position === "#2") && record.date) {
-                const nextDay = new Date(record.date);
-                if (!isNaN(nextDay.getTime())) {
-                    nextDay.setDate(nextDay.getDate() + 1);
+                const effectiveDate = moment.utc(record.date, moment.ISO_8601, true).add(1, "day").startOf("day").toDate();
+                if (!isNaN(effectiveDate.getTime())) {
 
                     const updateField = record.position === "#1" ? "pos1Esn" : "pos2Esn";
+                    const priorConfig = await AircraftOnwing.findOne({
+                        userId: String(userId),
+                        msn: record.msn,
+                        date: { $lt: effectiveDate }
+                    }).sort({ date: -1 }).lean();
+                    const effectiveSnapshot = {
+                        userId: String(userId),
+                        msn: record.msn,
+                        date: effectiveDate,
+                        pos1Esn: priorConfig?.pos1Esn || "",
+                        pos2Esn: priorConfig?.pos2Esn || "",
+                        apun: priorConfig?.apun || "",
+                        [updateField]: record.installedSN
+                    };
 
                     // 1. Update all future chronological configurations for this MSN
                     onwingOps.push({
                         updateMany: {
-                            filter: { userId: String(userId), msn: record.msn, date: { $gte: nextDay } },
+                            filter: { userId: String(userId), msn: record.msn, date: { $gte: effectiveDate } },
                             update: {
                                 $set: {
                                     [updateField]: record.installedSN
@@ -1180,17 +1232,12 @@ exports.bulkSaveRotables = async (req, res) => {
                         }
                     });
 
-                    // 2. Explicitly log the new configuration timeline starting on nextDay
+                    // 2. Explicitly log the new configuration timeline starting on the effective date
                     onwingOps.push({
                         updateOne: {
-                            filter: { userId: String(userId), msn: record.msn, date: nextDay },
+                            filter: { userId: String(userId), msn: record.msn, date: effectiveDate },
                             update: {
-                                $set: {
-                                    userId: String(userId),
-                                    msn: record.msn,
-                                    date: nextDay,
-                                    [updateField]: record.installedSN
-                                }
+                                $set: effectiveSnapshot
                             },
                             upsert: true
                         }

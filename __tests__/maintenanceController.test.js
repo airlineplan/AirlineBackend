@@ -1306,3 +1306,132 @@ test("saving rotable movement scopes on-wing updates to the current user", async
   assert.equal(userOnwing?.pos2Esn, "685782");
   assert.equal(otherOnwing?.pos2Esn, "OLD-OTHER");
 });
+
+test("maintenance compute switches engine utilisation after rotable movement", async () => {
+  const resetDate = utcDate(2026, 4, 15);
+  const movementDate = utcDate(2026, 5, 10);
+  const effectiveDate = utcDate(2026, 5, 11);
+
+  await seedFlightDays([resetDate, effectiveDate]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 12, 31),
+  });
+
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 1),
+    msn: "5340",
+    pos1Esn: "635799",
+    pos2Esn: "635800",
+  });
+
+  await MaintenanceReset.insertMany([
+    {
+      userId: USER_ID,
+      date: resetDate,
+      msnEsn: "5340",
+      pn: "A320",
+      snBn: "5340",
+      tsn: 100,
+      csn: 40,
+      dsn: 30,
+      timeMetric: "BH",
+    },
+    {
+      userId: USER_ID,
+      date: resetDate,
+      msnEsn: "635799",
+      pn: "CFM56",
+      snBn: "635799",
+      tsn: 100,
+      csn: 40,
+      dsn: 31,
+      tsoTsr: 80,
+      csoCsr: 20,
+      dsoDsr: 21,
+      tsRplmt: 90,
+      csRplmt: 25,
+      dsRplmt: 26,
+      timeMetric: "BH",
+    },
+    {
+      userId: USER_ID,
+      date: resetDate,
+      msnEsn: "721576",
+      pn: "CFM56",
+      snBn: "721576",
+      tsn: 5000,
+      csn: 3000,
+      dsn: 1000,
+      tsoTsr: 2000,
+      csoCsr: 1000,
+      dsoDsr: 500,
+      tsRplmt: 2500,
+      csRplmt: 1500,
+      dsRplmt: 700,
+      timeMetric: "BH",
+    },
+  ]);
+
+  await seedAssignment({
+    date: effectiveDate,
+    flightNumber: "FL11",
+    msn: 5340,
+    registration: "VT-AAA",
+    bh: 4,
+  });
+
+  const saveRotableRes = createMockResponse();
+  await maintenanceController.bulkSaveRotables({
+    user: { id: USER_ID },
+    body: {
+      rotablesData: [
+        {
+          label: "Engine change",
+          date: movementDate.toISOString().slice(0, 10),
+          pn: "CFM56",
+          msn: "5340",
+          acftRegn: "VT-AAA",
+          position: "#1",
+          removedSN: "635799",
+          installedSN: "721576",
+        },
+      ],
+    },
+  }, saveRotableRes);
+
+  const computeRes = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, computeRes);
+
+  const removedEngineUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: effectiveDate,
+    msnEsn: "635799",
+    pn: "CFM56",
+    snBn: "635799",
+  }).lean();
+  const installedEngineUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: effectiveDate,
+    msnEsn: "721576",
+    pn: "CFM56",
+    snBn: "721576",
+  }).lean();
+  const effectiveOnwing = await AircraftOnwing.findOne({
+    userId: USER_ID,
+    msn: "5340",
+    date: effectiveDate,
+  }).lean();
+
+  assert.equal(saveRotableRes.statusCode, 200);
+  assert.equal(computeRes.statusCode, 200);
+  assert.equal(effectiveOnwing?.pos1Esn, "721576");
+  assert.equal(effectiveOnwing?.pos2Esn, "635800");
+  assert.equal(removedEngineUtil?.tsn, 100);
+  assert.equal(removedEngineUtil?.csn, 40);
+  assert.equal(installedEngineUtil?.tsn, 5004);
+  assert.equal(installedEngineUtil?.csn, 3001);
+});
