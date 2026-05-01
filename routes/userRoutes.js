@@ -68,6 +68,12 @@ user.get("/sectorsbyid/:id", sectorController.singleSector);
 user.post("/admin-login", jsonParser, authController.AdminLogin);
 user.post("/user-signup", jsonParser, userLogin.createUser);
 user.post("/user-login", jsonParser, userLogin.loginUser);
+user.get("/auth/verify", verifyToken, (req, res) => {
+  return res.status(200).json({
+    valid: true,
+    user: req.user,
+  });
+});
 user.post("/send-email", jsonParser, userLogin.sendEmail);
 user.post("/send-contactEmail", jsonParser, userLogin.sendContactEmail);
 user.post("/change-passowrd", jsonParser, userLogin.changePassword);
