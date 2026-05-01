@@ -12,6 +12,7 @@ const RevenueConfig = require("../model/revenueConfigSchema");
 const Flight = require("../model/flight");
 const Fleet = require("../model/fleet");
 const costController = require("../controller/costController");
+const pooController = require("../controller/pooController");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
 
@@ -194,6 +195,34 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.otherDoc[0].label, "Doc");
 });
 
+test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {
+  const payload = {
+    reportingCurrency: "inr",
+    currencyCodes: ["usd", "INR", "aed", "USD"],
+    fxRates: [
+      { pair: "USD/INR", dateKey: "2026-04-16", rate: 83.25 },
+      { pair: "AED/INR", dateKey: "2026-04-16", rate: 22.68 },
+    ],
+  };
+
+  const saveRes = createMockResponse();
+  await pooController.saveRevenueConfig({ user: { id: USER_ID }, body: payload }, saveRes);
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(saveRes.body.success, true);
+  assert.equal(saveRes.body.data.reportingCurrency, "INR");
+  assert.deepEqual(saveRes.body.data.currencyCodes, ["INR", "USD", "AED"]);
+  assert.deepEqual(saveRes.body.data.fxRates, payload.fxRates);
+
+  const loadRes = createMockResponse();
+  await pooController.getRevenueConfig({ user: { id: USER_ID } }, loadRes);
+
+  assert.equal(loadRes.statusCode, 200);
+  assert.equal(loadRes.body.data.reportingCurrency, "INR");
+  assert.deepEqual(loadRes.body.data.currencyCodes, ["INR", "USD", "AED"]);
+  assert.deepEqual(loadRes.body.data.fxRates, payload.fxRates);
+});
+
 test("cost page controller computes representative cost inputs into flight cost fields", async () => {
   await Promise.all([
     RevenueConfig.create({ userId: USER_ID, reportingCurrency: "INR" }),
@@ -259,6 +288,7 @@ test("cost page controller computes representative cost inputs into flight cost 
   assert.equal(res.body.flights.length, 1);
 
   const [flight] = res.body.flights;
+  assert.equal(flight.reportingCurrency, "INR");
   assert.equal(flight.engineFuelConsumptionKg, 1000);
   assert.equal(flight.engineFuelCost, 1000);
   assert.equal(flight.apuFuelCostDirect, 100);
