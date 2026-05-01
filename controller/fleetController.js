@@ -25,7 +25,7 @@ const isTitledComponentAsset = (asset = {}) =>
     ["Engine", "APU"].includes(asset.category) &&
     Boolean(String(asset.titled || "").trim());
 const shouldBlankOwnership = (asset = {}) =>
-    isTitledComponentAsset(asset);
+    isTitledComponentAsset(asset) && !isSpareComponentAsset(asset);
 const createMetricKey = (category, value) => {
     const normalized =
         category === "APU" ? normalizeApuKey(value) : normalizeNumericAssetKey(value);
