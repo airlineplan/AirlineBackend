@@ -313,6 +313,13 @@ function normalizeRevenueConfig(config = {}) {
     };
 }
 
+function mergeRevenueCurrencyCodes(reportingCurrency, ...currencyCodeGroups) {
+    return [...new Set([
+        normalizeCurrencyCode(reportingCurrency),
+        ...currencyCodeGroups.flatMap((group) => Array.isArray(group) ? group : []),
+    ].map(normalizeCurrencyCode).filter(Boolean))];
+}
+
 function buildFxRateMap(fxRates = []) {
     const map = new Map();
     fxRates.forEach((row) => {
@@ -2574,7 +2581,7 @@ exports.saveReportingCurrency = async (req, res) => {
         const payload = normalizeRevenueConfig({
             ...current,
             reportingCurrency,
-            currencyCodes: [...new Set([reportingCurrency, ...current.currencyCodes])],
+            currencyCodes: mergeRevenueCurrencyCodes(reportingCurrency, current.currencyCodes, req.body?.currencyCodes),
             fxRates: Array.isArray(req.body?.fxRates) ? req.body.fxRates : current.fxRates,
         });
         const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });
@@ -2590,8 +2597,11 @@ exports.saveFxRates = async (req, res) => {
     try {
         const userId = req.user.id;
         const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
+        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "USD";
         const payload = normalizeRevenueConfig({
             ...current,
+            reportingCurrency,
+            currencyCodes: mergeRevenueCurrencyCodes(reportingCurrency, current.currencyCodes, req.body?.currencyCodes),
             fxRates: Array.isArray(req.body?.fxRates) ? req.body.fxRates : [],
         });
         const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });
