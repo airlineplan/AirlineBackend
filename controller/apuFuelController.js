@@ -45,7 +45,7 @@ const isAdditionalApuUseRow = (row) => normalizeValue(row?.addlnUse) === "Y";
 const scoreApuUsageRow = (row, flight) => {
   if (!isWithinRange(flight.date, row.fromDate, row.toDate)) return -1;
 
-  const rowArr = normalizeValue(row.arrStn);
+  const rowArr = normalizeValue(row.stn ?? row.arrStn);
   const rowVariant = normalizeValue(row.variant);
   const rowRegn = normalizeValue(row.acftRegn);
   const flightArr = getFlightArrStn(flight);
@@ -98,8 +98,8 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   ));
   const additionalUse = isAdditionalApuUseRow(apuUsage);
 
-  const apuHr = apuUsage ? Number(apuUsage.apuHours || 0) : 0;
-  const consumptionKgPerApuHr = apuUsage ? Number(apuUsage.consumptionPerApuHour || 0) : 0;
+  const apuHr = apuUsage ? Number(apuUsage.apuHrPerDay || 0) : 0;
+  const consumptionKgPerApuHr = apuUsage ? Number(apuUsage.kgPerApuHr || 0) : 0;
   const consumptionKg = apuHr * consumptionKgPerApuHr;
   const kgPerLtr = fuelPrice ? Number(fuelPrice.kgPerLtr || 0) : 0;
   const intoPlaneRate = fuelPrice ? Number(fuelPrice.intoPlaneRate || 0) : 0;
@@ -111,7 +111,7 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   return {
     rowKey: String(flight._id || `${flight.flight || ""}-${flightDate.toISOString()}`),
     date: flightDate,
-    arrStn: additionalUse ? "" : trimString(flight?.arrStn || ""),
+    stn: additionalUse ? "" : trimString(flight?.arrStn || ""),
     acftRegn: getFlightRegistration(flight),
     apun: trimString(flight?.apun || flight?.aircraft?.apun || ""),
     apuHr: roundToTwo(apuHr),
@@ -148,7 +148,7 @@ const normalizeApuFuelRow = (record, userId) => {
   const costPerLtr = toNumber(record?.costPerLtr ?? record?.costLtr);
   const totalFuelCost = toNumber(record?.totalFuelCost) || (consumptionLitres > 0 ? consumptionLitres * costPerLtr : 0);
   const rowKey = trimString(record?.rowKey || record?._id || record?.id || new mongoose.Types.ObjectId().toHexString());
-  const arrStn = trimString(record?.arrStn);
+  const stn = trimString(record?.stn ?? record?.arrStn);
   const acftRegn = trimString(record?.acftRegn);
   const apun = trimString(record?.apun);
   const monthKey = date && !Number.isNaN(date.getTime()) ? moment.utc(date).format("YYYY-MM") : "";
@@ -157,7 +157,7 @@ const normalizeApuFuelRow = (record, userId) => {
     rowKey,
     userId: String(userId),
     date: date && !Number.isNaN(date.getTime()) ? date : new Date(),
-    arrStn,
+    stn,
     acftRegn,
     apun,
     apuHr,
@@ -167,7 +167,7 @@ const normalizeApuFuelRow = (record, userId) => {
     costPerLtr,
     totalFuelCost,
     currency: trimString(record?.currency || record?.ccy || "INR") || "INR",
-    costSourceType: trimString(record?.costSourceType || (arrStn ? "ARR_STN" : "LAST_DEP_STN_RCCY")) || "ARR_STN",
+    costSourceType: trimString(record?.costSourceType || (stn ? "ARR_STN" : "LAST_DEP_STN_RCCY")) || "ARR_STN",
     costSourceStation: trimString(record?.costSourceStation || record?.depStnOfLastFlight || ""),
     sourceFlightId: trimString(record?.sourceFlightId || record?.flightId || ""),
     remarks: trimString(record?.remarks || record?.note || ""),

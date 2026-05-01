@@ -16,7 +16,7 @@ const apuFuelConsumptionCostSchema = new Schema({
     required: true,
     index: true,
   },
-  arrStn: {
+  stn: {
     type: String,
     trim: true,
     default: "",
