@@ -40,7 +40,7 @@ const getFlightRegistration = (flight) => trimString(flight?.aircraft?.registrat
 const getFlightArrStn = (flight) => normalizeValue(flight?.arrStn);
 const getFlightDepStn = (flight) => normalizeValue(flight?.depStn);
 const getFlightVariant = (flight) => normalizeValue(flight?.variant || flight?.acftType);
-const isAdditionalApuUseRow = (row = {}) => normalizeValue(row.addlnUse) === "Y";
+const isAdditionalApuUseRow = (row) => normalizeValue(row?.addlnUse) === "Y";
 
 const scoreApuUsageRow = (row, flight) => {
   if (!isWithinRange(flight.date, row.fromDate, row.toDate)) return -1;

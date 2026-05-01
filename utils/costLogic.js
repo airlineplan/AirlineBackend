@@ -336,46 +336,42 @@ const buildLegacyMonthRecords = (row, valueKeys = []) => {
 };
 
 const buildThresholdMap = (row) => {
-  const thresholds = [];
-  const directPairs = [
-    ["80", ["p80", "t80", "threshold80"]],
-    ["90", ["p90", "t90", "threshold90"]],
-    ["95", ["p95", "t95", "threshold95"]],
-    ["98", ["p98", "t98", "threshold98"]],
-    ["100", ["p100", "t100", "threshold100"]],
-    ["75", ["p75", "t75", "threshold75"]],
-    ["60", ["p60", "t60", "threshold60"]],
-    ["50", ["p50", "t50", "threshold50"]],
-  ];
-
-  directPairs.forEach(([threshold, keys]) => {
-    const value = pick(row, keys);
-    if (value !== "") thresholds.push({ threshold: Number(threshold), factor: toNumber(value) });
-  });
-
-  Object.entries(row || {}).forEach(([key, value]) => {
-    const match = String(key).match(/^(\d{2,3})$/);
-    if (match && value !== "") {
-      thresholds.push({ threshold: Number(match[1]), factor: toNumber(value) });
-    }
-  });
-
-  return thresholds
-    .filter((entry) => Number.isFinite(entry.threshold))
-    .sort((a, b) => a.threshold - b.threshold);
+  return getPlfThresholdEntries(row);
 };
 
-const PLF_POINT_KEYS = ["p80", "p90", "p95", "p98", "p100"];
+const PLF_PERCENT_KEY_RE = /^p(\d{1,3})$/i;
+
+const getPlfThresholdNumber = (key) => {
+  const match = String(key ?? "").match(PLF_PERCENT_KEY_RE);
+  if (!match) return null;
+  const threshold = Number(match[1]);
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 100) return null;
+  return threshold;
+};
+
+const getPlfThresholdKeys = (row, { includeCarryForward = true } = {}) => Object.keys(row || {})
+  .filter((key) => {
+    const threshold = getPlfThresholdNumber(key);
+    if (threshold === null) return false;
+    if (!includeCarryForward && threshold === 100) return false;
+    return true;
+  })
+  .sort((a, b) => getPlfThresholdNumber(a) - getPlfThresholdNumber(b));
 
 const getPlfCarryForwardValue = (row) => {
   let lastValue = null;
-  for (const key of PLF_POINT_KEYS) {
+  for (const key of getPlfThresholdKeys(row, { includeCarryForward: false })) {
     const raw = row?.[key];
     if (raw === "" || raw === null || raw === undefined) continue;
     lastValue = round2(toNumber(raw));
   }
   return lastValue ?? 1;
 };
+
+const getPlfThresholdEntries = (row) => getPlfThresholdKeys(row).map((key) => ({
+  threshold: getPlfThresholdNumber(key),
+  factor: key.toLowerCase() === "p100" ? getPlfCarryForwardValue(row) : toNumber(row?.[key]),
+})).filter((entry) => Number.isFinite(entry.threshold));
 
 const extractPlfEffectRecords = (rows = []) => {
   const records = [];
@@ -384,6 +380,15 @@ const extractPlfEffectRecords = (rows = []) => {
 
   rows.forEach((row) => {
     if (!row) return;
+
+    if (row.rowType === "header") {
+      const headerRow = { rowType: "header" };
+      getPlfThresholdKeys(row, { includeCarryForward: false }).forEach((key) => {
+        headerRow[key] = "";
+      });
+      records.push(headerRow);
+      return;
+    }
 
     const sectorOrGcd = normalizeFuelValue(pick(row, ["sectorOrGcd", "sector", "type"]));
     const gcd = normalizeFuelValue(pick(row, ["gcd"]));
@@ -399,22 +404,18 @@ const extractPlfEffectRecords = (rows = []) => {
     const effectiveGcd = gcd || currentGcd;
     if (!effectiveSector && !acftRegn) return;
 
-    const p80 = pick(row, ["p80", "t80", "threshold80"]);
-    const p90 = pick(row, ["p90", "t90", "threshold90"]);
-    const p95 = pick(row, ["p95", "t95", "threshold95"]);
-    const p98 = pick(row, ["p98", "t98", "threshold98"]);
-    const p100 = getPlfCarryForwardValue(row);
-
-    records.push({
+    const record = {
       sectorOrGcd: effectiveSector,
       gcd: effectiveGcd,
       acftRegn,
-      p80: p80 === "" ? "" : toNumber(p80),
-      p90: p90 === "" ? "" : toNumber(p90),
-      p95: p95 === "" ? "" : toNumber(p95),
-      p98: p98 === "" ? "" : toNumber(p98),
-      p100,
+    };
+
+    getPlfThresholdKeys(row).forEach((key) => {
+      const value = key.toLowerCase() === "p100" ? getPlfCarryForwardValue(row) : row?.[key];
+      record[key] = value === "" ? "" : toNumber(value);
     });
+
+    records.push(record);
   });
 
   return records;
@@ -427,6 +428,15 @@ const groupPlfEffectRows = (rows = []) => {
   const sectors = new Map();
 
   rows.forEach((row) => {
+    if (row?.rowType === "header") {
+      const headerRow = { rowType: "header" };
+      getPlfThresholdKeys(row, { includeCarryForward: false }).forEach((key) => {
+        headerRow[key] = "";
+      });
+      grouped.push(headerRow);
+      return;
+    }
+
     const sectorKey = normalizeFuelValue(row?.sectorOrGcd);
     const acftRegn = normalizeFuelValue(row?.acftRegn);
     if (!sectorKey && !acftRegn) return;
@@ -448,23 +458,17 @@ const groupPlfEffectRows = (rows = []) => {
     const group = sectors.get(sectorKey);
     if (!acftRegn) return;
 
-    const p80 = row?.p80 ?? row?.t80 ?? row?.threshold80 ?? "";
-    const p90 = row?.p90 ?? row?.t90 ?? row?.threshold90 ?? "";
-    const p95 = row?.p95 ?? row?.t95 ?? row?.threshold95 ?? "";
-    const p98 = row?.p98 ?? row?.t98 ?? row?.threshold98 ?? "";
-    const p100 = getPlfCarryForwardValue(row);
-
     const aircraftRow = {
       rowType: "aircraft",
       sectorOrGcd: sectorKey,
       gcd: normalizeFuelValue(row?.gcd || group.sectorRow.gcd),
       acftRegn,
-      p80: p80 === "" ? "" : toNumber(p80),
-      p90: p90 === "" ? "" : toNumber(p90),
-      p95: p95 === "" ? "" : toNumber(p95),
-      p98: p98 === "" ? "" : toNumber(p98),
-      p100,
     };
+
+    getPlfThresholdKeys(row).forEach((key) => {
+      const value = key.toLowerCase() === "p100" ? getPlfCarryForwardValue(row) : row?.[key];
+      aircraftRow[key] = value === "" ? "" : toNumber(value);
+    });
 
     group.aircraft.set(acftRegn, aircraftRow);
     group.order.push(acftRegn);
@@ -791,9 +795,13 @@ const normalizeApuUsage = (rows = []) => rows.map((row) => ({
   };
 }).filter((row) => row.variant || row.acftRegn || row.fromDate || row.toDate || row.apuHours || row.consumptionPerApuHour);
 
-const normalizePlfEffect = (rows = []) => rows.map((row) => ({
+const normalizePlfEffect = (rows = []) => rows.filter((row) => row?.rowType !== "header").map((row) => ({
   sectorOrGcd: normalize(pick(row, ["sectorOrGcd", "sector", "type", "gcd"])),
   acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft"])),
+  ...Object.fromEntries(getPlfThresholdKeys(row).map((key) => [
+    key,
+    key.toLowerCase() === "p100" ? getPlfCarryForwardValue(row) : toNumber(row?.[key]),
+  ])),
   thresholds: buildThresholdMap(row),
 })).filter((row) => row.sectorOrGcd || row.acftRegn || row.thresholds.length);
 

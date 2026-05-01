@@ -44,6 +44,31 @@ test("engine fuel consumption and cost follow table x index x PLF and station fu
   approx(row.engineFuelCost, (8275 / 0.78 / 1000) * 92500);
 });
 
+test("PLF consumption supports additional percentage bands beyond the default set", () => {
+  const row = computeFlightCosts({
+    ...baseFlight,
+    paxLF: 98.5,
+  }, {
+    ...baseConfig,
+    fuelConsum: [{ sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", month: "04/26", fuelConsumptionKg: 1000 }],
+    fuelConsumIndex: [{ acftRegn: "VT-ABC", month: "04/26", fuelConsumptionIndex: 1 }],
+    ccyFuel: [],
+    plfEffect: [{
+      sectorOrGcd: "CCU-BOM",
+      acftRegn: "VT-ABC",
+      p80: 1,
+      p90: 1.02,
+      p95: 1.04,
+      p98: 1.05,
+      p99: 1.08,
+      p100: 1.08,
+    }],
+  });
+
+  assert.equal(row.engineFuelConsumptionKg, 1080);
+  assert.equal(row.engineFuelCost, 1080);
+});
+
 test("direct APU fuel uses arrival station price with departure fallback", () => {
   const row = computeFlightCosts(baseFlight, {
     ...baseConfig,

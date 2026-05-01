@@ -150,8 +150,9 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
     fuelConsumIndex: [{ acftRegn: "VT-ABC", month1: "APR-26", m1: "1.02" }],
     apuUsage: [{ arrStn: "BOM", variant: "A320", acftRegn: "VT-ABC", apuHours: "0.75", consumptionPerApuHour: "255" }],
     plfEffect: [
+      { rowType: "header", p56: "", p80: "", p90: "", p95: "" },
       { rowType: "sector", sectorOrGcd: "CCU-BOM", gcd: "895" },
-      { rowType: "aircraft", sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p80: "0.98", p90: "1", p95: "1.02" },
+      { rowType: "aircraft", sectorOrGcd: "CCU-BOM", acftRegn: "VT-ABC", p80: "0.98", p90: "1", p95: "1.02", p99: "1.03" },
     ],
     ccyFuel: [{ ccy: "INR", station: "CCU", kgPerLtr: "0.78", month1: "APR-26", m1: "92500" }],
     leasedReserve: [{ mrAccId: "MR-1", schMxEvent: "C-check", acftRegn: "VT-ABC", pn: "A320", sn: "5825", setBalance: "1000", setRate: "10", asOnDate: "2026-04-01", ccy: "INR", driver: "FH" }],
@@ -176,6 +177,13 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(saveRes.statusCode, 200);
   assert.equal(saveRes.body.success, true);
 
+  const savedConfig = await CostConfig.findOne({ userId: USER_ID }).lean();
+  assert.equal(savedConfig.plfEffect[0].rowType, "header");
+  assert.ok(Object.prototype.hasOwnProperty.call(savedConfig.plfEffect[0], "p56"));
+  assert.equal(savedConfig.ccyFuel[0].station, "CCU");
+  assert.equal(savedConfig.ccyFuel[0].month, "04/26");
+  assert.equal(savedConfig.ccyFuel[0].intoPlaneRate, 92500);
+
   const loadRes = createMockResponse();
   await costController.getCostConfig({ user: { id: USER_ID } }, loadRes);
 
@@ -193,6 +201,12 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.leasedReserve[0].mrAccId, "MR-1");
   assert.equal(data.transitMx[0].sn, "5825");
   assert.equal(data.otherDoc[0].label, "Doc");
+  assert.equal(data.plfEffect[0].rowType, "header");
+  assert.ok(Object.prototype.hasOwnProperty.call(data.plfEffect[0], "p56"));
+  assert.equal(data.plfEffect.find((row) => row.acftRegn === "VT-ABC").p99, 1.03);
+  assert.equal(data.ccyFuel[0].station, "CCU");
+  assert.equal(data.ccyFuel[0].month1, "04/26");
+  assert.equal(data.ccyFuel[0].m1, 92500);
 });
 
 test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {
