@@ -764,9 +764,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 utilFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
             }
 
-            const resetFilter = {
-                date: { $lte: endOfDay }
-            };
+            const resetFilter = {};
             if (msnEsn) {
                 resetFilter.msnEsn = { $regex: `^${escapeRegex(msnEsn.trim())}$`, $options: "i" };
             }
@@ -809,26 +807,39 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 }
             });
 
-            const latestResetByKey = new Map();
+            const resetRecordsByKey = new Map();
             resetRecords.forEach(record => {
                 const key = [
                     String(record.msnEsn || "").trim().toUpperCase(),
                     String(record.pn || "").trim().toUpperCase(),
                     String(record.snBn || "").trim().toUpperCase()
                 ].join("|");
-                if (!latestResetByKey.has(key)) {
-                    latestResetByKey.set(key, record);
-                }
+                const recordsForKey = resetRecordsByKey.get(key) || [];
+                recordsForKey.push(record);
+                resetRecordsByKey.set(key, recordsForKey);
             });
 
-            const selectedDate = moment(date).format("YYYY-MM-DD");
-            const rows = Array.from(latestResetByKey.values()).map((record) => {
+            const selectedDateMoment = moment.utc(date).endOf("day");
+            const selectedDate = selectedDateMoment.format("YYYY-MM-DD");
+            const rowSourcesByKey = new Map(utilByKey);
+            resetRecords.forEach(record => {
                 const key = [
                     String(record.msnEsn || "").trim().toUpperCase(),
                     String(record.pn || "").trim().toUpperCase(),
                     String(record.snBn || "").trim().toUpperCase()
                 ].join("|");
-                const util = utilByKey.get(key);
+                if (!rowSourcesByKey.has(key) && moment.utc(record.date).isSameOrBefore(selectedDateMoment)) {
+                    rowSourcesByKey.set(key, record);
+                }
+            });
+
+            const rows = Array.from(rowSourcesByKey.entries()).map(([utilKey, util]) => {
+                const resetRecordsForKey = resetRecordsByKey.get(utilKey) || [];
+                const record = resetRecordsForKey.find(reset =>
+                    moment.utc(reset.date).isSameOrBefore(selectedDateMoment)
+                ) || [...resetRecordsForKey].reverse().find(reset =>
+                    moment.utc(reset.date).isAfter(selectedDateMoment)
+                ) || util;
                 const savedResetDate = moment(record.date).format("YYYY-MM-DD");
 
                 return {

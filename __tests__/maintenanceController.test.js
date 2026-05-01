@@ -1152,6 +1152,59 @@ test("maintenance dashboard autopopulates titled spare from active fleet asset",
   assert.equal(res.body.data.maintenanceData[0].titled, "Spare");
 });
 
+test("maintenance dashboard shows backfilled status before the reset date", async () => {
+  const viewDate = utcDate(2026, 4, 10);
+  const resetDate = utcDate(2026, 4, 20);
+
+  await seedFlightDays([viewDate, resetDate]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 3, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1001,
+    dsn: 201,
+    timeMetric: "BH",
+  });
+  await Utilisation.create({
+    userId: USER_ID,
+    date: viewDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1001,
+    dsn: 191,
+    timeMetric: "BH",
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    query: {
+      date: "2026-04-10",
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.getMaintenanceDashboard(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.maintenanceData.length, 1);
+  assert.equal(res.body.data.maintenanceData[0].msnEsn, "5340");
+  assert.equal(res.body.data.maintenanceData[0].asOnDate, "2026-04-10");
+  assert.equal(res.body.data.maintenanceData[0].savedResetDate, "2026-04-20");
+  assert.equal(res.body.data.maintenanceData[0].tsn, 2000);
+  assert.equal(res.body.data.maintenanceData[0].dsn, 191);
+});
+
 test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
   const targetDate = utcDate(2026, 4, 13);
 
