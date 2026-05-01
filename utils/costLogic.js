@@ -1495,7 +1495,7 @@ const matchesOptionalNumber = (target, actual) => {
   return toNumber(target) === toNumber(actual);
 };
 
-const isAdditionalApuUseRow = (row = {}) => normalize(row.addlnUse) === "Y";
+const isAdditionalApuUseRow = (row) => normalize(row?.addlnUse) === "Y";
 
 const getFirstDayOfNextMonth = (value) => {
   const date = parseDate(value);
