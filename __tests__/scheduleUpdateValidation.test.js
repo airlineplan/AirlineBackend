@@ -33,6 +33,10 @@ let dbPath;
 let port;
 let dbName;
 
+function resolveMongodBinary() {
+  return fs.existsSync("/usr/bin/mongod") ? "/usr/bin/mongod" : "mongod";
+}
+
 function utcDate(year, month, day) {
   return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
 }
@@ -107,7 +111,7 @@ async function connectMongo() {
   });
 
   mongodProcess = spawn(
-    "mongod",
+    resolveMongodBinary(),
     [
       "--dbpath",
       dbPath,

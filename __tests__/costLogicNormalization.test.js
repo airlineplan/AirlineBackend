@@ -268,7 +268,7 @@ test("normalizeCostConfig preserves custom navigation mtow tiers", () => {
   assert.equal(normalized.navEnr[0]["81000"], 120);
 });
 
-test("transit maintenance prefers aircraft rows over variant rows", () => {
+test("transit maintenance applies SN, ACFT Regn, PN, Variant precedence", () => {
   const flight = {
     date: "2026-04-12",
     depStn: "DEL",
@@ -290,7 +290,7 @@ test("transit maintenance prefers aircraft rows over variant rows", () => {
     ],
   });
 
-  assert.equal(enriched.transitMaintenance, 20);
+  assert.equal(enriched.transitMaintenance, 40);
   assert.equal(enriched.transitMaintenanceCCY, "INR");
 });
 
@@ -930,9 +930,10 @@ test("APU fuel allocation follows the configured basis", () => {
     ],
     apuUsage: [
       {
-        arrStn: "BOM",
         variant: "737",
         acftRegn: "VT-IJK",
+        addlnUse: "Y",
+        fromDate: "2026-04-20",
         apuHours: 1,
         consumptionPerApuHour: 300,
         ccy: "INR",

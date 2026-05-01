@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test __tests__",
+    "test": "node --test --test-concurrency=1 --test-reporter=spec __tests__/*.test.js",
     "start": "node --inspect  index.js",
     "dev": "nodemon --inspect index.js",
     "migrate:flights-acft-fh-ft": "node scripts/backfillFlightAcftFhFt.js"

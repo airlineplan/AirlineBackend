@@ -283,14 +283,13 @@ const getConvertedRuleAmount = (rule) => {
   return toNumber(rule.costRCCY) > 0 ? toNumber(rule.costRCCY) : toNumber(rule.cost || 0);
 };
 
-const scoreTransitRule = (row) => (
-  (row?.depStn ? 10000 : 0) +
-  (row?.sn ? 1000 : 0) +
-  (row?.acftRegn ? 400 : 0) +
-  (row?.pn ? 250 : 0) +
-  (row?.variant ? 100 : 0) +
-  (row?.fromDate || row?.toDate ? 10 : 0)
-);
+const getTransitIdentifierRank = (row) => {
+  if (row?.sn) return 4;
+  if (row?.acftRegn) return 3;
+  if (row?.pn) return 2;
+  if (row?.variant) return 1;
+  return 0;
+};
 
 const matchesOtherMxRow = (row, {
   flightDate,
@@ -1848,25 +1847,15 @@ const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg, pn
     if (!matchesOptional(row.sn, msn)) return;
     if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return;
 
-    const matchesAcft = matchesOptional(row.acftRegn, acftReg);
-    const matchesVariant = matchesOptional(row.variant, variant);
-    let priority = 0;
-
-    if (row.acftRegn && matchesAcft) {
-      priority = 2;
-    } else if (row.variant && matchesVariant) {
-      priority = 1;
-    } else if (!row.acftRegn && !row.variant) {
-      priority = 1;
-    }
-
-    if (priority === 0) return;
+    if (!matchesOptional(row.acftRegn, acftReg)) return;
+    if (!matchesOptional(row.variant, variant)) return;
 
     candidates.push({
       row,
-      priority: priority + scoreTransitRule(row),
+      identifierRank: getTransitIdentifierRank(row),
       effectiveFrom: parseDate(row.fromDate)?.getTime() || 0,
       effectiveTo: parseDate(row.toDate)?.getTime() || 0,
+      specificity: scoreSpecificity([row.depStn, row.sn, row.acftRegn, row.pn, row.variant, row.fromDate || row.toDate]),
       index,
     });
   });
@@ -1874,9 +1863,10 @@ const selectTransitRule = (rows = [], { flightDate, depStn, variant, acftReg, pn
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => (
-    b.priority - a.priority ||
+    b.identifierRank - a.identifierRank ||
     b.effectiveFrom - a.effectiveFrom ||
     b.effectiveTo - a.effectiveTo ||
+    b.specificity - a.specificity ||
     b.index - a.index
   ));
 
