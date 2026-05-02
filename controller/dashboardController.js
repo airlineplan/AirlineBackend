@@ -29,6 +29,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
+const { normalizeCurrencyCode, normalizeDateKey } = require("../utils/fx");
 
 const createConnections = require('../helper/createConnections');
 
@@ -321,7 +322,7 @@ const populateDashboardDropDowns = async (req, res) => {
     return res.status(500).json({ message: "Internal Server Error" });
   }
 };
-const getDashboardData = async (req, res) => {
+const getDashboardDataLegacy = async (req, res) => {
 
   let { from, to, variant, sector, flight, userTag1, userTag2, label, periodicity } = req.query;
 
@@ -965,6 +966,400 @@ const getDashboardData = async (req, res) => {
       console.error(error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
+};
+
+const pickNumeric = (row = {}, keys = []) => {
+  for (const key of keys) {
+    const value = row?.[key];
+    if (value !== undefined && value !== null && value !== "") return toNumericValue(value);
+  }
+  return 0;
+};
+
+const safePercent = (numerator, denominator) => {
+  const bottom = toNumericValue(denominator);
+  if (bottom <= 0) return 0;
+  return Number(((toNumericValue(numerator) / bottom) * 100).toFixed(2));
+};
+
+const buildDashboardQueries = ({ userId, label, filters }) => {
+  const flightsQuery = { userId };
+  const revenueQuery = { userId };
+  const revenueAndClauses = [];
+
+  if (label && label !== "both") {
+    flightsQuery.domIntl = label;
+    const revenueLabel = normalizeRevenueLabel(label);
+    if (revenueLabel) {
+      revenueAndClauses.push({ $or: [{ odDI: revenueLabel }, { legDI: revenueLabel }] });
+    }
+  }
+
+  const flightMappings = [
+    ["depStn", filters.from],
+    ["arrStn", filters.to],
+    ["sector", filters.sector],
+    ["variant", filters.variant],
+    ["flight", filters.flight],
+    ["userTag1", filters.userTag1],
+    ["userTag2", filters.userTag2],
+  ];
+
+  flightMappings.forEach(([field, values]) => {
+    const clause = buildBlankAwareDashboardClause(field, values);
+    if (clause) Object.assign(flightsQuery, clause.$or ? { $and: [...(flightsQuery.$and || []), clause] } : clause);
+  });
+
+  [
+    ["depStn", filters.from],
+    ["arrStn", filters.to],
+    ["sector", filters.sector],
+    ["variant", filters.variant],
+    ["flightNumber", filters.flight],
+    ["userTag1", filters.userTag1],
+    ["userTag2", filters.userTag2],
+  ].forEach(([field, values]) => {
+    const clause = buildBlankAwareDashboardClause(field, values);
+    if (clause) revenueAndClauses.push(clause);
+  });
+
+  if (revenueAndClauses.length) revenueQuery.$and = revenueAndClauses;
+  return { flightsQuery, revenueQuery };
+};
+
+const buildDashboardPeriods = (startDate, endDate, periodicity) => {
+  if (!startDate || !endDate) return [];
+  if (periodicity === "monthly") return generateLastDayOfMonths(startDate, endDate);
+  if (periodicity === "quarterly") return generateQuarterlyDates(startDate, endDate);
+  if (periodicity === "annually") return generateAnnualDates(startDate, endDate);
+  if (periodicity === "weekly") return generateWeeklyDates(startDate, endDate);
+  if (periodicity === "daily") return generateDailyDates(startDate, endDate);
+  return generateWeeklyDates(startDate, endDate);
+};
+
+const getPeriodStartForDashboard = (periodEndDate, periodicity) => {
+  if (periodicity === "monthly") return new Date(Date.UTC(periodEndDate.getUTCFullYear(), periodEndDate.getUTCMonth(), 1));
+  if (periodicity === "quarterly") {
+    const quarterStartMonth = Math.floor(periodEndDate.getUTCMonth() / 3) * 3;
+    return new Date(Date.UTC(periodEndDate.getUTCFullYear(), quarterStartMonth, 1));
+  }
+  if (periodicity === "annually") return new Date(Date.UTC(periodEndDate.getUTCFullYear(), 0, 1));
+  if (periodicity === "weekly") {
+    const dayOfWeek = getUtcDayOfWeek(periodEndDate);
+    const daysUntilMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    return startOfUtcDay(addUtcDays(periodEndDate, -daysUntilMonday));
+  }
+  return startOfUtcDay(periodEndDate);
+};
+
+const sumFlightFields = (rows = [], fields = []) =>
+  rows.reduce((total, row) => total + pickNumeric(row, fields), 0);
+
+const sumNumericField = (rows = [], field) =>
+  rows.reduce((total, row) => total + toNumericValue(row?.[field]), 0);
+
+const monthLabelKey = (date) => moment.utc(date).endOf("month").format("YYYY-MM-DD");
+
+const addCurrencyExposure = (container, ccy, date, revenue = 0, cost = 0) => {
+  const code = normalizeCurrencyCode(ccy);
+  const dateKey = monthLabelKey(date);
+  if (!code || !dateKey) return;
+  if (!container[code]) container[code] = {};
+  if (!container[code][dateKey]) container[code][dateKey] = { dateKey, revenue: 0, cost: 0, net: 0 };
+  container[code][dateKey].revenue += toNumericValue(revenue);
+  container[code][dateKey].cost -= Math.abs(toNumericValue(cost));
+  container[code][dateKey].net = container[code][dateKey].revenue + container[code][dateKey].cost;
+};
+
+const addLocalCostExposures = (currencyBuckets, flight, reportingCurrency) => {
+  const fields = [
+    "engineFuelCost",
+    "apuFuelCost",
+    "maintenanceReserveContribution",
+    "mrMonthly",
+    "qualifyingSchMxEvents",
+    "transitMaintenance",
+    "otherMaintenance",
+    "otherMxExpenses",
+    "rotableChanges",
+    "crewAllowances",
+    "layoverCost",
+    "crewPositioningCost",
+    "airport",
+    "navigation",
+    "otherDoc",
+  ];
+  fields.forEach((field) => {
+    const ccy = normalizeCurrencyCode(flight?.[`${field}CCY`]);
+    if (!ccy || ccy === normalizeCurrencyCode(reportingCurrency)) return;
+    addCurrencyExposure(currencyBuckets, ccy, flight.date, 0, flight[field]);
+  });
+};
+
+const serializeCurrencyExposure = (buckets = {}) => Object.fromEntries(
+  Object.entries(buckets).map(([ccy, byDate]) => [
+    ccy,
+    Object.values(byDate)
+      .map((row) => ({
+        dateKey: row.dateKey,
+        revenue: Number(row.revenue.toFixed(2)),
+        cost: Number(row.cost.toFixed(2)),
+        net: Number(row.net.toFixed(2)),
+      }))
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey)),
+  ])
+);
+
+const backfillDashboardPooMasterFields = async (userId) => {
+  const pooRows = await PooTable.find({ userId }).select("_id flightId depStn arrStn variant userTag1 userTag2").lean();
+  if (!pooRows.length) return;
+  const flightIds = [...new Set(pooRows.map((row) => String(row.flightId || "")).filter(Boolean))];
+  if (!flightIds.length) return;
+  const flights = await Flights.find({ userId, _id: { $in: flightIds } }).select("depStn arrStn variant userTag1 userTag2").lean();
+  const flightsById = new Map(flights.map((flight) => [String(flight._id), flight]));
+  const ops = [];
+  pooRows.forEach((row) => {
+    const flight = flightsById.get(String(row.flightId));
+    if (!flight) return;
+    const $set = {};
+    ["depStn", "arrStn", "variant", "userTag1", "userTag2"].forEach((field) => {
+      const nextValue = String(flight[field] || "").trim();
+      if (nextValue && String(row[field] || "").trim() !== nextValue) $set[field] = nextValue;
+    });
+    if (Object.keys($set).length) ops.push({ updateOne: { filter: { _id: row._id, userId }, update: { $set } } });
+  });
+  if (ops.length) await PooTable.bulkWrite(ops, { ordered: false });
+};
+
+const getDashboardData = async (req, res) => {
+  try {
+    const userId = getUserIdFromReq(req);
+    if (!userId) return res.status(400).json({ error: "User ID missing" });
+
+    const periodicity = normalizeSingleQueryValue(req.query.periodicity || "weekly").toLowerCase();
+    const label = normalizeSingleQueryValue(req.query.label || "both").toLowerCase();
+    const filters = {
+      from: normalizeQueryValues(req.query.from),
+      to: normalizeQueryValues(req.query.to),
+      sector: normalizeQueryValues(req.query.sector),
+      variant: normalizeQueryValues(req.query.variant),
+      flight: normalizeQueryValues(req.query.flight),
+      userTag1: normalizeQueryValues(req.query.userTag1),
+      userTag2: normalizeQueryValues(req.query.userTag2),
+    };
+    const { flightsQuery, revenueQuery } = buildDashboardQueries({ userId, label, filters });
+
+    const flightRange = await Flights.aggregate([
+      { $match: { userId } },
+      { $group: { _id: null, minDate: { $min: "$date" }, maxDate: { $max: "$date" } } },
+    ]);
+
+    if (!flightRange?.[0]?.minDate || !flightRange?.[0]?.maxDate) {
+      return res.status(200).json({
+        data: [],
+        periods: [],
+        revenueConfig: {},
+        currencyCodes: [],
+        fxRates: [],
+        flightsForFxDates: [],
+        riskExposure: { fuel: [], currencies: {} },
+        riskExposureData: { fuel: [], currencies: {} },
+      });
+    }
+
+    const startDate = startOfUtcDay(new Date(flightRange[0].minDate));
+    const endDate = startOfUtcDay(new Date(flightRange[0].maxDate));
+    const periodEnds = buildDashboardPeriods(startDate, endDate, periodicity);
+
+    await backfillDashboardPooMasterFields(userId);
+
+    const [allRevenueRows, rawCostConfig, rawRevenueConfig, fleetRows, flightsForFxDates] = await Promise.all([
+      PooTable.find(revenueQuery).lean(),
+      CostConfig.findOne({ userId }).lean(),
+      RevenueConfig.findOne({ userId }).lean(),
+      Fleet.find({ userId }).lean(),
+      Flights.find({ userId }).select("date").lean(),
+    ]);
+
+    const revenueConfig = rawRevenueConfig || {};
+    const baseCostConfig = normalizeCostConfig({
+      ...(rawCostConfig || {}),
+      reportingCurrency: revenueConfig.reportingCurrency || rawCostConfig?.reportingCurrency,
+      fxRates: revenueConfig.fxRates || rawCostConfig?.fxRates,
+      fleet: fleetRows,
+    });
+    const reportingCurrency = normalizeCurrencyCode(baseCostConfig.reportingCurrency || revenueConfig.reportingCurrency || "USD");
+    const resultData = [];
+    const periodPayloads = [];
+    const currencyExposureBuckets = {};
+
+    allRevenueRows.forEach((row) => {
+      const localCcy = normalizeCurrencyCode(row.pooCcy || reportingCurrency);
+      if (localCcy && localCcy !== reportingCurrency) {
+        const localRevenue = row.applySSPricing ? toNumericValue(row.legTotalRev) : toNumericValue(row.odTotalRev);
+        addCurrencyExposure(currencyExposureBuckets, localCcy, row.date, localRevenue, 0);
+      }
+    });
+
+    for (const periodEnd of periodEnds) {
+      const periodStart = getPeriodStartForDashboard(periodEnd, periodicity);
+      const periodStartDay = startOfUtcDay(periodStart);
+      const periodEndDay = endOfUtcDay(periodEnd);
+      const periodFlightsQuery = {
+        ...flightsQuery,
+        date: { $gte: periodStartDay, $lte: periodEndDay },
+      };
+      const flightsRaw = await Flights.find(periodFlightsQuery).lean();
+      const mrContext = await buildMaintenanceReserveContext(userId, flightsRaw);
+      const flightsInPeriod = computeFlightCostsBatch(flightsRaw, {
+        ...baseCostConfig,
+        ...mrContext,
+        fleet: fleetRows,
+      });
+
+      const revenueInPeriod = allRevenueRows.filter((row) => {
+        const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
+        return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
+      });
+
+      flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight, reportingCurrency));
+
+      const departures = flightsInPeriod.length;
+      const destinations = new Set(flightsInPeriod.map((flight) => String(flight.arrStn || "").trim()).filter(Boolean)).size;
+      const seats = sumFlightFields(flightsInPeriod, ["seats"]);
+      const pax = sumFlightFields(flightsInPeriod, ["pax"]);
+      const cargoCapT = sumFlightFields(flightsInPeriod, ["cargoCapT", "CargoCapT", "cargoCap"]);
+      const cargoT = sumFlightFields(flightsInPeriod, ["cargoT", "CargoT"]);
+      const bh = sumFlightFields(flightsInPeriod, ["bh"]);
+      const fh = sumFlightFields(flightsInPeriod, ["fh"]);
+      const sumOfGcd = sumFlightFields(flightsInPeriod, ["gcd", "sectorGcd", "dist"]);
+      const sumOfask = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["ask"]) || (pickNumeric(flight, ["seats"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
+      const sumOfrsk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["rsk", "rpk"]) || (pickNumeric(flight, ["pax"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
+      const sumOfcargoAtk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["cargoAtk"]) || (pickNumeric(flight, ["cargoCapT", "CargoCapT", "cargoCap"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
+      const sumOfcargoRtk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["cargoRtk"]) || (pickNumeric(flight, ["cargoT", "CargoT"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
+      const uniqueAircraftDays = new Set(flightsInPeriod.map((flight) => `${flight.msn || flight.acftRegn || flight.acftType || flight.variant || "aircraft"}::${normalizeDateKey(flight.date)}`)).size;
+
+      const fnlRccyPaxRev = sumNumericField(revenueInPeriod, "fnlRccyPaxRev");
+      const fnlRccyCargoRev = sumNumericField(revenueInPeriod, "fnlRccyCargoRev");
+      const explicitTotalRev = sumNumericField(revenueInPeriod, "fnlRccyTotalRev");
+      const fnlRccyTotalRev = explicitTotalRev || (fnlRccyPaxRev + fnlRccyCargoRev);
+
+      const engineFuelCostRCCY = sumNumericField(flightsInPeriod, "engineFuelCostRCCY");
+      const apuFuelCostRCCY = sumNumericField(flightsInPeriod, "apuFuelCostRCCY");
+      const totalFuelCostRCCY = engineFuelCostRCCY + apuFuelCostRCCY;
+      const maintenanceReserveContributionRCCY = sumNumericField(flightsInPeriod, "maintenanceReserveContributionRCCY");
+      const mrMonthlyRCCY = sumNumericField(flightsInPeriod, "mrMonthlyRCCY");
+      const totalMrContributionRCCY = maintenanceReserveContributionRCCY + mrMonthlyRCCY;
+      const qualifyingSchMxEventsRCCY = sumNumericField(flightsInPeriod, "qualifyingSchMxEventsRCCY");
+      const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
+      const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
+      const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
+      const otherMaintenanceCalendarRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance3"]);
+      const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
+      const rotableChangesRCCY = sumNumericField(flightsInPeriod, "rotableChangesRCCY");
+      const totalMaintenanceCostRCCY = totalMrContributionRCCY + qualifyingSchMxEventsRCCY + transitMaintenanceRCCY + otherMaintenanceRCCY + otherMxExpensesRCCY + rotableChangesRCCY;
+      const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
+      const layoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");
+      const crewPositioningCostRCCY = sumNumericField(flightsInPeriod, "crewPositioningCostRCCY");
+      const crewTotalDirectCostRCCY = crewAllowancesRCCY + layoverCostRCCY + crewPositioningCostRCCY;
+      const airportRCCY = sumNumericField(flightsInPeriod, "airportRCCY");
+      const navigationRCCY = sumNumericField(flightsInPeriod, "navigationRCCY");
+      const otherDocRCCY = sumNumericField(flightsInPeriod, "otherDocRCCY");
+      const totalDocRCCY = totalFuelCostRCCY + totalMaintenanceCostRCCY + crewTotalDirectCostRCCY + airportRCCY + navigationRCCY + otherDocRCCY;
+      const grossProfitLossRCCY = fnlRccyTotalRev - totalDocRCCY;
+
+      const data = {
+        destinations,
+        departures,
+        seats,
+        pax,
+        paxSF: safePercent(pax, seats),
+        paxLF: safePercent(pax, seats),
+        cargoCapT,
+        cargoT,
+        ct2ctc: safePercent(cargoT, cargoCapT),
+        cftk2atk: safePercent(sumOfcargoRtk, sumOfcargoAtk),
+        bh,
+        fh,
+        sumOfGcd,
+        averageDailyUtilisation: uniqueAircraftDays > 0 ? Number((bh / uniqueAircraftDays).toFixed(2)) : 0,
+        adu: uniqueAircraftDays > 0 ? Number((bh / uniqueAircraftDays).toFixed(2)) : 0,
+        connectingFlights: 0,
+        seatCapBeyondFlgts: 0,
+        seatCapBehindFlgts: 0,
+        cargoCapBehindFlgts: 0,
+        cargoCapBeyondFlgts: 0,
+        sumOfask,
+        sumOfrsk,
+        sumOfcargoAtk,
+        sumOfcargoRtk,
+        fnlRccyPaxRev,
+        fnlRccyCargoRev,
+        fnlRccyTotalRev,
+        engineFuelConsumption: sumNumericField(flightsInPeriod, "engineFuelConsumption"),
+        engineFuelConsumptionKg: sumNumericField(flightsInPeriod, "engineFuelConsumptionKg"),
+        apuFuelConsumptionKg: sumNumericField(flightsInPeriod, "apuFuelConsumptionKg"),
+        engineFuelCostRCCY,
+        apuFuelCostRCCY,
+        totalFuelCostRCCY,
+        maintenanceReserveContributionRCCY,
+        mrMonthlyRCCY,
+        totalMrContributionRCCY,
+        qualifyingSchMxEventsRCCY,
+        transitMaintenanceRCCY,
+        otherMaintenanceRCCY,
+        otherMaintenanceUtilisationRCCY,
+        otherMaintenanceCalendarRCCY,
+        otherMxExpensesRCCY,
+        rotableChangesRCCY,
+        totalMaintenanceCostRCCY,
+        crewAllowancesRCCY,
+        layoverCostRCCY,
+        crewPositioningCostRCCY,
+        crewTotalDirectCostRCCY,
+        airportRCCY,
+        navigationRCCY,
+        otherDocRCCY,
+        totalDocRCCY,
+        grossProfitLossRCCY,
+      };
+
+      const period = {
+        key: normalizeDateKey(periodEnd),
+        startDate: periodStartDay.toISOString(),
+        endDate: periodEndDay.toISOString(),
+        dateKey: normalizeDateKey(periodEnd),
+        dateLabel: moment.utc(periodEnd).format("DD MMM YY"),
+        data,
+      };
+      resultData.push({ ...data, startDate: period.startDate, endDate: period.endDate, dateKey: period.dateKey, dateLabel: period.dateLabel });
+      periodPayloads.push(period);
+    }
+
+    const riskExposure = {
+      fuel: periodPayloads.map((period) => ({
+        dateKey: period.dateKey,
+        engineFuelKg: toNumericValue(period.data.engineFuelConsumptionKg),
+        apuFuelKg: toNumericValue(period.data.apuFuelConsumptionKg),
+        totalFuelKg: toNumericValue(period.data.engineFuelConsumptionKg) + toNumericValue(period.data.apuFuelConsumptionKg),
+      })),
+      currencies: serializeCurrencyExposure(currencyExposureBuckets),
+    };
+
+    res.status(200).json({
+      data: resultData,
+      periods: periodPayloads,
+      revenueConfig,
+      currencyCodes: revenueConfig.currencyCodes || [],
+      fxRates: revenueConfig.fxRates || [],
+      flightsForFxDates,
+      riskExposure,
+      riskExposureData: riskExposure,
+    });
+  } catch (error) {
+    console.error("getDashboardData error:", error);
+    res.status(500).json({ error: "Internal Server Error", message: error.message });
+  }
 };
 
 module.exports = {

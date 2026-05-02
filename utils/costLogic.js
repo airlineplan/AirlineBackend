@@ -6,6 +6,12 @@
  * costs in one batch so every consumer sees the same output.
  */
 
+const {
+  normalizeCurrencyCode: normalizeFxCurrencyCode,
+  normalizeDateKey: normalizeFxDateKey,
+  getCarriedForwardFxRate,
+} = require("./fx");
+
 const COST_FIELDS = [
   "engineFuelCost",
   "maintenanceReserveContribution",
@@ -1521,6 +1527,14 @@ const normalizeFxRates = (rates = []) => (Array.isArray(rates) ? rates : []).map
 
 const findFxRate = (fxRates, currency, reportingCurrency, date) => {
   const pair = `${normalize(currency)}/${normalize(reportingCurrency)}`;
+  const carriedRate = getCarriedForwardFxRate(fxRates, pair, normalizeFxDateKey(date));
+  if (carriedRate > 0 && (Array.isArray(fxRates) ? fxRates : []).some((row) => {
+    const rowPair = normalize(row?.pair);
+    const rowDateKey = normalizeFxDateKey(row?.dateKey || row?.date || row?.effectiveDate);
+    return rowPair === pair && rowDateKey && rowDateKey <= normalizeFxDateKey(date);
+  })) {
+    return carriedRate;
+  }
   const dayKey = toDayKey(date);
   const monthKey = normalizeMonthKey(date);
   const rates = normalizeFxRates(fxRates)
@@ -1551,7 +1565,7 @@ const addMissingFxPair = (flight, currency, reportingCurrency) => {
 const convertToRccy = (amount, currency, reportingCurrency, explicitRccy, fxRates = [], date, flight) => {
   const numeric = round2(amount);
   if (toNumber(explicitRccy) > 0) return round2(explicitRccy);
-  if (!currency || normalize(currency) === normalize(reportingCurrency)) return numeric;
+  if (!currency || normalizeFxCurrencyCode(currency) === normalizeFxCurrencyCode(reportingCurrency)) return numeric;
   const rate = findFxRate(fxRates, currency, reportingCurrency, date);
   if (rate > 0) return round2(numeric * rate);
   addMissingFxPair(flight, currency, reportingCurrency);

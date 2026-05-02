@@ -265,7 +265,7 @@ test("revenue config preserves reporting currency, entered CCYs, and FX rates", 
   assert.deepEqual(loadRes.body.data.fxRates, payload.fxRates);
 });
 
-test("reporting currency endpoint saves newly entered reporting CCY with currency list", async () => {
+test("reporting currency endpoint saves newly entered reporting CCY and resets FX pairs", async () => {
   await RevenueConfig.create({
     userId: USER_ID,
     reportingCurrency: "USD",
@@ -287,11 +287,12 @@ test("reporting currency endpoint saves newly entered reporting CCY with currenc
   assert.equal(saveRes.body.success, true);
   assert.equal(saveRes.body.data.reportingCurrency, "INR");
   assert.deepEqual(saveRes.body.data.currencyCodes, ["INR", "USD"]);
-  assert.deepEqual(saveRes.body.data.fxRates, payload.fxRates);
+  assert.deepEqual(saveRes.body.data.fxRates, []);
 
   const saved = await RevenueConfig.findOne({ userId: USER_ID }).lean();
   assert.equal(saved.reportingCurrency, "INR");
   assert.deepEqual(saved.currencyCodes, ["INR", "USD"]);
+  assert.deepEqual(saved.fxRates, []);
 });
 
 test("cost page controller computes representative cost inputs into flight cost fields", async () => {
