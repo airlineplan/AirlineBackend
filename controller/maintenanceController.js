@@ -14,6 +14,24 @@ const moment = require('moment'); // <-- Added missing moment import
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 const isValidObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
+const parseUtcIsoDate = (value) => {
+    const parsed = moment.utc(value, moment.ISO_8601, true);
+    return parsed.isValid() ? parsed : null;
+};
+const getUtcDayBounds = (value) => {
+    const parsed = parseUtcIsoDate(value);
+    if (!parsed) return null;
+    const start = parsed.clone().startOf("day");
+    return {
+        start,
+        endExclusive: start.clone().add(1, "day")
+    };
+};
+const isSameUtcDay = (left, right) => {
+    const leftMoment = moment.utc(left);
+    const rightMoment = moment.utc(right);
+    return leftMoment.isValid() && rightMoment.isValid() && leftMoment.isSame(rightMoment, "day");
+};
 
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -840,30 +858,35 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 ) || [...resetRecordsForKey].reverse().find(reset =>
                     moment.utc(reset.date).isAfter(selectedDateMoment)
                 ) || util;
-                const savedResetDate = moment(record.date).format("YYYY-MM-DD");
+                const exactResetRecord = resetRecordsForKey.find(reset =>
+                    isSameUtcDay(reset.date, selectedDateMoment)
+                );
+                const sourceRecord = exactResetRecord || record || util;
+                const savedResetDate = sourceRecord?.date ? moment.utc(sourceRecord.date).format("YYYY-MM-DD") : "";
+                const metricSource = exactResetRecord || util || sourceRecord;
 
                 return {
-                    id: record._id,
-                    msn: record.msnEsn || "",
-                    msnEsn: record.msnEsn || "",
-                    pn: record.pn || "",
-                    sn: record.snBn || "",
-                    snBn: record.snBn || "",
-                    titled: titledBySn.get(String(record.msnEsn || "").trim().toUpperCase()) || "",
+                    id: sourceRecord?._id,
+                    msn: sourceRecord?.msnEsn || "",
+                    msnEsn: sourceRecord?.msnEsn || "",
+                    pn: sourceRecord?.pn || "",
+                    sn: sourceRecord?.snBn || "",
+                    snBn: sourceRecord?.snBn || "",
+                    titled: titledBySn.get(String(sourceRecord?.msnEsn || "").trim().toUpperCase()) || "",
                     date: savedResetDate,
                     savedResetDate,
                     asOnDate: selectedDate,
                     resetDate: savedResetDate,
-                    timeMetric: record.timeMetric || "BH",
-                    tsn: util?.tsn ?? record.tsn ?? "",
-                    csn: util?.csn ?? record.csn ?? "",
-                    dsn: util?.dsn ?? record.dsn ?? "",
-                    tso: util?.tsoTsr ?? record.tsoTsr ?? "",
-                    cso: util?.csoCsr ?? record.csoCsr ?? "",
-                    dso: util?.dsoDsr ?? record.dsoDsr ?? "",
-                    tsr: util?.tsRplmt ?? record.tsRplmt ?? "",
-                    csr: util?.csRplmt ?? record.csRplmt ?? "",
-                    dsr: util?.dsRplmt ?? record.dsRplmt ?? "",
+                    timeMetric: sourceRecord?.timeMetric || "BH",
+                    tsn: metricSource?.tsn ?? sourceRecord?.tsn ?? "",
+                    csn: metricSource?.csn ?? sourceRecord?.csn ?? "",
+                    dsn: metricSource?.dsn ?? sourceRecord?.dsn ?? "",
+                    tso: metricSource?.tsoTsr ?? sourceRecord?.tsoTsr ?? "",
+                    cso: metricSource?.csoCsr ?? sourceRecord?.csoCsr ?? "",
+                    dso: metricSource?.dsoDsr ?? sourceRecord?.dsoDsr ?? "",
+                    tsr: metricSource?.tsRplmt ?? sourceRecord?.tsRplmt ?? "",
+                    csr: metricSource?.csRplmt ?? sourceRecord?.csRplmt ?? "",
+                    dsr: metricSource?.dsRplmt ?? sourceRecord?.dsRplmt ?? "",
                     allDisplay: ""
                 };
             });
@@ -897,13 +920,13 @@ exports.getResetRecords = async (req, res) => {
         const filter = {};
 
         if (date) {
-            const selectedDate = moment.utc(date, moment.ISO_8601, true);
-            if (!selectedDate.isValid()) {
+            const selectedDateBounds = getUtcDayBounds(date);
+            if (!selectedDateBounds) {
                 return res.status(400).json({ message: "Invalid reset date." });
             }
             filter.date = {
-                $gte: selectedDate.startOf("day").toDate(),
-                $lte: selectedDate.endOf("day").toDate()
+                $gte: selectedDateBounds.start.toDate(),
+                $lt: selectedDateBounds.endExclusive.toDate()
             };
         }
 
