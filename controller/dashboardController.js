@@ -64,6 +64,29 @@ const normalizeSingleQueryValue = (value) => {
   return String(value ?? "").trim();
 };
 
+const buildBlankAwareDashboardClause = (field, values = []) => {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const wantsBlank = values.includes(BLANK_OPTION_VALUE) || values.includes("(blank)");
+  const concrete = values.filter((value) => value !== BLANK_OPTION_VALUE && value !== "(blank)");
+
+  if (wantsBlank && concrete.length) {
+    return {
+      $or: [
+        { [field]: { $in: concrete } },
+        { [field]: { $exists: false } },
+        { [field]: null },
+        { [field]: "" },
+      ],
+    };
+  }
+
+  if (wantsBlank) {
+    return { $or: [{ [field]: { $exists: false } }, { [field]: null }, { [field]: "" }] };
+  }
+
+  return { [field]: { $in: concrete } };
+};
+
 const normalizeRevenueLabel = (value) => {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized.includes("intl")) return "Intl";
@@ -321,6 +344,7 @@ const getDashboardData = async (req, res) => {
   let revenueQuery = {
     userId: id
   };
+  const revenueAndClauses = [];
 
   if (label === "both") {
     flightsQuery.domIntl = { $in: ["dom", "intl"] };
@@ -329,10 +353,10 @@ const getDashboardData = async (req, res) => {
     flightsQuery.domIntl = label
     const normalizedRevenueLabel = normalizeRevenueLabel(label);
     if (normalizedRevenueLabel) {
-      revenueQuery.$or = [
+      revenueAndClauses.push({ $or: [
         { odDI: normalizedRevenueLabel },
         { legDI: normalizedRevenueLabel },
-      ];
+      ] });
     }
   }
 
@@ -371,13 +395,22 @@ const getDashboardData = async (req, res) => {
   if (normalizedTo.length > 0) {
     flightsQuery.arrStn = { $in: normalizedTo };
   }
-  if (normalizedFrom.length > 0) revenueQuery.depStn = { $in: normalizedFrom };
-  if (normalizedTo.length > 0) revenueQuery.arrStn = { $in: normalizedTo };
-  if (normalizedSector.length > 0) revenueQuery.sector = { $in: normalizedSector };
-  if (normalizedVariant.length > 0) revenueQuery.variant = { $in: normalizedVariant };
-  if (normalizedFlight.length > 0) revenueQuery.flightNumber = { $in: normalizedFlight };
-  if (normalizedUserTag1.length > 0) revenueQuery.userTag1 = { $in: normalizedUserTag1 };
-  if (normalizedUserTag2.length > 0) revenueQuery.userTag2 = { $in: normalizedUserTag2 };
+  [
+    ["depStn", normalizedFrom],
+    ["arrStn", normalizedTo],
+    ["sector", normalizedSector],
+    ["variant", normalizedVariant],
+    ["flightNumber", normalizedFlight],
+    ["userTag1", normalizedUserTag1],
+    ["userTag2", normalizedUserTag2],
+  ].forEach(([field, values]) => {
+    const clause = buildBlankAwareDashboardClause(field, values);
+    if (clause) revenueAndClauses.push(clause);
+  });
+
+  if (revenueAndClauses.length > 0) {
+    revenueQuery.$and = revenueAndClauses;
+  }
 
   try {
 

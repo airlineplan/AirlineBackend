@@ -616,7 +616,7 @@ function calculateLegShare(row, fieldName) {
     const explicitRatio = parseNumber(row[fieldName]);
     if (explicitRatio <= 0) {
         const totalGcd = parseNumber(row.odViaGcd);
-        if (totalGcd <= 0) return 0;
+        if (totalGcd <= 0 || parseNumber(row.sectorGcd) <= 0) return 0.5;
         return Math.min(parseNumber(row.sectorGcd) / totalGcd, 1);
     }
 
@@ -630,8 +630,9 @@ function calculateLegShare(row, fieldName) {
     return roundToTwo(1 - firstLegRatio);
 }
 
-function recalculateRevenue(row) {
+function recalculateRevenueForPooRow(row, revenueConfig = null) {
     const next = { ...row };
+    const config = revenueConfig ? normalizeRevenueConfig(revenueConfig) : null;
     const fareShare = calculateLegShare(row, "fareProrateRatioL1L2");
     const rateShare = calculateLegShare(row, "rateProrateRatioL1L2");
 
@@ -648,7 +649,16 @@ function recalculateRevenue(row) {
     next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(row.odRate));
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
-    const rate = parseNumber(row.pooCcyToRccy, 1) || 1;
+    const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "USD";
+    const localCcy = normalizeCurrencyCode(row.pooCcy) || reportingCurrency;
+    const dateKey = normalizeDateKey(row.date);
+    const rate = config
+        ? (localCcy === reportingCurrency ? 1 : getCarriedForwardFxRate(config.fxRates, `${localCcy}/${reportingCurrency}`, dateKey))
+        : (localCcy === reportingCurrency ? 1 : parseNumber(row.pooCcyToRccy, 1) || 1);
+    next.pooCcy = localCcy;
+    next.reportingCurrency = reportingCurrency;
+    next.pooCcyToRccy = roundToTwo(rate);
+
     next.rccyLegPaxRev = roundToTwo(next.legPaxRev * rate);
     next.rccyLegCargoRev = roundToTwo(next.legCargoRev * rate);
     next.rccyLegTotalRev = roundToTwo(next.legTotalRev * rate);
@@ -660,6 +670,10 @@ function recalculateRevenue(row) {
     next.fnlRccyTotalRev = roundToTwo(next.fnlRccyPaxRev + next.fnlRccyCargoRev);
 
     return next;
+}
+
+function recalculateRevenue(row, revenueConfig = null) {
+    return recalculateRevenueForPooRow(row, revenueConfig);
 }
 
 function buildEditableResponse(records) {
@@ -1572,7 +1586,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
     };
 }
 
-function applyFieldEdits(row, requested) {
+function applyFieldEdits(row, requested, revenueConfig = null) {
     let next = { ...row };
 
     if (requested.pax !== undefined) {
@@ -1603,7 +1617,7 @@ function applyFieldEdits(row, requested) {
         }
     });
 
-    return recalculateRevenue(next);
+    return recalculateRevenue(next, revenueConfig);
 }
 
 function getLegRowsByFlight(stateRows) {
@@ -1702,10 +1716,10 @@ function validateTraffic(rows) {
     }
 }
 
-function rebalanceLegRow(row, paxDelta, cargoDelta) {
+function rebalanceLegRow(row, paxDelta, cargoDelta, revenueConfig = null) {
     row.pax = roundToWhole(row.pax - paxDelta);
     row.cargoT = roundToTwo(row.cargoT - cargoDelta);
-    return recalculateRevenue(row);
+    return recalculateRevenue(row, revenueConfig);
 }
 
 function assertBucketAvailability(row, paxDelta, cargoDelta, context) {
@@ -1733,7 +1747,7 @@ function assertBucketAvailability(row, paxDelta, cargoDelta, context) {
     }
 }
 
-function applyTrafficUpdates(stateRows, requestedEdits) {
+function applyTrafficUpdates(stateRows, requestedEdits, revenueConfig = null) {
     const rowsById = new Map(stateRows.map((row) => [String(row._id), row]));
     const legRowsByFlight = getLegRowsByFlight(stateRows);
     const groupRowsByOdKey = getGroupRowsByOdKey(stateRows);
@@ -1751,7 +1765,7 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
         }
 
         const original = { ...current };
-        const edited = applyFieldEdits(current, requested);
+        const edited = applyFieldEdits(current, requested, revenueConfig);
 
         if (current.trafficType === TRAFFIC_TYPES.LEG) {
             const pairedLeg = (legRowsByFlight.get(String(current.flightId)) || []).find(
@@ -1778,7 +1792,7 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
             );
 
             Object.assign(current, edited);
-            Object.assign(pairedLeg, rebalanceLegRow(pairedLeg, paxDelta, cargoDelta));
+            Object.assign(pairedLeg, rebalanceLegRow(pairedLeg, paxDelta, cargoDelta, revenueConfig));
             return;
         }
 
@@ -1823,12 +1837,12 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
                 ...requested,
                 pax: desiredPax,
                 cargoT: desiredCargoT,
-            });
+            }, revenueConfig);
             const updatedSecond = applyFieldEdits(secondRow, {
                 ...requested,
                 pax: desiredPax,
                 cargoT: desiredCargoT,
-            });
+            }, revenueConfig);
 
             Object.assign(firstRow, updatedFirst);
             Object.assign(secondRow, updatedSecond);
@@ -1867,13 +1881,13 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
                 `${describeRow(updatedSecond)} cannot be updated`
             );
 
-            Object.assign(originLeg, rebalanceLegRow(originLeg, paxDelta, cargoDelta));
-            Object.assign(destinationLeg, rebalanceLegRow(destinationLeg, paxDelta, cargoDelta));
+            Object.assign(originLeg, rebalanceLegRow(originLeg, paxDelta, cargoDelta, revenueConfig));
+            Object.assign(destinationLeg, rebalanceLegRow(destinationLeg, paxDelta, cargoDelta, revenueConfig));
             return;
         }
     });
 
-    const finalRows = [...rowsById.values()].map((row) => recalculateRevenue(row));
+    const finalRows = [...rowsById.values()].map((row) => recalculateRevenue(row, revenueConfig));
     validateTraffic(finalRows);
     return finalRows;
 }
@@ -2177,6 +2191,10 @@ function buildRevenueAggregateResponse(rows, groupByFields, periodicity) {
 async function applyUpdatesForDate({ userId, updates }) {
     if (!updates.length) return [];
 
+    const rawRevenueConfig = RevenueConfig.db?.readyState === 1
+        ? await RevenueConfig.findOne({ userId }).lean()
+        : null;
+    const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
     const editIds = updates.map((item) => item._id);
     const rows = await PooTable.find({
         userId,
@@ -2219,7 +2237,8 @@ async function applyUpdatesForDate({ userId, updates }) {
 
     const finalRows = applyTrafficUpdates(
         workingRows.map(createWorkingState),
-        updates
+        updates,
+        revenueConfig
     );
 
     const rowsToDelete = [];
@@ -2382,6 +2401,8 @@ exports.populatePoo = async (req, res) => {
             })),
             { ordered: true }
         );
+
+        await backfillMasterFieldsToPooRows(userId);
 
         await PooTable.deleteMany({
             userId,
@@ -2626,6 +2647,9 @@ exports.deleteTransit = async (req, res) => {
 };
 
 function buildBlankAwareClause(field, rawValues, normalizer = (value) => String(value || "").trim()) {
+    const normalizeValue = typeof normalizer === "function"
+        ? normalizer
+        : (value) => String(value || "").trim();
     const values = String(rawValues || "")
         .split(",")
         .map((item) => String(item || "").trim())
@@ -2635,7 +2659,7 @@ function buildBlankAwareClause(field, rawValues, normalizer = (value) => String(
     const wantsBlank = values.includes(BLANK_OPTION_VALUE) || values.includes("(blank)");
     const concrete = values
         .filter((value) => value !== BLANK_OPTION_VALUE && value !== "(blank)")
-        .map(normalizer)
+        .map(normalizeValue)
         .filter(Boolean);
 
     if (wantsBlank && concrete.length) {
@@ -2689,7 +2713,7 @@ async function backfillMasterFieldsToPooRows(userId) {
                         arrStn: normalizeStation(flight.arrStn),
                         userTag1: String(flight.userTag1 || "").trim(),
                         userTag2: String(flight.userTag2 || "").trim(),
-                        variant: String(row.variant || "").trim() || String(flight.variant || "").trim(),
+                        variant: String(flight.variant || "").trim(),
                     },
                 },
             },
@@ -2704,23 +2728,16 @@ async function backfillMasterFieldsToPooRows(userId) {
 }
 
 async function recalculatePooRevenueForConfig(userId, revenueConfig) {
+    await backfillMasterFieldsToPooRows(userId);
     const rows = await PooTable.find({ userId });
     if (!rows.length) return 0;
 
     const ops = rows.map((doc) => {
         const row = doc.toObject();
-        const reportingCurrency = revenueConfig.reportingCurrency || "USD";
-        const localCcy = normalizeCurrencyCode(row.pooCcy) || reportingCurrency;
-        const dateKey = normalizeDateKey(row.date);
-        const pair = `${localCcy}/${reportingCurrency}`;
-        const rate = localCcy === reportingCurrency ? 1 : getCarriedForwardFxRate(revenueConfig.fxRates, pair, dateKey);
         const recalculated = recalculateRevenue({
             ...row,
-            pooCcy: localCcy,
-            pooCcyToRccy: rate,
-            reportingCurrency,
             reportingCurrencySource: "financial_config",
-        });
+        }, revenueConfig);
         return {
             updateOne: {
                 filter: { _id: doc._id, userId },
@@ -2730,6 +2747,12 @@ async function recalculatePooRevenueForConfig(userId, revenueConfig) {
                         pooCcyToRccy: recalculated.pooCcyToRccy,
                         reportingCurrency: recalculated.reportingCurrency,
                         reportingCurrencySource: recalculated.reportingCurrencySource,
+                        legPaxRev: recalculated.legPaxRev,
+                        legCargoRev: recalculated.legCargoRev,
+                        legTotalRev: recalculated.legTotalRev,
+                        odPaxRev: recalculated.odPaxRev,
+                        odCargoRev: recalculated.odCargoRev,
+                        odTotalRev: recalculated.odTotalRev,
                         rccyLegPaxRev: recalculated.rccyLegPaxRev,
                         rccyLegCargoRev: recalculated.rccyLegCargoRev,
                         rccyLegTotalRev: recalculated.rccyLegTotalRev,
@@ -2934,6 +2957,7 @@ exports.getRevenueData = async (req, res) => {
                     { stops: { $in: normalizedStops } },
                     { stops: null },
                     { stops: { $exists: false } },
+                    { stops: "" },
                 ],
             });
         } else if (requestedBlankStop) {
@@ -2941,6 +2965,7 @@ exports.getRevenueData = async (req, res) => {
                 $or: [
                     { stops: null },
                     { stops: { $exists: false } },
+                    { stops: "" },
                 ],
             });
         } else if (normalizedStops.length > 0) {
@@ -3048,7 +3073,15 @@ exports.deletePooRecords = async (req, res) => {
 
 exports.__testables__ = {
     calculateProrateRatio,
+    calculateLegShare,
     recalculateRevenue,
+    recalculateRevenueForPooRow,
+    normalizeCurrencyCode,
+    normalizeDateKey,
+    getCarriedForwardFxRate,
+    convertLocalToReporting,
+    buildBlankAwareClause,
+    backfillMasterFieldsToPooRows,
     buildSelectedDateRange,
     buildRevenueAggregateResponse,
     buildEditableResponse,

@@ -3,10 +3,17 @@ const assert = require("node:assert/strict");
 
 const pooController = require("../controller/pooController");
 const PooTable = require("../model/pooTable");
+const Flight = require("../model/flight");
 
 const {
     calculateProrateRatio,
+    calculateLegShare,
     recalculateRevenue,
+    recalculateRevenueForPooRow,
+    getCarriedForwardFxRate,
+    convertLocalToReporting,
+    buildBlankAwareClause,
+    backfillMasterFieldsToPooRows,
     buildSelectedDateRange,
     buildRevenueAggregateResponse,
     buildEditableResponse,
@@ -164,6 +171,67 @@ test("selected POO date range uses the exact selected date", () => {
 
     assert.equal(range.$gte.toISOString(), "2026-03-04T00:00:00.000Z");
     assert.equal(range.$lte.toISOString(), "2026-03-04T23:59:59.999Z");
+});
+
+test("backfills POO master fields including updated variant", async () => {
+    const originalPooFind = PooTable.find;
+    const originalFlightFind = Flight.find;
+    const originalBulkWrite = PooTable.bulkWrite;
+    const opsSeen = [];
+
+    const pooRows = [
+        {
+            _id: "poo-1",
+            date: new Date("2026-03-04T12:00:00.000Z"),
+            sector: "DEL-BOM",
+            flightNumber: "A100",
+            depStn: "",
+            arrStn: "",
+            variant: "OLD",
+            userTag1: "",
+            userTag2: "",
+        },
+    ];
+    const flights = [
+        {
+            date: new Date("2026-03-04T00:00:00.000Z"),
+            sector: "DEL-BOM",
+            flight: "A100",
+            depStn: "DEL",
+            arrStn: "BOM",
+            variant: "A320",
+            userTag1: "Label A",
+            userTag2: "Group 1",
+        },
+    ];
+    const chain = (rows) => ({
+        select: () => ({
+            lean: async () => rows,
+        }),
+    });
+
+    PooTable.find = () => chain(pooRows);
+    Flight.find = () => chain(flights);
+    PooTable.bulkWrite = async (ops) => {
+        opsSeen.push(...ops);
+        return { modifiedCount: ops.length };
+    };
+
+    try {
+        const result = await backfillMasterFieldsToPooRows("user-1");
+        const set = opsSeen[0].updateOne.update.$set;
+
+        assert.equal(result.matchedRows, 1);
+        assert.equal(set.depStn, "DEL");
+        assert.equal(set.arrStn, "BOM");
+        assert.equal(set.variant, "A320");
+        assert.equal(set.userTag1, "Label A");
+        assert.equal(set.userTag2, "Group 1");
+    } finally {
+        PooTable.find = originalPooFind;
+        Flight.find = originalFlightFind;
+        PooTable.bulkWrite = originalBulkWrite;
+    }
 });
 
 test("assigns leg POO rows in departure-then-arrival order for each flight", () => {
@@ -638,6 +706,29 @@ test("uses OD RCCY as final revenue when applySSPricing is disabled", () => {
     assert.equal(row.fnlRccyTotalRev, 144010);
 });
 
+test("direct leg revenue calculates leg, cargo, and final INR totals", () => {
+    const row = recalculateRevenueForPooRow({
+        date: new Date("2026-03-04T00:00:00.000Z"),
+        stops: 0,
+        trafficType: "leg",
+        identifier: "Leg",
+        pax: 48,
+        cargoT: 0.2,
+        legFare: 3000,
+        legRate: 50,
+        odFare: 3000,
+        odRate: 50,
+        pooCcy: "INR",
+        applySSPricing: false,
+    }, { reportingCurrency: "INR", fxRates: [] });
+
+    assert.equal(row.legPaxRev, 144000);
+    assert.equal(row.legCargoRev, 10);
+    assert.equal(row.fnlRccyPaxRev, 144000);
+    assert.equal(row.fnlRccyCargoRev, 10);
+    assert.equal(row.fnlRccyTotalRev, 144010);
+});
+
 test("multiplies local OD revenue by FX into final reporting currency", () => {
     const row = recalculateRevenue({
         stops: 0,
@@ -656,6 +747,34 @@ test("multiplies local OD revenue by FX into final reporting currency", () => {
     });
 
     assert.equal(row.odPaxRev, 1000);
+    assert.equal(row.fnlRccyPaxRev, 83000);
+});
+
+test("config-aware revenue helper uses carried-forward LOCAL/REPORTING FX", () => {
+    const config = {
+        reportingCurrency: "INR",
+        fxRates: [
+            { pair: "USD/INR", dateKey: "2026-03-01", rate: 83 },
+            { pair: "USD/INR", dateKey: "2026-03-10", rate: 84 },
+        ],
+    };
+
+    const row = recalculateRevenueForPooRow({
+        date: new Date("2026-03-04T00:00:00.000Z"),
+        pax: 10,
+        cargoT: 0,
+        legFare: 100,
+        legRate: 0,
+        odFare: 100,
+        odRate: 0,
+        pooCcy: "usd",
+        applySSPricing: false,
+    }, config);
+
+    assert.equal(getCarriedForwardFxRate(config.fxRates, "USD/INR", "2026-03-05"), 83);
+    assert.equal(getCarriedForwardFxRate(config.fxRates, "USD/INR", "2026-03-12"), 84);
+    assert.equal(convertLocalToReporting(100, "USD", "INR", "2026-03-04", config.fxRates), 8300);
+    assert.equal(row.pooCcyToRccy, 83);
     assert.equal(row.fnlRccyPaxRev, 83000);
 });
 
@@ -688,6 +807,45 @@ test("default one-stop proration uses each row sector GCD when no explicit ratio
     assert.equal(beyond.legRate, 30);
     assert.equal(behind.odPaxRev, 9000);
     assert.equal(beyond.odPaxRev, 9000);
+});
+
+test("missing one-stop GCD defaults leg proration to 50/50", () => {
+    const row = recalculateRevenue({
+        stops: 1,
+        trafficType: "behind",
+        pax: 5,
+        cargoT: 1,
+        sectorGcd: 0,
+        odViaGcd: 0,
+        odFare: 1000,
+        odRate: 100,
+        fareProrateRatioL1L2: 0,
+        rateProrateRatioL1L2: 0,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+
+    assert.equal(calculateLegShare(row, "fareProrateRatioL1L2"), 0.5);
+    assert.equal(row.legFare, 500);
+    assert.equal(row.legRate, 50);
+});
+
+test("blank-aware revenue clauses match missing, null, and empty values", () => {
+    assert.deepEqual(
+        buildBlankAwareClause("userTag2", "__BLANK__"),
+        { $or: [{ userTag2: { $exists: false } }, { userTag2: null }, { userTag2: "" }] }
+    );
+    assert.deepEqual(
+        buildBlankAwareClause("depStn", "DEL,__BLANK__", (value) => String(value).trim().toUpperCase()),
+        {
+            $or: [
+                { depStn: { $in: ["DEL"] } },
+                { depStn: { $exists: false } },
+                { depStn: null },
+                { depStn: "" },
+            ],
+        }
+    );
 });
 
 test("OD revenue aggregation dedupes one-stop behind and beyond rows", () => {
