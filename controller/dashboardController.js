@@ -1225,7 +1225,14 @@ const getDashboardData = async (req, res) => {
       flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight, reportingCurrency));
 
       const departures = flightsInPeriod.length;
-      const destinations = new Set(flightsInPeriod.map((flight) => String(flight.arrStn || "").trim()).filter(Boolean)).size;
+      const stationSet = new Set();
+      flightsInPeriod.forEach((flight) => {
+        const depStn = String(flight.depStn || "").trim();
+        const arrStn = String(flight.arrStn || "").trim();
+        if (depStn) stationSet.add(depStn);
+        if (arrStn) stationSet.add(arrStn);
+      });
+      const destinations = stationSet.size;
       const seats = sumFlightFields(flightsInPeriod, ["seats"]);
       const pax = sumFlightFields(flightsInPeriod, ["pax"]);
       const cargoCapT = sumFlightFields(flightsInPeriod, ["cargoCapT", "CargoCapT", "cargoCap"]);
@@ -1237,7 +1244,22 @@ const getDashboardData = async (req, res) => {
       const sumOfrsk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["rsk", "rpk"]) || (pickNumeric(flight, ["pax"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
       const sumOfcargoAtk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["cargoAtk"]) || (pickNumeric(flight, ["cargoCapT", "CargoCapT", "cargoCap"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
       const sumOfcargoRtk = flightsInPeriod.reduce((total, flight) => total + (pickNumeric(flight, ["cargoRtk"]) || (pickNumeric(flight, ["cargoT", "CargoT"]) * pickNumeric(flight, ["gcd", "sectorGcd", "dist"]))), 0);
-      const uniqueAircraftDays = new Set(flightsInPeriod.map((flight) => `${flight.msn || flight.acftRegn || flight.acftType || flight.variant || "aircraft"}::${normalizeDateKey(flight.date)}`)).size;
+      const allFlightsAssignedToRotations =
+        departures > 0 &&
+        flightsInPeriod.every((flight) => String(flight.rotationNumber || "").trim());
+      const uniqueRotationDays = new Set(
+        flightsInPeriod
+          .map((flight) => {
+            const rotationNumber = String(flight.rotationNumber || "").trim();
+            const dateKey = normalizeDateKey(flight.date);
+            return rotationNumber && dateKey ? `${rotationNumber}::${dateKey}` : "";
+          })
+          .filter(Boolean)
+      ).size;
+      const averageDailyUtilisation =
+        allFlightsAssignedToRotations && uniqueRotationDays > 0
+          ? Number((bh / uniqueRotationDays).toFixed(2))
+          : 0;
 
       const fnlRccyPaxRev = sumNumericField(revenueInPeriod, "fnlRccyPaxRev");
       const fnlRccyCargoRev = sumNumericField(revenueInPeriod, "fnlRccyCargoRev");
@@ -1282,8 +1304,8 @@ const getDashboardData = async (req, res) => {
         bh,
         fh,
         sumOfGcd,
-        averageDailyUtilisation: uniqueAircraftDays > 0 ? Number((bh / uniqueAircraftDays).toFixed(2)) : 0,
-        adu: uniqueAircraftDays > 0 ? Number((bh / uniqueAircraftDays).toFixed(2)) : 0,
+        averageDailyUtilisation,
+        adu: averageDailyUtilisation,
         connectingFlights: 0,
         seatCapBeyondFlgts: 0,
         seatCapBehindFlgts: 0,

@@ -315,6 +315,48 @@ test("dashboard filters by tag, flight, and label without crashing on no data", 
   assert.equal(none.periods[0].data.fnlRccyTotalRev, 0);
 });
 
+test("weekly dashboard counts all stations as destinations and zeros utilisation until every flight has a rotation", async () => {
+  await Flight.create([
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 5),
+      sector: "DEL-BOM",
+      depStn: "DEL",
+      arrStn: "BOM",
+      flight: "P100",
+      variant: "A320",
+      domIntl: "dom",
+      seats: 180,
+      pax: 153,
+      bh: 2.5,
+      fh: 2.3,
+      dist: 1100,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 5),
+      sector: "BOM-MAA",
+      depStn: "BOM",
+      arrStn: "MAA",
+      flight: "P101",
+      variant: "A320",
+      domIntl: "dom",
+      seats: 180,
+      pax: 153,
+      bh: 1.83,
+      fh: 1.7,
+      dist: 1000,
+    },
+  ]);
+
+  const body = await getDashboard({ periodicity: "weekly" });
+  assert.equal(body.periods.length, 1);
+  assert.equal(body.periods[0].data.destinations, 3);
+  assert.equal(body.periods[0].data.departures, 2);
+  assert.equal(body.periods[0].data.averageDailyUtilisation, 0);
+  assert.equal(body.periods[0].data.adu, 0);
+});
+
 test("reporting currency reset regenerates pairs with master dates", async () => {
   await seedDashboardFixture();
   const res = createMockResponse();
