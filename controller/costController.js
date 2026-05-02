@@ -75,11 +75,36 @@ const normalizeNavigationTablesForStorage = (configData = {}) => {
   };
 };
 
+const validateApuUsageRows = (apuUsage = []) => {
+  const rows = Array.isArray(apuUsage) ? apuUsage : [];
+  const missingAdditionalUseStation = rows.findIndex((row) => {
+    const addlnUse = String(row?.addlnUse ?? row?.addln ?? row?.additionalUse ?? row?.addlnUsage ?? "")
+      .trim()
+      .toUpperCase();
+    const station = String(row?.stn ?? row?.arrStn ?? row?.station ?? "").trim();
+    return addlnUse === "Y" && !station;
+  });
+
+  if (missingAdditionalUseStation >= 0) {
+    return {
+      valid: false,
+      message: `APU Usage row ${missingAdditionalUseStation + 1}: Stn is required when Addln use is Y.`,
+    };
+  }
+
+  return { valid: true };
+};
+
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
   try {
     const userId = req.user.id;
     const configData = req.body;
+    const apuValidation = validateApuUsageRows(configData.apuUsage || []);
+    if (!apuValidation.valid) {
+      return res.status(400).json({ success: false, message: apuValidation.message });
+    }
+
     const hydratedSchMxEvents = await hydrateSchMxEventsForUser(
       userId,
       Array.isArray(configData.schMxEvents) ? configData.schMxEvents : []

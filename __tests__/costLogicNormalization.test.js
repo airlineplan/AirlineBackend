@@ -1119,7 +1119,7 @@ test("generated APU fuel rows use APU usage station and station-month fuel price
   assert.ok(Math.abs(row.totalFuelCost - 22680.28846153846) < 1e-9);
 });
 
-test("generated APU fuel rows keep Stn aliases for additional-use usage rows", () => {
+test("generated APU fuel rows use additional-use Stn for station-month fuel price", () => {
   const row = apuFuelPrivate.buildGeneratedApuFuelRow(
     {
       _id: "flight-2",
@@ -1134,7 +1134,7 @@ test("generated APU fuel rows keep Stn aliases for additional-use usage rows", (
     {
       apuUsage: [
         {
-          arrStn: "BOM",
+          stn: "HYD",
           variant: "737",
           acftRegn: "VT-IJK",
           apuHours: 1.5,
@@ -1150,6 +1150,13 @@ test("generated APU fuel rows keep Stn aliases for additional-use usage rows", (
           month: "04/26",
           kgPerLtr: 0.78,
           intoPlaneRate: 95000,
+          ccy: "INR",
+        },
+        {
+          station: "HYD",
+          month: "04/26",
+          kgPerLtr: 0.84,
+          intoPlaneRate: 105000,
           ccy: "INR",
         },
       ],
@@ -1180,20 +1187,20 @@ test("generated APU fuel rows keep Stn aliases for additional-use usage rows", (
     ]
   );
 
-  assert.equal(row.arrStn, "BOM");
-  assert.equal(row.stn, "BOM");
+  assert.equal(row.arrStn, "HYD");
+  assert.equal(row.stn, "HYD");
   assert.equal(row.acftRegn, "VT-IJK");
   assert.equal(row.apuHr, 1.5);
   assert.equal(row.apuHrPerDay, 1.5);
   assert.equal(row.consumptionKgPerApuHr, 280);
   assert.equal(row.kgPerApuHr, 280);
   assert.equal(row.consumptionKg, 420);
-  assert.equal(row.costPerLtr, 95);
+  assert.equal(row.costPerLtr, 105);
   assert.equal(row.costSourceType, "STN_MONTH");
-  assert.equal(row.costSourceStation, "BOM");
+  assert.equal(row.costSourceStation, "HYD");
   assert.equal(row.sourceFlightId, "flight-2");
-  assert.equal(row.consumptionLitres, 420 / 0.78);
-  assert.ok(Math.abs(row.totalFuelCost - 51153.846153846156) < 1e-9);
+  assert.equal(row.consumptionLitres, 420 / 0.84);
+  assert.ok(Math.abs(row.totalFuelCost - 52500) < 1e-9);
 });
 
 test("apu fuel allocation for additional-use rows uses the row station fuel price", () => {

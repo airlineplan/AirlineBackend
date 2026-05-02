@@ -213,6 +213,30 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.ccyFuel[0].m1, 92500);
 });
 
+test("cost config rejects additional APU usage rows without Stn", async () => {
+  const res = createMockResponse();
+
+  await costController.saveCostConfig({
+    user: { id: USER_ID },
+    body: {
+      apuUsage: [
+        {
+          addlnUse: "Y",
+          acftRegn: "VT-ABC",
+          fromDate: "2026-04-20",
+          apuHrPerDay: "1",
+          kgPerApuHr: "100",
+        },
+      ],
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.success, false);
+  assert.match(res.body.message, /Stn is required/);
+  assert.equal(await CostConfig.countDocuments({ userId: USER_ID }), 0);
+});
+
 test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {
   const payload = {
     reportingCurrency: "inr",

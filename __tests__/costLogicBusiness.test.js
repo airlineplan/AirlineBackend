@@ -96,6 +96,56 @@ test("additional APU usage allocates by configured departures and preserves pool
   approx(rows[0].apuFuelCostAllocated, expectedPool / 2);
 });
 
+test("additional APU usage prices from Stn even when flight stations differ", () => {
+  const flights = [
+    { ...baseFlight, flight: "A201", depStn: "DEL", arrStn: "BOM", bh: 2 },
+    { ...baseFlight, flight: "A202", depStn: "CCU", arrStn: "BLR", bh: 1 },
+  ];
+
+  const rows = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    reportingCurrency: "INR",
+    allocationTable: [{ costCode: "APUFUELCOST", basis: "BH" }],
+    ccyFuel: [
+      { station: "DEL", month: "04/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" },
+      { station: "CCU", month: "04/26", kgPerLtr: 1, intoPlaneRate: 2000, ccy: "INR" },
+      { station: "HYD", month: "04/26", kgPerLtr: 1, intoPlaneRate: 3000, ccy: "INR" },
+    ],
+    apuUsage: [{ stn: "HYD", addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 1, consumptionPerApuHour: 90 }],
+  });
+
+  assert.equal(rows.reduce((sum, row) => sum + row.apuFuelCostAllocated, 0), 270);
+  assert.equal(rows[0].apuFuelCostAllocated, 180);
+  assert.equal(rows[1].apuFuelCostAllocated, 90);
+});
+
+test("additional APU usage allocation is isolated by aircraft and month", () => {
+  const flights = [
+    { ...baseFlight, flight: "A301", date: "2026-04-16", bh: 2, aircraft: { registration: "VT-ABC", msn: "5825" } },
+    { ...baseFlight, flight: "A302", date: "2026-04-17", bh: 1, aircraft: { registration: "VT-ABC", msn: "5825" } },
+    { ...baseFlight, flight: "A401", date: "2026-04-17", bh: 9, aircraft: { registration: "VT-OTHER", msn: "9999" } },
+    { ...baseFlight, flight: "A303", date: "2026-05-01", bh: 7, aircraft: { registration: "VT-ABC", msn: "5825" } },
+  ];
+
+  const rows = computeFlightCostsBatch(flights, {
+    ...baseConfig,
+    reportingCurrency: "INR",
+    allocationTable: [{ costCode: "APUFUELCOST", basis: "BH" }],
+    ccyFuel: [
+      { station: "BOM", month: "04/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" },
+      { station: "BOM", month: "05/26", kgPerLtr: 1, intoPlaneRate: 1000, ccy: "INR" },
+    ],
+    apuUsage: [
+      { stn: "BOM", addlnUse: "Y", acftRegn: "VT-ABC", fromDate: "2026-04-20", apuHours: 1, consumptionPerApuHour: 300 },
+    ],
+  });
+
+  assert.equal(rows[0].apuFuelCostAllocated, 200);
+  assert.equal(rows[1].apuFuelCostAllocated, 100);
+  assert.equal(rows[2].apuFuelCostAllocated, 0);
+  assert.equal(rows[3].apuFuelCostAllocated, 0);
+});
+
 test("maintenance reserve FH contribution uses flight FH driver", () => {
   const row = computeFlightCosts(baseFlight, {
     ...baseConfig,

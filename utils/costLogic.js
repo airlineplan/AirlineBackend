@@ -819,22 +819,25 @@ const groupFuelConsumRows = (rows = []) => {
   return grouped;
 };
 
-const normalizeApuUsage = (rows = []) => rows.map((row) => ({
-  arrStn: normalize(pick(row, ["arrStn", "stn", "station"])),
-  stn: normalize(pick(row, ["stn", "arrStn", "station"])),
-  fromDate: pick(row, ["fromDate", "fromDt"]),
-  toDate: pick(row, ["toDate", "toDt"]),
-  variant: normalize(pick(row, ["variant", "var"])),
-  acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft"])),
-  apuHours: toNumber(pick(row, ["apuHours", "apuHr", "apuHrPerDay", "hours"])),
-  apuHrPerDay: toNumber(pick(row, ["apuHrPerDay", "apuHours", "apuHr", "hours"])),
-  consumptionPerApuHour: toNumber(pick(row, ["consumptionPerApuHour", "consumptionKgPerApuHr", "kgPerApuHr", "consumption", "apuFuel", "cost", "value"])),
-  kgPerApuHr: toNumber(pick(row, ["kgPerApuHr", "consumptionKgPerApuHr", "consumptionPerApuHour", "consumption", "apuFuel", "cost", "value"])),
-  basis: normalizeMetric(pick(row, ["basis"])),
-  ccy: normalize(pick(row, ["ccy"])),
-  addlnUse: normalize(pick(row, ["addlnUse", "addln", "additionalUse", "addlnUsage"])) || "N",
-  costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).map((row) => {
+const normalizeApuUsage = (rows = []) => rows.map((row) => {
+  const station = normalize(pick(row, ["stn", "arrStn", "station"]));
+  return {
+    arrStn: station,
+    stn: station,
+    fromDate: pick(row, ["fromDate", "fromDt"]),
+    toDate: pick(row, ["toDate", "toDt"]),
+    variant: normalize(pick(row, ["variant", "var"])),
+    acftRegn: normalize(pick(row, ["acftRegn", "acftReg", "acft"])),
+    apuHours: toNumber(pick(row, ["apuHours", "apuHr", "apuHrPerDay", "hours"])),
+    apuHrPerDay: toNumber(pick(row, ["apuHrPerDay", "apuHours", "apuHr", "hours"])),
+    consumptionPerApuHour: toNumber(pick(row, ["consumptionPerApuHour", "consumptionKgPerApuHr", "kgPerApuHr", "consumption", "apuFuel", "cost", "value"])),
+    kgPerApuHr: toNumber(pick(row, ["kgPerApuHr", "consumptionKgPerApuHr", "consumptionPerApuHour", "consumption", "apuFuel", "cost", "value"])),
+    basis: normalizeMetric(pick(row, ["basis"])),
+    ccy: normalize(pick(row, ["ccy"])),
+    addlnUse: normalize(pick(row, ["addlnUse", "addln", "additionalUse", "addlnUsage"])) || "N",
+    costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+  };
+}).map((row) => {
   if (row.addlnUse === "Y") {
     return {
       ...row,
@@ -845,7 +848,7 @@ const normalizeApuUsage = (rows = []) => rows.map((row) => ({
     ...row,
     addlnUse: row.addlnUse || "N",
   };
-}).filter((row) => row.variant || row.acftRegn || row.fromDate || row.toDate || row.apuHours || row.consumptionPerApuHour);
+}).filter((row) => row.stn || row.variant || row.acftRegn || row.fromDate || row.toDate || row.apuHours || row.consumptionPerApuHour);
 
 const normalizePlfEffect = (rows = []) => rows.filter((row) => row?.rowType !== "header").map((row) => ({
   sectorOrGcd: normalize(pick(row, ["sectorOrGcd", "sector", "type", "gcd"])),
@@ -2066,7 +2069,8 @@ const enrichDirectCosts = (flights, config) => {
     const apuRule = pickBest(config.apuUsage || [], (row) => scoreApuUsageRule(row, flight));
     if (apuRule) {
       const apuFuelKg = round2(toNumber(apuRule.apuHours) * toNumber(apuRule.consumptionPerApuHour));
-      const apuPriceRule = findFuelPriceForStations(config, [apuRule.arrStn], flightMonthKey);
+      const apuStation = apuRule.stn || apuRule.arrStn;
+      const apuPriceRule = findFuelPriceForStations(config, [apuStation], flightMonthKey);
       const apuCost = apuPriceRule ? calculateFuelCost(apuFuelKg, apuPriceRule) : apuFuelKg;
       flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + apuFuelKg);
       flight.apuFuelKg = round2((flight.apuFuelKg || 0) + apuFuelKg);
@@ -2082,7 +2086,7 @@ const enrichDirectCosts = (flights, config) => {
           directCost: apuCost,
           allocatedCost: flight.apuFuelCostAllocated || 0,
         };
-        if (apuFuelKg > 0 && !apuPriceRule) addDebugMissing(flight, `No APU fuel price row for ${apuRule.arrStn} / ${flightMonthKey}`);
+        if (apuFuelKg > 0 && !apuPriceRule) addDebugMissing(flight, `No APU fuel price row for ${apuStation} / ${flightMonthKey}`);
       }
     } else if (flight.costDebug) {
       flight.costDebug.apu = { matchedApuRow: null, fuelPriceRow: null, apuFuelKg: 0, apuFuelLitres: 0, directCost: 0, allocatedCost: 0 };
@@ -2326,7 +2330,8 @@ const enrichAllocatedCosts = (flights, config) => {
 
     if (!monthFlights.length) return;
 
-    const priceRule = findFuelPriceForStations(config, [row.arrStn], rowMonth);
+    const apuStation = row.stn || row.arrStn;
+    const priceRule = findFuelPriceForStations(config, [apuStation], rowMonth);
     const pricePerKg = getPricePerKg(priceRule);
     const totalKg = row.apuHours > 0 ? row.apuHours * row.consumptionPerApuHour : row.consumptionPerApuHour;
     const poolAmount = pricePerKg > 0 ? totalKg * pricePerKg : totalKg;

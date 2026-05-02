@@ -111,7 +111,7 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
   const consumptionLitres = kgPerLtr > 0 ? consumptionKg / kgPerLtr : 0;
   const costPerLtr = intoPlaneRate > 0 ? intoPlaneRate / 1000 : 0;
   const totalFuelCost = consumptionLitres * costPerLtr;
-  const hasMatch = Boolean(apuUsage || fuelPrice);
+  const hasMatch = Boolean(apuUsage && fuelPrice);
 
   return {
     rowKey: String(flight._id || `${flight.flight || ""}-${flightDate.toISOString()}`),
