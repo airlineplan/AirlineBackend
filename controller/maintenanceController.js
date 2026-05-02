@@ -84,21 +84,56 @@ const normalizeResetGroup = ({ msnEsn, pn, snBn } = {}) => ({
     snBn: String(snBn || "").trim()
 });
 
-const getFlightDateBounds = async ({ userId } = {}) => {
-    const buildPipeline = (match = {}) => [
-        { $match: { ...match, date: { $type: "date" } } },
-        {
-            $group: {
-                _id: null,
-                firstDate: { $min: "$date" },
-                lastDate: { $max: "$date" }
-            }
-        }
-    ];
+const normalizeMetricNumber = (value) => {
+    if (value === "" || value === null || value === undefined) return null;
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue : null;
+};
 
+const getFlightDateBounds = async ({ userId } = {}) => {
     const userMatch = userId ? { userId: String(userId) } : {};
-    const [userBounds] = await Flight.aggregate(buildPipeline(userMatch));
-    return userBounds || null;
+    const [datedBounds, effectiveBounds] = await Promise.all([
+        Flight.aggregate([
+            { $match: { ...userMatch, date: { $type: "date" } } },
+            {
+                $group: {
+                    _id: null,
+                    firstDate: { $min: "$date" },
+                    lastDate: { $max: "$date" }
+                }
+            }
+        ]),
+        Flight.aggregate([
+            { $match: { ...userMatch, effFromDt: { $type: "date" } } },
+            {
+                $group: {
+                    _id: null,
+                    firstDate: { $min: "$effFromDt" },
+                    lastFromDate: { $max: "$effFromDt" },
+                    lastToDate: { $max: "$effToDt" }
+                }
+            }
+        ])
+    ]);
+
+    const dateCandidates = [
+        datedBounds[0]?.firstDate,
+        effectiveBounds[0]?.firstDate
+    ].filter(Boolean).map(date => moment.utc(date));
+    const endCandidates = [
+        datedBounds[0]?.lastDate,
+        effectiveBounds[0]?.lastToDate,
+        effectiveBounds[0]?.lastFromDate
+    ].filter(Boolean).map(date => moment.utc(date));
+
+    if (dateCandidates.length === 0 || endCandidates.length === 0) {
+        return null;
+    }
+
+    return {
+        firstDate: moment.min(dateCandidates).toDate(),
+        lastDate: moment.max(endCandidates).toDate()
+    };
 };
 
 const onwingFields = ["pos1Esn", "pos2Esn", "apun"];
@@ -325,15 +360,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
 
             if (i === 0) {
                 let backfillCursor = moment.utc(resetDate);
-                let currentTsn = currentReset.tsn;
-                let currentCsn = currentReset.csn;
-                let currentDsn = currentReset.dsn;
-                let currentTso = currentReset.tsoTsr;
-                let currentCso = currentReset.csoCsr;
-                let currentDso = currentReset.dsoDsr;
-                let currentTsr = currentReset.tsRplmt;
-                let currentCsr = currentReset.csRplmt;
-                let currentDsr = currentReset.dsRplmt;
+                let currentTsn = normalizeMetricNumber(currentReset.tsn);
+                let currentCsn = normalizeMetricNumber(currentReset.csn);
+                let currentDsn = normalizeMetricNumber(currentReset.dsn);
+                let currentTso = normalizeMetricNumber(currentReset.tsoTsr);
+                let currentCso = normalizeMetricNumber(currentReset.csoCsr);
+                let currentDso = normalizeMetricNumber(currentReset.dsoDsr);
+                let currentTsr = normalizeMetricNumber(currentReset.tsRplmt);
+                let currentCsr = normalizeMetricNumber(currentReset.csRplmt);
+                let currentDsr = normalizeMetricNumber(currentReset.dsRplmt);
 
                 while (backfillCursor.isAfter(startBoundaryDate)) {
                     const targetDate = moment.utc(backfillCursor).subtract(1, "day").startOf("day");
@@ -392,9 +427,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             userId: String(userId),
                             date: resetDate.toDate(),
                             msnEsn, pn, snBn,
-                            tsn: currentReset.tsn, csn: currentReset.csn, dsn: currentReset.dsn,
-                            tsoTsr: currentReset.tsoTsr, csoCsr: currentReset.csoCsr, dsoDsr: currentReset.dsoDsr,
-                            tsRplmt: currentReset.tsRplmt, csRplmt: currentReset.csRplmt, dsRplmt: currentReset.dsRplmt,
+                            tsn: normalizeMetricNumber(currentReset.tsn),
+                            csn: normalizeMetricNumber(currentReset.csn),
+                            dsn: normalizeMetricNumber(currentReset.dsn),
+                            tsoTsr: normalizeMetricNumber(currentReset.tsoTsr),
+                            csoCsr: normalizeMetricNumber(currentReset.csoCsr),
+                            dsoDsr: normalizeMetricNumber(currentReset.dsoDsr),
+                            tsRplmt: normalizeMetricNumber(currentReset.tsRplmt),
+                            csRplmt: normalizeMetricNumber(currentReset.csRplmt),
+                            dsRplmt: normalizeMetricNumber(currentReset.dsRplmt),
                             timeMetric: currentReset.timeMetric, setFlag: "Y", remarks: "(reset point)"
                         }
                     },
@@ -405,15 +446,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             const segmentEnd = nextReset ? moment.utc(nextReset.date).subtract(1, "day").startOf("day") : endBoundaryDate;
             let currDate = moment.utc(resetDate).add(1, "days").startOf("day");
 
-            let currentTsn = currentReset.tsn;
-            let currentCsn = currentReset.csn;
-            let currentDsn = currentReset.dsn;
-            let currentTso = currentReset.tsoTsr;
-            let currentCso = currentReset.csoCsr;
-            let currentDso = currentReset.dsoDsr;
-            let currentTsr = currentReset.tsRplmt;
-            let currentCsr = currentReset.csRplmt;
-            let currentDsr = currentReset.dsRplmt;
+            let currentTsn = normalizeMetricNumber(currentReset.tsn);
+            let currentCsn = normalizeMetricNumber(currentReset.csn);
+            let currentDsn = normalizeMetricNumber(currentReset.dsn);
+            let currentTso = normalizeMetricNumber(currentReset.tsoTsr);
+            let currentCso = normalizeMetricNumber(currentReset.csoCsr);
+            let currentDso = normalizeMetricNumber(currentReset.dsoDsr);
+            let currentTsr = normalizeMetricNumber(currentReset.tsRplmt);
+            let currentCsr = normalizeMetricNumber(currentReset.csRplmt);
+            let currentDsr = normalizeMetricNumber(currentReset.dsRplmt);
 
             const assetCalendars = allCalendars.filter(c =>
                 String(c.calMsn) === String(msnEsn) &&
@@ -733,11 +774,7 @@ const targetMetricFields = [
     { key: "dsRplmt", utilKey: "dsRplmt" },
 ];
 
-const parseMetricValue = (value) => {
-    if (value === "" || value === null || value === undefined) return null;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-};
+const parseMetricValue = normalizeMetricNumber;
 
 const roundMetricDelta = (value) => Number(value.toFixed(2));
 

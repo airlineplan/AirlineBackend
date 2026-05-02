@@ -774,6 +774,69 @@ test("maintenance backfill writes the first boundary day", async () => {
   assert.equal(secondDayUtil?.tsn, 30);
 });
 
+test("maintenance compute uses network effective dates when dated flights are not expanded", async () => {
+  const viewDate = utcDate(2026, 4, 10);
+  const resetDate = utcDate(2026, 4, 20);
+
+  await Flight.create({
+    userId: USER_ID,
+    flight: "T100",
+    depStn: "DEL",
+    arrStn: "BOM",
+    variant: "A320",
+    effFromDt: utcDate(2026, 4, 1),
+    effToDt: utcDate(2026, 5, 10),
+    dow: "12567",
+    bh: 0,
+    fh: 0,
+  });
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 3, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1001,
+    dsn: 201,
+    timeMetric: "BH",
+  });
+
+  const computeRes = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, computeRes);
+
+  const viewDayUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: viewDate,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+  }).lean();
+
+  assert.equal(computeRes.statusCode, 200);
+  assert.match(computeRes.body.message, /Maintenance logic computed/i);
+  assert.equal(viewDayUtil?.tsn, 2000);
+  assert.equal(viewDayUtil?.csn, 1001);
+  assert.equal(viewDayUtil?.dsn, 191);
+
+  const dashboardRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-04-10" },
+  }, dashboardRes);
+
+  assert.equal(dashboardRes.statusCode, 200);
+  assert.equal(dashboardRes.body.data.maintenanceData.length, 1);
+  assert.equal(dashboardRes.body.data.maintenanceData[0].msnEsn, "5340");
+  assert.equal(dashboardRes.body.data.maintenanceData[0].dsn, 191);
+});
+
 test("maintenance forward fill stops at a later reset and resumes from that reset", async () => {
   const day1 = utcDate(2026, 4, 3);
   const day2 = utcDate(2026, 4, 4);
