@@ -553,6 +553,111 @@ test("other mx monthly expenses follow the allocation-table basis within the air
   assert.equal(fhEnriched[3].otherMxExpenses, 0);
 });
 
+test("other mx monthly expenses prorate partial effective months by the exact examples rule", () => {
+  const cases = [
+    {
+      name: "single partial month",
+      fromDate: "2026-05-16",
+      toDate: "2026-05-31",
+      flights: [{ date: "2026-05-20" }],
+      expected: [51.61],
+    },
+    {
+      name: "full first month and partial last month",
+      fromDate: "2026-05-01",
+      toDate: "2026-06-17",
+      flights: [{ date: "2026-05-20" }, { date: "2026-06-10" }],
+      expected: [100, 54.84],
+    },
+    {
+      name: "partial first month, full middle month, and partial last month",
+      fromDate: "2026-05-16",
+      toDate: "2026-07-21",
+      flights: [{ date: "2026-05-20" }, { date: "2026-06-10" }, { date: "2026-07-10" }],
+      expected: [51.61, 100, 67.74],
+    },
+    {
+      name: "partial April and full May",
+      fromDate: "2026-04-09",
+      toDate: "2026-05-31",
+      flights: [{ date: "2026-04-20" }, { date: "2026-05-20" }],
+      expected: [30, 100],
+    },
+  ];
+
+  cases.forEach((scenario) => {
+    const flights = scenario.flights.map((flight, index) => ({
+      flight: `T${index + 1}`,
+      date: flight.date,
+      bh: 1,
+      fh: 1,
+      aircraft: {
+        registration: "VT-IJK",
+      },
+    }));
+
+    const enriched = computeFlightCostsBatch(flights, {
+      reportingCurrency: "USD",
+      otherMx: [
+        {
+          acftRegn: "VT-IJK",
+          costPerMonth: 100,
+          ccy: "USD",
+          fromDate: scenario.fromDate,
+          toDate: scenario.toDate,
+        },
+      ],
+      allocationTable: [{ costCode: "OTHERMXEXPENSES", basis: "DEPARTURES" }],
+    });
+
+    assert.deepEqual(
+      enriched.map((flight) => flight.otherMxExpenses),
+      scenario.expected,
+      scenario.name
+    );
+  });
+});
+
+test("monthly maintenance reserve uses the configured allocation-table basis", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "MR1",
+      date: "2026-05-10",
+      bh: 1,
+      aircraft: {
+        registration: "VT-ABC",
+        msn: "5825",
+      },
+    },
+    {
+      flight: "MR2",
+      date: "2026-05-20",
+      bh: 3,
+      aircraft: {
+        registration: "VT-ABC",
+        msn: "5825",
+      },
+    },
+  ], {
+    reportingCurrency: "USD",
+    allocationTable: [{ costCode: "MRMONTHLY", basis: "DEPARTURES" }],
+    leasedReserve: [
+      {
+        acftRegn: "VT-ABC",
+        sn: "5825",
+        setRate: 100,
+        driver: "MONTH",
+        ccy: "USD",
+        asOnDate: "2026-05-01",
+        endDate: "2026-05-31",
+      },
+    ],
+  });
+
+  assert.equal(enriched[0].mrMonthly, 50);
+  assert.equal(enriched[1].mrMonthly, 50);
+});
+
 test("maintenance reserve contribution uses flight FH and the matched engine SN schedule rate", () => {
   const flight = {
     date: "2026-04-15",

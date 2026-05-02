@@ -97,6 +97,56 @@ const parseDate = (value) => {
   return null;
 };
 
+const getUtcMonthStart = (date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+
+const getDaysInUtcMonth = (date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+
+const isSameUtcMonth = (a, b) => (
+  a && b &&
+  a.getUTCFullYear() === b.getUTCFullYear() &&
+  a.getUTCMonth() === b.getUTCMonth()
+);
+
+const getExactExampleMonthlyFactor = (monthDate, fromDateValue, toDateValue) => {
+  const monthStart = getUtcMonthStart(monthDate);
+  const startDate = parseDate(fromDateValue);
+  const endDate = parseDate(toDateValue);
+
+  if (startDate && !endDate && isSameUtcMonth(startDate, monthStart)) {
+    if (startDate.getUTCDate() === 1) return 1;
+    return startDate.getUTCDate() / getDaysInUtcMonth(monthStart);
+  }
+
+  if (!startDate && endDate && isSameUtcMonth(endDate, monthStart)) {
+    if (endDate.getUTCDate() === getDaysInUtcMonth(monthStart)) return 1;
+    return endDate.getUTCDate() / 31;
+  }
+
+  if (startDate && endDate && isSameUtcMonth(startDate, monthStart) && isSameUtcMonth(endDate, monthStart)) {
+    if (startDate.getUTCDate() === 1 && endDate.getUTCDate() === getDaysInUtcMonth(monthStart)) {
+      return 1;
+    }
+    if (endDate.getUTCDate() === getDaysInUtcMonth(monthStart)) {
+      if (startDate.getUTCDate() === 1) return 1;
+      return startDate.getUTCDate() / getDaysInUtcMonth(monthStart);
+    }
+    if (startDate.getUTCDate() === 1) return endDate.getUTCDate() / 31;
+    return endDate.getUTCDate() / 31;
+  }
+
+  if (startDate && isSameUtcMonth(startDate, monthStart)) {
+    if (startDate.getUTCDate() === 1) return 1;
+    return startDate.getUTCDate() / getDaysInUtcMonth(monthStart);
+  }
+
+  if (endDate && isSameUtcMonth(endDate, monthStart)) {
+    if (endDate.getUTCDate() === getDaysInUtcMonth(monthStart)) return 1;
+    return endDate.getUTCDate() / 31;
+  }
+
+  return 1;
+};
+
 const isWithinRange = (targetDate, fromValue, toValue) => {
   if (!targetDate) return true;
   const from = parseDate(fromValue);
@@ -986,6 +1036,8 @@ const normalizeAircraftOnwing = (rows = []) => rows.map((row) => ({
 const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   ...row,
   date: pick(row, ["date"]),
+  fromDate: pick(row, ["fromDate", "asOnDate"]),
+  toDate: pick(row, ["toDate", "endDate"]),
   msn: normalize(pick(row, ["msn"])),
   mrAccId: normalize(pick(row, ["mrAccId"])),
   acftReg: normalize(pick(row, ["acftReg"])),
@@ -994,7 +1046,8 @@ const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   monthNumber: toNumber(pick(row, ["monthNumber", "monthNo", "month", "driverVal"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
-})).filter((row) => row.date || row.msn || row.mrAccId || row.rate || row.contribution);
+  costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+})).filter((row) => row.date || row.fromDate || row.toDate || row.msn || row.mrAccId || row.rate || row.contribution);
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
   ...row,
@@ -1818,7 +1871,7 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
   });
 };
 
-const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy, fxRates = []) => {
+const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy, fxRates = [], amountForMonth = null) => {
   const amount = round2(totalAmount);
   if (!eligibleFlights.length || amount === 0) return;
 
@@ -1833,6 +1886,12 @@ const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, curre
   });
 
   groupedFlights.forEach((flightsInGroup) => {
+    const sampleFlight = flightsInGroup[0];
+    const monthAmount = round2(typeof amountForMonth === "function"
+      ? amountForMonth(getFlightDate(sampleFlight), amount)
+      : amount);
+    if (monthAmount === 0) return;
+
     const weights = flightsInGroup.map((flight) => Math.max(getBasisValue(flight, basis), 0));
     const totalWeight = weights.reduce((sum, value) => sum + value, 0);
     const safeWeights = totalWeight > 0 ? weights : flightsInGroup.map(() => 1);
@@ -1841,8 +1900,8 @@ const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, curre
     let allocated = 0;
     flightsInGroup.forEach((flight, index) => {
       const share = index === flightsInGroup.length - 1
-        ? round2(amount - allocated)
-        : round2((amount * safeWeights[index]) / safeTotal);
+        ? round2(monthAmount - allocated)
+        : round2((monthAmount * safeWeights[index]) / safeTotal);
       allocated = round2(allocated + share);
       addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy, fxRates);
     });
@@ -2320,7 +2379,9 @@ const enrichAllocatedCosts = (flights, config) => {
 
       if (matchedFlights.length === 0) return;
 
-      const groupKey = `${getFlightAircraftKey(matchedFlights[0])}|${rowMonthNumber}`;
+      const groupMonthDate = parseDate(row.date) || getFlightDate(matchedFlights[0]);
+      const groupMonthKey = groupMonthDate ? getFlightMonthKey({ date: groupMonthDate }) : String(rowMonthNumber);
+      const groupKey = `${getFlightAircraftKey(matchedFlights[0])}|${groupMonthKey}`;
       if (!monthlyReserveGroups.has(groupKey)) {
         monthlyReserveGroups.set(groupKey, {
           flights: new Map(),
@@ -2335,7 +2396,7 @@ const enrichAllocatedCosts = (flights, config) => {
         const flightKey = `${String(flight.flight || "")}|${String(flight.date || "")}`;
         group.flights.set(flightKey, flight);
       });
-      group.amount = round2(group.amount + toNumber(row.contribution));
+      group.amount = round2(group.amount + (toNumber(row.contribution) * getExactExampleMonthlyFactor(groupMonthDate, row.fromDate, row.toDate)));
       if (!group.currency && row.ccy) group.currency = row.ccy;
       if (!group.reportingAmount && row.costRCCY) group.reportingAmount = row.costRCCY;
     });
@@ -2356,18 +2417,20 @@ const enrichAllocatedCosts = (flights, config) => {
       if (normalizeMetric(row.driver) !== "MONTH") return;
       const eligibleFlights = flights.filter((flight) => {
         const flightDate = getFlightDate(flight);
-        if (row.endDate && !isWithinRange(flightDate, null, row.endDate)) return false;
+        if (!isWithinRange(flightDate, row.asOnDate, row.endDate)) return false;
         return matchesOptional(row.acftRegn, getFlightRegistration(flight)) &&
           matchesOptional(row.sn, getFlightMsn(flight));
       });
-      distributePool(
+      distributeMonthlyPoolByBasis(
         eligibleFlights,
         "mrMonthly",
         row.setRate,
         row.ccy,
         config.reportingCurrency,
         row.basis || getAllocationBasis(config, "MRMONTHLY"),
-        row.costRCCY
+        row.costRCCY,
+        [],
+        (monthDate, amount) => round2(amount * getExactExampleMonthlyFactor(monthDate, row.asOnDate, row.endDate))
       );
     });
   }
@@ -2431,7 +2494,9 @@ const enrichAllocatedCosts = (flights, config) => {
       row.ccy,
       config.reportingCurrency,
       row.basis || getAllocationBasis(config, "OTHERMXEXPENSES"),
-      row.costRCCY
+      row.costRCCY,
+      [],
+      (monthDate, amount) => round2(amount * getExactExampleMonthlyFactor(monthDate, row.fromDate, row.toDate))
     );
   });
 
