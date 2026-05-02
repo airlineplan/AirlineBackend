@@ -713,6 +713,44 @@ function recalculateRevenue(row, revenueConfig = null) {
     return recalculateRevenueForPooRow(row, revenueConfig);
 }
 
+function hasRevenueValue(row, fields) {
+    return fields.some((field) => parseNumber(row[field]) !== 0);
+}
+
+function normalizeRevenueRowsForReporting(rows, revenueConfig = null) {
+    return rows.map((row) => {
+        const hasFinalRevenue = hasRevenueValue(row, [
+            "fnlRccyPaxRev",
+            "fnlRccyCargoRev",
+            "fnlRccyTotalRev",
+        ]);
+        const hasSourceRevenue = hasRevenueValue(row, [
+            "rccyOdPaxRev",
+            "rccyOdCargoRev",
+            "rccyOdTotalRev",
+            "rccyLegPaxRev",
+            "rccyLegCargoRev",
+            "rccyLegTotalRev",
+            "odPaxRev",
+            "odCargoRev",
+            "odTotalRev",
+            "legPaxRev",
+            "legCargoRev",
+            "legTotalRev",
+            "odFare",
+            "odRate",
+            "legFare",
+            "legRate",
+        ]);
+
+        if (hasFinalRevenue || !hasSourceRevenue) {
+            return row;
+        }
+
+        return recalculateRevenue(row, revenueConfig);
+    });
+}
+
 function buildEditableResponse(records) {
     return [...records]
         .sort((a, b) => {
@@ -3068,9 +3106,11 @@ exports.getRevenueData = async (req, res) => {
         }
 
         if (String(mode).toLowerCase() === "detail") {
-            const rows = await PooTable.find(match)
+            const rawRows = await PooTable.find(match)
                 .sort({ date: 1, od: 1, sNo: 1 })
                 .lean();
+            const rawRevenueConfig = await RevenueConfig.findOne({ userId }).lean();
+            const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}));
 
             const summary = rows.reduce((acc, row) => ({
                 pax: roundToWhole(acc.pax + parseNumber(row.pax)),
@@ -3091,7 +3131,11 @@ exports.getRevenueData = async (req, res) => {
             .map(normalizeGroupByField)
             .filter(Boolean);
         const safeGroupByFields = groupByFields.length > 0 ? [...new Set(groupByFields)] : ["poo"];
-        const rows = await PooTable.find(match).lean();
+        const [rawRows, rawRevenueConfig] = await Promise.all([
+            PooTable.find(match).lean(),
+            RevenueConfig.findOne({ userId }).lean(),
+        ]);
+        const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}));
         const aggregate = buildRevenueAggregateResponse(rows, safeGroupByFields, periodicity);
 
         res.status(200).json({
@@ -3139,6 +3183,7 @@ exports.__testables__ = {
     normalizeDateKey,
     getCarriedForwardFxRate,
     convertLocalToReporting,
+    normalizeRevenueRowsForReporting,
     buildBlankAwareClause,
     backfillMasterFieldsToPooRows,
     buildSelectedDateRange,

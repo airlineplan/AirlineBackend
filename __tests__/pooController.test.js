@@ -12,6 +12,7 @@ const {
     recalculateRevenueForPooRow,
     getCarriedForwardFxRate,
     convertLocalToReporting,
+    normalizeRevenueRowsForReporting,
     buildBlankAwareClause,
     backfillMasterFieldsToPooRows,
     buildSelectedDateRange,
@@ -727,6 +728,36 @@ test("direct leg revenue calculates leg, cargo, and final INR totals", () => {
     assert.equal(row.fnlRccyPaxRev, 144000);
     assert.equal(row.fnlRccyCargoRev, 10);
     assert.equal(row.fnlRccyTotalRev, 144010);
+});
+
+test("reporting rows repair stale final revenue from saved OD inputs", () => {
+    const [row] = normalizeRevenueRowsForReporting([
+        {
+            date: new Date("2026-05-02T00:00:00.000Z"),
+            trafficType: "leg",
+            stops: 0,
+            pax: 76,
+            cargoT: 0.4,
+            odFare: 5000,
+            odRate: 35000,
+            legFare: 5000,
+            legRate: 35000,
+            odPaxRev: 380000,
+            odCargoRev: 14000,
+            odTotalRev: 394000,
+            fnlRccyPaxRev: 0,
+            fnlRccyCargoRev: 0,
+            fnlRccyTotalRev: 0,
+            pooCcy: "INR",
+            reportingCurrency: "INR",
+            pooCcyToRccy: 1,
+            applySSPricing: false,
+        },
+    ], { reportingCurrency: "INR", fxRates: [] });
+
+    assert.equal(row.fnlRccyPaxRev, 380000);
+    assert.equal(row.fnlRccyCargoRev, 14000);
+    assert.equal(row.fnlRccyTotalRev, 394000);
 });
 
 test("multiplies local OD revenue by FX into final reporting currency", () => {
