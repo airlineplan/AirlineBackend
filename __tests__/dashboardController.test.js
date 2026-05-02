@@ -96,7 +96,7 @@ before(async () => {
 
 after(async () => {
   await Promise.race([
-    mongoose.connection.close(),
+    mongoose.connection.close(true),
     new Promise((resolve) => setTimeout(resolve, 2000)),
   ]);
   if (mongodProcess) {
@@ -109,6 +109,7 @@ after(async () => {
     mongodProcess = null;
   }
   if (dbPath) fs.rmSync(dbPath, { recursive: true, force: true });
+  setImmediate(() => process.exit(process.exitCode || 0));
 });
 
 beforeEach(resetDatabase);
