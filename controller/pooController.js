@@ -182,6 +182,14 @@ function calculateLayoverMinutes(firstSta, secondStd) {
     return diffMinutes(firstSta, secondStd);
 }
 
+function calculateSameDayLayoverMinutes(firstSta, secondStd) {
+    const firstMinutes = timeToMinutes(firstSta);
+    const secondMinutes = timeToMinutes(secondStd);
+    if (firstMinutes === null || secondMinutes === null) return null;
+    const layover = secondMinutes - firstMinutes;
+    return layover >= 0 ? layover : null;
+}
+
 function getSnapshotBlockTime(snapshot) {
     const explicitBt = String(snapshot?.bt || "").trim();
     if (explicitBt) return explicitBt;
@@ -205,6 +213,10 @@ function buildValidationError(issues) {
     );
     error.validationIssues = issues;
     return error;
+}
+
+function throwValidationIssue(issue) {
+    throw buildValidationError([issue]);
 }
 
 function normalizeGroupByField(field) {
@@ -289,6 +301,64 @@ function buildStationCurrencyMap(stations) {
         stationMap.set(normalizeStation(station.stationName), normalizeCurrencyCode(station.currencyCode));
     });
     return stationMap;
+}
+
+function parseConnectionDurationMinutes(value) {
+    const parts = String(value || "")
+        .trim()
+        .split(":")
+        .map((part) => Number(part));
+    if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) {
+        return null;
+    }
+    return (parts[0] * 60) + parts[1];
+}
+
+function buildStationConnectionRuleMap(stations) {
+    const stationMap = new Map();
+    stations.forEach((station) => {
+        const stationCode = normalizeStation(station.stationName);
+        if (!stationCode) return;
+        stationMap.set(stationCode, {
+            "Dom-Dom": {
+                min: parseConnectionDurationMinutes(station.ddMinCT),
+                max: parseConnectionDurationMinutes(station.ddMaxCT),
+            },
+            "Dom-Intl": {
+                min: parseConnectionDurationMinutes(station.dInMinCT),
+                max: parseConnectionDurationMinutes(station.dInMaxCT),
+            },
+            "Intl-Dom": {
+                min: parseConnectionDurationMinutes(station.inDMinCT),
+                max: parseConnectionDurationMinutes(station.inDMaxCT),
+            },
+            "Intl-Intl": {
+                min: parseConnectionDurationMinutes(station.inInMinDT),
+                max: parseConnectionDurationMinutes(station.inInMaxDT),
+            },
+        });
+    });
+    return stationMap;
+}
+
+function getConnectionRuleKey(firstSnapshot, secondSnapshot) {
+    return `${normalizeDomIntl(firstSnapshot?.legDI || firstSnapshot?.odDI)}-${normalizeDomIntl(secondSnapshot?.legDI || secondSnapshot?.odDI)}`;
+}
+
+function isValidStationConnection(firstSnapshot, secondSnapshot, stationRuleMap) {
+    if (!firstSnapshot || !secondSnapshot) return false;
+    if (firstSnapshot.flightId === secondSnapshot.flightId) return false;
+    if (normalizeStation(firstSnapshot.arrStn) !== normalizeStation(secondSnapshot.depStn)) return false;
+    if (normalizeStation(firstSnapshot.depStn) === normalizeStation(secondSnapshot.arrStn)) return false;
+    if (normalizeDateKey(firstSnapshot.date) !== normalizeDateKey(secondSnapshot.date)) return false;
+
+    const layoverMinutes = calculateSameDayLayoverMinutes(firstSnapshot.sta, secondSnapshot.std);
+    if (layoverMinutes === null) return false;
+
+    const rule = stationRuleMap.get(normalizeStation(firstSnapshot.arrStn))?.[getConnectionRuleKey(firstSnapshot, secondSnapshot)];
+    if (!rule || rule.min === null || rule.max === null) return false;
+
+    return layoverMinutes >= rule.min && layoverMinutes <= rule.max;
 }
 
 function normalizeRevenueConfig(config = {}) {
@@ -574,11 +644,8 @@ function recalculateRevenue(row) {
     next.legCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(next.legRate));
     next.legTotalRev = roundToTwo(next.legPaxRev + next.legCargoRev);
 
-    const odFareBasis = row.applySSPricing ? next.legFare : row.odFare;
-    const odRateBasis = row.applySSPricing ? next.legRate : row.odRate;
-
-    next.odPaxRev = roundToTwo(parseNumber(next.pax) * parseNumber(odFareBasis));
-    next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(odRateBasis));
+    next.odPaxRev = roundToTwo(parseNumber(next.pax) * parseNumber(row.odFare));
+    next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(row.odRate));
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
     const rate = parseNumber(row.pooCcyToRccy, 1) || 1;
@@ -588,8 +655,8 @@ function recalculateRevenue(row) {
     next.rccyOdPaxRev = roundToTwo(next.odPaxRev * rate);
     next.rccyOdCargoRev = roundToTwo(next.odCargoRev * rate);
     next.rccyOdTotalRev = roundToTwo(next.odTotalRev * rate);
-    next.fnlRccyPaxRev = next.rccyOdPaxRev;
-    next.fnlRccyCargoRev = next.rccyOdCargoRev;
+    next.fnlRccyPaxRev = row.applySSPricing ? next.rccyLegPaxRev : next.rccyOdPaxRev;
+    next.fnlRccyCargoRev = row.applySSPricing ? next.rccyLegCargoRev : next.rccyOdCargoRev;
     next.fnlRccyTotalRev = roundToTwo(next.fnlRccyPaxRev + next.fnlRccyCargoRev);
 
     return next;
@@ -1215,17 +1282,35 @@ function buildExplicitConnectionEdges(flightsById) {
 }
 
 function mergeConnectionEdges(explicitEdges, generatedEdges) {
-    const explicitKeys = new Set(
-        explicitEdges.map((edge) => `${String(edge.flightID)}::${String(edge.beyondOD)}`)
-    );
-    const merged = [...explicitEdges];
+    const merged = [];
+    const seen = new Set();
 
-    generatedEdges.forEach((edge) => {
+    [...explicitEdges, ...generatedEdges].forEach((edge) => {
         const key = `${String(edge.flightID)}::${String(edge.beyondOD)}`;
-        if (!explicitKeys.has(key)) merged.push(edge);
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged.push(edge);
     });
 
     return merged;
+}
+
+function buildStationRuleConnectionEdges(snapshots, stationRuleMap) {
+    const snapshotList = [...snapshots.values()];
+    const edges = [];
+
+    snapshotList.forEach((firstSnapshot) => {
+        snapshotList.forEach((secondSnapshot) => {
+            if (!isValidStationConnection(firstSnapshot, secondSnapshot, stationRuleMap)) return;
+            edges.push({
+                flightID: firstSnapshot.flightId,
+                beyondOD: secondSnapshot.flightId,
+                source: "station_rule",
+            });
+        });
+    });
+
+    return edges;
 }
 
 async function resolveFlightsForTransitDraft({ userId, date, transitDraft, flightsById }) {
@@ -1285,6 +1370,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         RevenueConfig.findOne({ userId: normalizedUserId }).lean(),
     ]);
     const stationCurrencyMap = buildStationCurrencyMap(stations);
+    const stationRuleMap = buildStationConnectionRuleMap(stations);
     const revenueConfig = normalizeRevenueConfig(rawRevenueConfig || {});
     const fxRateMap = buildFxRateMap(revenueConfig.fxRates);
 
@@ -1327,7 +1413,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         }).lean()
         : [];
     const explicitConnectionEdges = buildExplicitConnectionEdges(flightsById);
-    const connectionEdges = mergeConnectionEdges(explicitConnectionEdges, generatedConnectionEdges);
+    let connectionEdges = mergeConnectionEdges(explicitConnectionEdges, generatedConnectionEdges);
 
     const connectionFlightIds = [
         ...new Set(
@@ -1362,7 +1448,7 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         const extraFlights = await Flight.find({
             userId: normalizedUserId,
             _id: { $in: missingFlightIds },
-                date: { $gte: dayStart, $lte: dayEnd },
+            date: { $gte: dayStart, $lte: dayEnd },
         }).lean();
         extraFlights.forEach((flight) => {
             flightsById.set(String(flight._id), flight);
@@ -1403,6 +1489,11 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
         rows.push(...legRows);
         resetByFlightId.set(snapshot.flightId, forceReset);
     }
+
+    connectionEdges = mergeConnectionEdges(
+        connectionEdges,
+        buildStationRuleConnectionEdges(snapshots, stationRuleMap)
+    );
 
     connectionEdges.forEach((edge) => {
         const firstFlight = flightsById.get(String(edge.flightID));
@@ -1584,6 +1675,26 @@ function validateTraffic(rows) {
                 message: `${describeRow(row)}: Cargo T exceeds Max Cargo T (${row.cargoT} > ${row.maxCargoT})`,
             });
         }
+        const localCcy = normalizeCurrencyCode(row.pooCcy);
+        const reportingCurrency = normalizeCurrencyCode(row.reportingCurrency);
+        if ((row.pooCcy && !localCcy) || (row.reportingCurrency && !reportingCurrency)) {
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: row.pooCcy && !localCcy ? "pooCcy" : "reportingCurrency",
+                code: "INVALID_CURRENCY",
+                message: `${describeRow(row)}: Currency code is invalid`,
+            });
+        }
+        if (parseNumber(row.pooCcyToRccy, 0) <= 0) {
+            issues.push({
+                rowId: String(row._id || ""),
+                rowKey: row.rowKey,
+                field: "pooCcyToRccy",
+                code: "INVALID_FX",
+                message: `${describeRow(row)}: FX rate must be greater than 0`,
+            });
+        }
     });
 
     if (issues.length) {
@@ -1630,7 +1741,13 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
     requestedEdits.forEach((requested) => {
         const current = rowsById.get(String(requested._id));
         if (!current) {
-            throw new Error("One or more POO rows were not found");
+            throwValidationIssue({
+                rowId: String(requested._id || ""),
+                rowKey: requested.rowKey || "",
+                field: "_id",
+                code: "ROW_NOT_FOUND",
+                message: "POO row was not found",
+            });
         }
 
         const original = { ...current };
@@ -1641,7 +1758,13 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
                 (row) => String(row._id) !== String(current._id)
             );
             if (!pairedLeg) {
-                throw new Error(`Missing balancing leg row for flight ${current.flightNumber}`);
+                throwValidationIssue({
+                    rowId: String(current._id || ""),
+                    rowKey: current.rowKey,
+                    field: "flightId",
+                    code: "BALANCING_ROW_MISSING",
+                    message: `Missing balancing leg row for flight ${current.flightNumber}`,
+                });
             }
 
             const paxDelta = roundToWhole(edited.pax - original.pax);
@@ -1680,7 +1803,15 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
             );
 
             if (!firstRow || !secondRow) {
-                throw new Error(`Incomplete OD group ${current.od}`);
+                throwValidationIssue({
+                    rowId: String(current._id || ""),
+                    rowKey: current.rowKey,
+                    field: "odGroupKey",
+                    code: current.trafficType === TRAFFIC_TYPES.TRANSIT_FL || current.trafficType === TRAFFIC_TYPES.TRANSIT_SL
+                        ? "TRANSIT_PAIR_INCOMPLETE"
+                        : "CONNECTION_PAIR_INCOMPLETE",
+                    message: `Incomplete OD group ${current.od}`,
+                });
             }
 
             const desiredPax = edited.pax;
@@ -1714,7 +1845,13 @@ function applyTrafficUpdates(stateRows, requestedEdits) {
             );
 
             if (!originLeg || !destinationLeg) {
-                throw new Error(`Missing balancing leg buckets for ${current.od}`);
+                throwValidationIssue({
+                    rowId: String(current._id || ""),
+                    rowKey: current.rowKey,
+                    field: "odGroupKey",
+                    code: "BALANCING_BUCKET_MISSING",
+                    message: `Missing balancing leg buckets for ${current.od}`,
+                });
             }
 
             assertBucketAvailability(
@@ -2047,7 +2184,15 @@ async function applyUpdatesForDate({ userId, updates }) {
     });
 
     if (rows.length !== editIds.length) {
-        throw new Error("One or more target POO rows were not found");
+        const foundIds = new Set(rows.map((row) => String(row._id)));
+        const missingId = editIds.find((id) => !foundIds.has(String(id)));
+        throwValidationIssue({
+            rowId: String(missingId || ""),
+            rowKey: "",
+            field: "_id",
+            code: "ROW_NOT_FOUND",
+            message: "One or more target POO rows were not found",
+        });
     }
 
     const relatedFlightIds = [
@@ -2242,6 +2387,14 @@ exports.populatePoo = async (req, res) => {
             userId,
             date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
             rowKey: { $nin: [...dataset.keepRowKeys] },
+            source: "system",
+            trafficType: { $in: [TRAFFIC_TYPES.BEHIND, TRAFFIC_TYPES.BEYOND] },
+            pax: 0,
+            cargoT: 0,
+            legFare: 0,
+            legRate: 0,
+            odFare: 0,
+            odRate: 0,
             $or: [
                 { flightId: { $in: dataset.touchedFlightIds } },
                 { connectedFlightId: { $in: dataset.touchedFlightIds } },
@@ -2405,6 +2558,68 @@ exports.updatePooRecords = async (req, res) => {
         console.error("🔥 Error updating POO records:", error);
         res.status(400).json({
             message: error.message || "Failed to update POO records",
+            errors: Array.isArray(error.validationIssues) ? error.validationIssues : [],
+        });
+    }
+};
+
+exports.upsertTransit = async (req, res) => {
+    req.body = {
+        transitDraft: req.body || {},
+    };
+    return exports.updatePooRecords(req, res);
+};
+
+exports.deleteTransit = async (req, res) => {
+    try {
+        const userId = normalizeUserId(req.user.id);
+        const odGroupKey = String(req.params.odGroupKey || "").trim();
+
+        if (!odGroupKey) {
+            return res.status(400).json({
+                message: "Transit OD group key is required",
+                errors: [{
+                    rowId: "",
+                    rowKey: "",
+                    field: "odGroupKey",
+                    code: "TRANSIT_GROUP_REQUIRED",
+                    message: "Transit OD group key is required",
+                }],
+            });
+        }
+
+        const transitRows = await PooTable.find({
+            userId,
+            odGroupKey,
+            trafficType: { $in: [TRAFFIC_TYPES.TRANSIT_FL, TRAFFIC_TYPES.TRANSIT_SL] },
+        });
+
+        const firstRow = transitRows.find((row) => row.trafficType === TRAFFIC_TYPES.TRANSIT_FL);
+        const secondRow = transitRows.find((row) => row.trafficType === TRAFFIC_TYPES.TRANSIT_SL);
+
+        if (!firstRow || !secondRow) {
+            throwValidationIssue({
+                rowId: String(firstRow?._id || secondRow?._id || ""),
+                rowKey: firstRow?.rowKey || secondRow?.rowKey || "",
+                field: "odGroupKey",
+                code: "TRANSIT_PAIR_INCOMPLETE",
+                message: "Transit pair is incomplete",
+            });
+        }
+
+        const refreshedRows = await applyUpdatesForDate({
+            userId,
+            updates: [{ _id: firstRow._id, pax: 0, cargoT: 0 }],
+        });
+
+        res.status(200).json({
+            message: "Transit OD deleted successfully",
+            data: buildEditableResponse(refreshedRows),
+        });
+    } catch (error) {
+        console.error("🔥 Error deleting transit POO rows:", error);
+        res.status(400).json({
+            message: error.message || "Failed to delete transit OD",
             errors: Array.isArray(error.validationIssues) ? error.validationIssues : [],
         });
     }
@@ -2842,6 +3057,8 @@ exports.__testables__ = {
     buildLegRows,
     buildSystemConnectionRows,
     buildExplicitConnectionEdges,
+    buildStationConnectionRuleMap,
+    buildStationRuleConnectionEdges,
     mergeConnectionEdges,
     applyTrafficUpdates,
     applyUpdatesForDate,

@@ -14,6 +14,8 @@ const {
     buildLegRows,
     buildSystemConnectionRows,
     buildExplicitConnectionEdges,
+    buildStationConnectionRuleMap,
+    buildStationRuleConnectionEdges,
     applyTrafficUpdates,
     applyUpdatesForDate,
     assignSerialNumbers,
@@ -347,6 +349,78 @@ test("connection rows are generated for both OD endpoint POO values", () => {
     );
 });
 
+test("station rules generate same-day Master flight connections", () => {
+    const firstSnapshot = makeConnectionSnapshot({
+        flightId: "a100",
+        depStn: "DEL",
+        arrStn: "BOM",
+        sector: "DEL-BOM",
+        flightNumber: "A100",
+        std: "09:00",
+        sta: "11:30",
+        legDI: "Dom",
+        odDI: "Dom",
+    });
+    const domSecond = makeConnectionSnapshot({
+        flightId: "a101",
+        depStn: "BOM",
+        arrStn: "HYD",
+        sector: "BOM-HYD",
+        flightNumber: "A101",
+        std: "14:30",
+        sta: "16:10",
+        legDI: "Dom",
+        odDI: "Dom",
+    });
+    const intlSecond = makeConnectionSnapshot({
+        flightId: "a102",
+        depStn: "BOM",
+        arrStn: "DXB",
+        sector: "BOM-DXB",
+        flightNumber: "A102",
+        std: "15:00",
+        sta: "17:00",
+        legDI: "Intl",
+        odDI: "Intl",
+    });
+    const tooEarly = makeConnectionSnapshot({
+        flightId: "a103",
+        depStn: "BOM",
+        arrStn: "GOI",
+        sector: "BOM-GOI",
+        flightNumber: "A103",
+        std: "12:00",
+        sta: "13:00",
+        legDI: "Dom",
+        odDI: "Dom",
+    });
+
+    const stationRules = buildStationConnectionRuleMap([{
+        stationName: "BOM",
+        ddMinCT: "01:30",
+        ddMaxCT: "07:00",
+        dInMinCT: "01:30",
+        dInMaxCT: "07:00",
+        inDMinCT: "02:00",
+        inDMaxCT: "07:00",
+        inInMinDT: "02:00",
+        inInMaxDT: "07:00",
+    }]);
+    const snapshots = new Map([
+        [firstSnapshot.flightId, firstSnapshot],
+        [domSecond.flightId, domSecond],
+        [intlSecond.flightId, intlSecond],
+        [tooEarly.flightId, tooEarly],
+    ]);
+
+    const edges = buildStationRuleConnectionEdges(snapshots, stationRules);
+
+    assert.deepEqual(
+        edges.map((edge) => `${edge.flightID}->${edge.beyondOD}`).sort(),
+        ["a100->a101", "a100->a102"]
+    );
+});
+
 test("timeInclLayover uses BT for leg rows and BT-plus-gap for OD rows", () => {
     const firstSnapshot = makeConnectionSnapshot({
         std: "09:00",
@@ -522,7 +596,7 @@ test("calculates proration from the field-specific ratio before GCD fallback", (
     assert.equal(calculateProrateRatio(row, "rateProrateRatioL1L2"), 0.5);
 });
 
-test("uses leg revenue as the OD basis when applySSPricing is enabled", () => {
+test("keeps OD revenue local and uses leg revenue only for final RCCY when applySSPricing is enabled", () => {
     const row = recalculateRevenue({
         stops: 0,
         pax: 10,
@@ -537,10 +611,52 @@ test("uses leg revenue as the OD basis when applySSPricing is enabled", () => {
         applySSPricing: true,
     });
 
-    assert.equal(row.odPaxRev, 15);
-    assert.equal(row.odCargoRev, 10);
-    assert.equal(row.odTotalRev, 25);
+    assert.equal(row.odPaxRev, 90);
+    assert.equal(row.odCargoRev, 40);
+    assert.equal(row.odTotalRev, 130);
+    assert.equal(row.rccyLegTotalRev, 25);
     assert.equal(row.fnlRccyTotalRev, 25);
+});
+
+test("uses OD RCCY as final revenue when applySSPricing is disabled", () => {
+    const row = recalculateRevenue({
+        stops: 0,
+        pax: 48,
+        cargoT: 0.2,
+        legFare: 100,
+        legRate: 10,
+        odFare: 3000,
+        odRate: 50,
+        fareProrateRatioL1L2: 0,
+        rateProrateRatioL1L2: 0,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+
+    assert.equal(row.odPaxRev, 144000);
+    assert.equal(row.odCargoRev, 10);
+    assert.equal(row.fnlRccyTotalRev, 144010);
+});
+
+test("multiplies local OD revenue by FX into final reporting currency", () => {
+    const row = recalculateRevenue({
+        stops: 0,
+        pax: 10,
+        cargoT: 0,
+        legFare: 0,
+        legRate: 0,
+        odFare: 100,
+        odRate: 0,
+        fareProrateRatioL1L2: 0,
+        rateProrateRatioL1L2: 0,
+        pooCcy: "USD",
+        reportingCurrency: "INR",
+        pooCcyToRccy: 83,
+        applySSPricing: false,
+    });
+
+    assert.equal(row.odPaxRev, 1000);
+    assert.equal(row.fnlRccyPaxRev, 83000);
 });
 
 test("default one-stop proration uses each row sector GCD when no explicit ratio is entered", () => {
