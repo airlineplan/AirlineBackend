@@ -14,6 +14,7 @@ const Flight = require("../model/flight");
 const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
 const { uploadAssignments } = require("../controller/assignmentController");
+const { deleteFlightsAndUpdateSectors } = require("../controller/dataController");
 const { buildAssignmentSyncPlan } = require("../utils/assignmentSync");
 
 const USER_ID = "test-user";
@@ -339,6 +340,28 @@ test("schedule field updates regenerate the flight rows and delete existing assi
   assert.deepEqual(collectFlightDates(flights), expected);
   assert.equal(assignments.length, 0);
   assert.ok(!flights.some((flight) => formatDate(flight.date) === formatDate(originalFlights[0].date)));
+});
+
+test("network deletion removes assignments for deleted flights", async () => {
+  const { data, networkId } = await seedNetwork();
+  const flights = await Flight.find({ networkId }).sort({ date: 1 }).lean();
+  await seedValidAssignment({ date: flights[0].date });
+
+  const res = createMockResponse();
+  await deleteFlightsAndUpdateSectors(
+    {
+      user: { id: USER_ID },
+      body: { ids: [data._id.toString()] },
+    },
+    res
+  );
+
+  const assignments = await Assignment.find({ userId: USER_ID }).lean();
+  const remainingFlights = await Flight.find({ networkId }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(assignments.length, 0);
+  assert.equal(remainingFlights.length, 0);
 });
 
 test("schedule field updates keep sector-derived numeric values on regenerated flights", async () => {

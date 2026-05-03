@@ -1,5 +1,6 @@
 const User = require("../model/userSchema");
 const Data = require("../model/dataSchema");
+const Assignment = require("../model/assignment");
 const Sector = require("../model/sectorSchema");
 const DataHistory = require("../model/dataHistorySchema");
 const SectorHistory = require("../model/sectorHistorySchema");
@@ -333,6 +334,17 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     )];
 
     const flgtDelCount = await Flights.deleteMany({ networkId: { $in: ids } });
+    const flightNumbersToDelete = [...new Set(flightsToDelete
+      .map(flight => String(flight.flight || "").trim().toUpperCase())
+      .filter(Boolean)
+    )];
+
+    if (flightNumbersToDelete.length > 0) {
+      await Assignment.deleteMany({
+        userId,
+        flightNumber: { $in: flightNumbersToDelete }
+      });
+    }
 
     // Delete entries from RotationDetails model
     await RotationDetails.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });
