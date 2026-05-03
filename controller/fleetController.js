@@ -364,6 +364,7 @@ exports.bulkUpsertFleet = async (req, res) => {
         // --------------------------------------------------------
         // STEP 1: Save data to the main Fleet table
         // --------------------------------------------------------
+        const savedSnSet = new Set();
         const fleetBulkOps = fleetData.map((asset, index) => {
             const updateData = { ...asset };
 
@@ -392,6 +393,7 @@ exports.bulkUpsertFleet = async (req, res) => {
             if (!updateData.sn) {
                 throw new Error(`Asset at row ${index + 1} is missing a Serial Number (SN)`);
             }
+            savedSnSet.add(updateData.sn);
 
             delete updateData.id;
             delete updateData._id;
@@ -408,6 +410,11 @@ exports.bulkUpsertFleet = async (req, res) => {
         if (fleetBulkOps.length > 0) {
             await Fleet.bulkWrite(fleetBulkOps, { ordered: false });
         }
+
+        await Fleet.deleteMany({
+            userId,
+            sn: { $nin: Array.from(savedSnSet) }
+        });
 
         // --------------------------------------------------------
         // STEP 2: Auto-populate AircraftOnwing Table
