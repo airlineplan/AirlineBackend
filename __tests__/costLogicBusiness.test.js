@@ -100,9 +100,79 @@ test("direct APU fuel uses the APU usage station fuel price", () => {
     apuUsage: [{ arrStn: "BOM", acftRegn: "VT-ABC", apuHours: 0.75, consumptionPerApuHour: 255 }],
     ccyFuel: [{ station: "BOM", month: "04/26", kgPerLtr: 0.78, intoPlaneRate: 92500, ccy: "INR" }],
   });
-  assert.equal(row.apuFuelConsumptionKg, 191.25);
-  approx(row.apuFuelLitres, 191.25 / 0.78);
-  approx(row.apuFuelCostDirect, (191.25 / 0.78 / 1000) * 92500);
+  const expectedKg = 0.75 * 30 * 255;
+  assert.equal(row.apuFuelConsumptionKg, expectedKg);
+  approx(row.apuFuelLitres, expectedKg / 0.78);
+  assert.equal(row.apuFuelCostDirect, 0);
+  approx(row.apuFuelCostAllocated, (expectedKg / 0.78 / 1000) * 92500);
+});
+
+test("APU fuel requires matching Stn fuel price and does not use quantity as cost", () => {
+  const row = computeFlightCosts({
+    ...baseFlight,
+    date: "2026-05-01",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    aircraft: { registration: "VT-AAB" },
+  }, {
+    reportingCurrency: "INR",
+    apuUsage: [{ stn: "BOM", acftRegn: "VT-AAB", fromDate: "2026-05-01", toDate: "2026-05-31", apuHrPerDay: 0.75, kgPerApuHr: 400 }],
+    ccyFuel: [{ station: "DEL", month: "05/26", kgPerLtr: 0.79, intoPlaneRate: 72000, ccy: "INR" }],
+  });
+
+  assert.equal(row.apuFuelConsumptionKg, 0);
+  assert.equal(row.apuFuelCost, 0);
+  assert.equal(row.apuFuelCostRCCY, 0);
+});
+
+test("APU fuel pool is aircraft-month scoped and allocated by selected driver", () => {
+  const flights = [
+    {
+      ...baseFlight,
+      date: "2026-05-01",
+      flight: "M101",
+      sector: "DEL-BOM",
+      depStn: "DEL",
+      arrStn: "BOM",
+      aircraft: { registration: "VT-AAB" },
+      bh: 2,
+    },
+    {
+      ...baseFlight,
+      date: "2026-05-02",
+      flight: "M102",
+      sector: "BOM-DEL",
+      depStn: "BOM",
+      arrStn: "DEL",
+      aircraft: { registration: "VT-AAB" },
+      bh: 1,
+    },
+    {
+      ...baseFlight,
+      date: "2026-05-02",
+      flight: "M201",
+      sector: "DEL-BOM",
+      depStn: "DEL",
+      arrStn: "BOM",
+      aircraft: { registration: "VT-OTHER" },
+      bh: 9,
+    },
+  ];
+
+  const rows = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    allocationTable: [{ costCode: "APUFUELCOST", basis: "BH" }],
+    apuUsage: [{ stn: "BOM", acftRegn: "VT-AAB", fromDate: "2026-05-01", toDate: "2026-05-31", apuHrPerDay: 0.75, kgPerApuHr: 400 }],
+    ccyFuel: [{ station: "BOM", month: "05/26", kgPerLtr: 0.79, intoPlaneRate: 72000, ccy: "INR" }],
+  });
+
+  const expectedPool = (0.75 * 31 * 400 / 0.79) * (72000 / 1000);
+  approx(expectedPool, 847594.94);
+  approx(rows[0].apuFuelCostAllocated, expectedPool * (2 / 3));
+  approx(rows[1].apuFuelCostAllocated, expectedPool * (1 / 3));
+  assert.equal(rows[2].apuFuelCostAllocated, 0);
+  approx(rows.reduce((sum, row) => sum + row.apuFuelCostAllocated, 0), expectedPool);
 });
 
 test("additional APU usage allocates by configured departures and preserves pool total", () => {

@@ -1604,6 +1604,47 @@ const getFirstDayOfNextMonth = (value) => {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1));
 };
 
+const getUtcMonthEnd = (date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+
+const getMonthKeyFromDate = (date) => `${String(date.getUTCMonth() + 1).padStart(2, "0")}/${String(date.getUTCFullYear()).slice(-2)}`;
+
+const getApuUsageDateRange = (row = {}) => {
+  const from = parseDate(row.fromDate);
+  const to = parseDate(row.toDate);
+  if (from && to) return from <= to ? { from, to } : { from: to, to: from };
+  if (from) return { from, to: getUtcMonthEnd(from) };
+  if (to) return { from: getUtcMonthStart(to), to };
+  return { from: null, to: null };
+};
+
+const getOverlappedApuUsageMonths = (row = {}, flights = []) => {
+  const range = getApuUsageDateRange(row);
+  const fallbackDate = range.from || range.to || flights.map(getFlightDate).find(Boolean);
+  if (!fallbackDate) return [];
+
+  const start = getUtcMonthStart(range.from || fallbackDate);
+  const end = getUtcMonthStart(range.to || fallbackDate);
+  const months = [];
+  for (
+    let cursor = new Date(start);
+    cursor <= end;
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+  ) {
+    const monthStart = getUtcMonthStart(cursor);
+    const monthEnd = getUtcMonthEnd(cursor);
+    const overlapStart = range.from && range.from > monthStart ? range.from : monthStart;
+    const overlapEnd = range.to && range.to < monthEnd ? range.to : monthEnd;
+    if (overlapStart <= overlapEnd) {
+      months.push({
+        monthKey: getMonthKeyFromDate(cursor),
+        monthStart,
+        days: Math.floor((overlapEnd - overlapStart) / 86400000) + 1,
+      });
+    }
+  }
+  return months;
+};
+
 const getLatestAircraftOnwingForFlight = (flight, onwingRows = []) => {
   const flightDate = getFlightDate(flight);
   const aircraftMsn = getFlightMsn(flight);
@@ -1998,11 +2039,12 @@ const addDebugMissing = (flight, message) => {
 const scoreApuUsageRule = (row, flight) => {
   if (!row || isAdditionalApuUseRow(row)) return -1;
   const flightDate = getFlightDate(flight);
-  if (!matchesOptional(row.arrStn, getFlightArr(flight))) return -1;
+  const rowStation = row.stn || row.arrStn;
+  if (!matchesOptional(rowStation, getFlightArr(flight))) return -1;
   if (!matchesOptional(row.variant, getFlightVariant(flight))) return -1;
   if (!matchesOptional(row.acftRegn, getFlightRegistration(flight))) return -1;
   if (!isWithinRange(flightDate, row.fromDate, row.toDate)) return -1;
-  return scoreSpecificity([row.arrStn, row.acftRegn, row.variant, row.fromDate || row.toDate]) * 10;
+  return scoreSpecificity([rowStation, row.acftRegn, row.variant, row.fromDate || row.toDate]) * 10;
 };
 
 const findFuelPriceForStations = (config, stations = [], monthKey) => {
@@ -2098,25 +2140,18 @@ const enrichDirectCosts = (flights, config) => {
 
     const apuRule = pickBest(config.apuUsage || [], (row) => scoreApuUsageRule(row, flight));
     if (apuRule) {
-      const apuFuelKg = round2(toNumber(apuRule.apuHours) * toNumber(apuRule.consumptionPerApuHour));
       const apuStation = apuRule.stn || apuRule.arrStn;
       const apuPriceRule = findFuelPriceForStations(config, [apuStation], flightMonthKey);
-      const apuCost = apuPriceRule ? calculateFuelCost(apuFuelKg, apuPriceRule) : apuFuelKg;
-      flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + apuFuelKg);
-      flight.apuFuelKg = round2((flight.apuFuelKg || 0) + apuFuelKg);
-      flight.apuFuelLitres = round2((flight.apuFuelLitres || 0) + (apuPriceRule?.kgPerLtr ? apuFuelKg / toNumber(apuPriceRule.kgPerLtr) : 0));
-      flight.apuFuelCostDirect = round2((flight.apuFuelCostDirect || 0) + apuCost);
-      addAllocation(flight, "apuFuelCost", apuCost, apuPriceRule?.ccy || apuRule.ccy, config.reportingCurrency, apuPriceRule?.costRCCY || apuRule.costRCCY);
       if (flight.costDebug) {
         flight.costDebug.apu = {
           matchedApuRow: apuRule,
           fuelPriceRow: apuPriceRule || null,
-          apuFuelKg,
-          apuFuelLitres: apuPriceRule?.kgPerLtr ? round2(apuFuelKg / toNumber(apuPriceRule.kgPerLtr)) : 0,
-          directCost: apuCost,
+          apuFuelKg: 0,
+          apuFuelLitres: 0,
+          directCost: 0,
           allocatedCost: flight.apuFuelCostAllocated || 0,
         };
-        if (apuFuelKg > 0 && !apuPriceRule) addDebugMissing(flight, `No APU fuel price row for ${apuStation} / ${flightMonthKey}`);
+        if (!apuPriceRule) addDebugMissing(flight, `No APU fuel price row for ${apuStation} / ${flightMonthKey}`);
       }
     } else if (flight.costDebug) {
       flight.costDebug.apu = { matchedApuRow: null, fuelPriceRow: null, apuFuelKg: 0, apuFuelLitres: 0, directCost: 0, allocatedCost: 0 };
@@ -2347,44 +2382,73 @@ const enrichAllocatedCosts = (flights, config) => {
   }, null);
 
   config.apuUsage.forEach((row) => {
-    const isAdditionalUse = isAdditionalApuUseRow(row);
-    if (!isAdditionalUse) return;
-    const rowMonth = normalizeMonthKey(row.fromDate || row.toDate);
-    if (!rowMonth || !row.acftRegn) return;
-
-    const monthFlights = flights.filter((flight) => {
-      return getFlightMonthKey(flight) === rowMonth &&
-        row.acftRegn === getFlightRegistration(flight) &&
-        matchesOptional(row.variant, getFlightVariant(flight));
-    });
-
-    if (!monthFlights.length) return;
-
     const apuStation = row.stn || row.arrStn;
-    const priceRule = findFuelPriceForStations(config, [apuStation], rowMonth);
-    const pricePerKg = getPricePerKg(priceRule);
-    const totalKg = row.apuHours > 0 ? row.apuHours * row.consumptionPerApuHour : row.consumptionPerApuHour;
-    const poolAmount = pricePerKg > 0 ? totalKg * pricePerKg : totalKg;
-    const beforeValues = new Map(monthFlights.map((flight) => [flight, flight.apuFuelCostAllocated || 0]));
-    distributePool(
-      monthFlights,
-      "apuFuelCost",
-      poolAmount,
-      priceRule?.ccy || row.ccy,
-      config.reportingCurrency,
-      row.basis || getAllocationBasis(config, "APUFUELCOST"),
-      priceRule?.costRCCY || row.costRCCY
-    );
-    monthFlights.forEach((flight) => {
-      flight.apuFuelCostAllocated = round2((flight.apuFuelCost || 0) - (flight.apuFuelCostDirect || 0));
-      const allocatedCost = round2((flight.apuFuelCostAllocated || 0) - (beforeValues.get(flight) || 0));
-      if (poolAmount > 0 && allocatedCost > 0) {
-        const kgShare = round2((totalKg * allocatedCost) / poolAmount);
-        flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + kgShare);
-        flight.apuFuelKg = round2((flight.apuFuelKg || 0) + kgShare);
-        flight.apuFuelLitres = round2((flight.apuFuelLitres || 0) + (priceRule?.kgPerLtr ? kgShare / toNumber(priceRule.kgPerLtr) : 0));
-      }
-      if (flight.costDebug?.apu) flight.costDebug.apu.allocatedCost = flight.apuFuelCostAllocated;
+    const apuHrPerDay = toNumber(row.apuHrPerDay || row.apuHours);
+    const kgPerApuHr = toNumber(row.kgPerApuHr || row.consumptionPerApuHour);
+    if (!apuStation || apuHrPerDay <= 0 || kgPerApuHr <= 0) return;
+
+    getOverlappedApuUsageMonths(row, flights).forEach(({ monthKey, monthStart, days }) => {
+      const priceRule = findFuelPriceForStations(config, [apuStation], monthKey);
+      const totalKg = round2(apuHrPerDay * days * kgPerApuHr);
+      const poolAmount = priceRule ? calculateFuelCost(totalKg, priceRule) : 0;
+      const basis = row.basis || getAllocationBasis(config, "APUFUELCOST");
+
+      const candidateFlights = flights.filter((flight) => {
+        if (getFlightMonthKey(flight) !== monthKey) return false;
+        if (!matchesOptional(row.variant, getFlightVariant(flight))) return false;
+        if (row.acftRegn) return row.acftRegn === getFlightRegistration(flight);
+        if (!isAdditionalApuUseRow(row) && apuStation !== getFlightArr(flight)) return false;
+        return true;
+      });
+
+      const aircraftGroups = new Map();
+      candidateFlights.forEach((flight) => {
+        const aircraftKey = getFlightRegistration(flight);
+        if (!aircraftKey) return;
+        if (!aircraftGroups.has(aircraftKey)) aircraftGroups.set(aircraftKey, []);
+        aircraftGroups.get(aircraftKey).push(flight);
+      });
+
+      aircraftGroups.forEach((monthFlights) => {
+        if (!monthFlights.length) return;
+        const weights = monthFlights.map((flight) => Math.max(getBasisValue(flight, basis), 0));
+        const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+        if (totalWeight <= 0) {
+          monthFlights.forEach((flight) => addDebugMissing(flight, `No positive APU allocation driver for ${getFlightRegistration(flight)} / ${monthKey}`));
+          return;
+        }
+
+        const beforeValues = new Map(monthFlights.map((flight) => [flight, flight.apuFuelCostAllocated || 0]));
+        let allocated = 0;
+        monthFlights.forEach((flight, index) => {
+          const share = index === monthFlights.length - 1
+            ? round2(poolAmount - allocated)
+            : round2((poolAmount * weights[index]) / totalWeight);
+          allocated = round2(allocated + share);
+          if (share > 0) {
+            addAllocation(flight, "apuFuelCost", share, priceRule?.ccy || row.ccy, config.reportingCurrency, 0, config.fxRates || [], monthStart);
+          }
+        });
+
+        monthFlights.forEach((flight) => {
+          flight.apuFuelCostAllocated = round2((flight.apuFuelCost || 0) - (flight.apuFuelCostDirect || 0));
+          const allocatedCost = round2((flight.apuFuelCostAllocated || 0) - (beforeValues.get(flight) || 0));
+          const kgShare = poolAmount > 0 && allocatedCost > 0 ? round2((totalKg * allocatedCost) / poolAmount) : 0;
+          if (kgShare > 0) {
+            flight.apuFuelConsumptionKg = round2((flight.apuFuelConsumptionKg || 0) + kgShare);
+            flight.apuFuelKg = round2((flight.apuFuelKg || 0) + kgShare);
+            flight.apuFuelLitres = round2((flight.apuFuelLitres || 0) + (priceRule?.kgPerLtr ? kgShare / toNumber(priceRule.kgPerLtr) : 0));
+          }
+          if (flight.costDebug?.apu) {
+            flight.costDebug.apu.matchedApuRow = row;
+            flight.costDebug.apu.fuelPriceRow = priceRule || null;
+            flight.costDebug.apu.apuFuelKg = round2((flight.costDebug.apu.apuFuelKg || 0) + kgShare);
+            flight.costDebug.apu.apuFuelLitres = round2((flight.costDebug.apu.apuFuelLitres || 0) + (priceRule?.kgPerLtr && kgShare > 0 ? kgShare / toNumber(priceRule.kgPerLtr) : 0));
+            flight.costDebug.apu.allocatedCost = flight.apuFuelCostAllocated;
+            if (!priceRule) addDebugMissing(flight, `No APU fuel price row for ${apuStation} / ${monthKey}`);
+          }
+        });
+      });
     });
   });
 

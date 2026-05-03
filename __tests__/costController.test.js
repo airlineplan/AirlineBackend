@@ -366,9 +366,9 @@ test("cost page controller computes representative cost inputs into flight cost 
   assert.equal(flight.reportingCurrency, "INR");
   assert.equal(flight.engineFuelConsumptionKg, 1000);
   assert.equal(flight.engineFuelCost, 1000);
-  assert.equal(flight.apuFuelCostDirect, 100);
-  assert.equal(flight.apuFuelCostAllocated, 50);
-  assert.equal(flight.apuFuelCost, 150);
+  assert.equal(flight.apuFuelCostDirect, 0);
+  assert.equal(flight.apuFuelCostAllocated, 3050);
+  assert.equal(flight.apuFuelCost, 3050);
   assert.equal(flight.maintenanceReserveContribution, 15);
   assert.equal(flight.transitMaintenance, 20);
   assert.equal(flight.otherMaintenance, 13);

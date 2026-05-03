@@ -1053,12 +1053,22 @@ test("APU fuel allocation follows the configured basis", () => {
     ],
     apuUsage: [
       {
+        stn: "BOM",
         variant: "737",
         acftRegn: "VT-IJK",
         addlnUse: "Y",
         fromDate: "2026-04-20",
         apuHours: 1,
         consumptionPerApuHour: 300,
+        ccy: "INR",
+      },
+    ],
+    ccyFuel: [
+      {
+        station: "BOM",
+        month: "04/26",
+        kgPerLtr: 1,
+        intoPlaneRate: 1000,
         ccy: "INR",
       },
     ],

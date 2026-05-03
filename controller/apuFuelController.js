@@ -23,6 +23,48 @@ const getMonthKey = (date) => {
   return `${String(parsed.getMonth() + 1).padStart(2, "0")}/${String(parsed.getFullYear()).slice(-2)}`;
 };
 
+const getMonthStart = (date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+const getMonthEnd = (date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+
+const getApuUsageDateRange = (row = {}, flights = []) => {
+  const from = row.fromDate ? new Date(row.fromDate) : null;
+  const to = row.toDate ? new Date(row.toDate) : null;
+  const validFrom = from && !Number.isNaN(from.getTime()) ? from : null;
+  const validTo = to && !Number.isNaN(to.getTime()) ? to : null;
+  const fallback = validFrom || validTo || flights.map((flight) => flight?.date ? new Date(flight.date) : null).find((date) => date && !Number.isNaN(date.getTime()));
+  if (!fallback) return null;
+  if (validFrom && validTo) return validFrom <= validTo ? { from: validFrom, to: validTo } : { from: validTo, to: validFrom };
+  if (validFrom) return { from: validFrom, to: getMonthEnd(validFrom) };
+  if (validTo) return { from: getMonthStart(validTo), to: validTo };
+  return { from: getMonthStart(fallback), to: getMonthEnd(fallback) };
+};
+
+const getApuUsageMonths = (row = {}, flights = []) => {
+  const range = getApuUsageDateRange(row, flights);
+  if (!range) return [];
+  const start = getMonthStart(range.from);
+  const end = getMonthStart(range.to);
+  const months = [];
+  for (
+    let cursor = new Date(start);
+    cursor <= end;
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+  ) {
+    const monthStart = getMonthStart(cursor);
+    const monthEnd = getMonthEnd(cursor);
+    const overlapStart = range.from > monthStart ? range.from : monthStart;
+    const overlapEnd = range.to < monthEnd ? range.to : monthEnd;
+    if (overlapStart <= overlapEnd) {
+      months.push({
+        monthStart,
+        monthKey: getMonthKey(monthStart),
+        days: Math.floor((overlapEnd - overlapStart) / 86400000) + 1,
+      });
+    }
+  }
+  return months;
+};
+
 const isWithinRange = (targetDate, fromValue, toValue) => {
   const target = targetDate ? new Date(targetDate) : null;
   if (!target || Number.isNaN(target.getTime())) return true;
@@ -138,9 +180,63 @@ const buildGeneratedApuFuelRow = (flight, costConfig, flights = []) => {
 };
 
 const buildGeneratedApuFuelRows = (flights = [], costConfig = {}) => {
-  return flights
-    .map((flight) => buildGeneratedApuFuelRow(flight, costConfig, flights))
-    .filter(Boolean);
+  const rows = [];
+  (costConfig.apuUsage || []).forEach((apuUsage, usageIndex) => {
+    const apuStation = getApuUsageStation(apuUsage);
+    const apuHr = getApuUsageHours(apuUsage);
+    const consumptionKgPerApuHr = getApuUsageConsumptionRate(apuUsage);
+    if (!apuStation || apuHr <= 0 || consumptionKgPerApuHr <= 0) return;
+
+    getApuUsageMonths(apuUsage, flights).forEach(({ monthStart, monthKey, days }) => {
+      const fuelPrice = pickBest(costConfig.ccyFuel || [], (row) => scoreFuelPriceRow(
+        row,
+        monthKey,
+        normalizeValue(apuStation)
+      ));
+      const matchedFlights = flights.filter((flight) => {
+        if (getMonthKey(flight?.date) !== monthKey) return false;
+        if (apuUsage.variant && normalizeValue(apuUsage.variant) !== getFlightVariant(flight)) return false;
+        if (apuUsage.acftRegn && normalizeValue(apuUsage.acftRegn) !== normalizeValue(getFlightRegistration(flight))) return false;
+        if (!isAdditionalApuUseRow(apuUsage) && normalizeValue(apuStation) !== getFlightArrStn(flight)) return false;
+        return true;
+      });
+      const aircraftKeys = [...new Set(matchedFlights.map(getFlightRegistration).map(trimString).filter(Boolean))];
+      const targetAircraft = apuUsage.acftRegn ? [trimString(apuUsage.acftRegn)] : aircraftKeys;
+      targetAircraft.forEach((acftRegn) => {
+        const consumptionKg = apuHr * days * consumptionKgPerApuHr;
+        const kgPerLtr = fuelPrice ? Number(fuelPrice.kgPerLtr || 0) : 0;
+        const intoPlaneRate = fuelPrice ? Number(fuelPrice.intoPlaneRate || 0) : 0;
+        const consumptionLitres = kgPerLtr > 0 ? consumptionKg / kgPerLtr : 0;
+        const costPerLtr = intoPlaneRate > 0 ? intoPlaneRate / 1000 : 0;
+        const totalFuelCost = fuelPrice ? consumptionLitres * costPerLtr : 0;
+        rows.push({
+          rowKey: `apu-${usageIndex}-${acftRegn || "NA"}-${monthKey}-${normalizeValue(apuStation)}`,
+          date: monthStart,
+          stn: apuStation,
+          arrStn: apuStation,
+          acftRegn,
+          apun: "",
+          apuHr: roundToTwo(apuHr),
+          apuHrPerDay: roundToTwo(apuHr),
+          consumptionKgPerApuHr: roundToTwo(consumptionKgPerApuHr),
+          kgPerApuHr: roundToTwo(consumptionKgPerApuHr),
+          consumptionKg: roundToTwo(consumptionKg),
+          consumptionLitres,
+          costPerLtr,
+          totalFuelCost,
+          currency: trimString(fuelPrice?.ccy || apuUsage?.ccy || ""),
+          costSourceType: fuelPrice ? "STN_MONTH" : "UNMATCHED",
+          costSourceStation: apuStation,
+          sourceFlightId: "",
+          remarks: fuelPrice ? "" : "No matching station-month fuel price row found",
+          monthKey,
+        });
+      });
+    });
+  });
+
+  if (rows.length > 0) return rows;
+  return flights.map((flight) => buildGeneratedApuFuelRow(flight, costConfig, flights)).filter(Boolean);
 };
 
 const normalizeApuFuelRow = (record, userId) => {
