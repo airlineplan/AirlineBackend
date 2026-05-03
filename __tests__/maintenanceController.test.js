@@ -373,10 +373,10 @@ test("maintenance target deltas include aircraft and on-wing utilisation through
   assert.equal(computeRes.statusCode, 200);
   assert.equal(forecast?.tsn, 3017);
   assert.equal(forecast?.csn, 1507);
-  assert.equal(forecast?.dsn, 321);
+  assert.equal(forecast?.dsn, 307);
   assert.equal(forecast?.tsRplmt, 2767);
   assert.equal(forecast?.csRplmt, 1407);
-  assert.equal(forecast?.dsRplmt, 296);
+  assert.equal(forecast?.dsRplmt, 282);
 
   const targetReq = { user: { id: USER_ID }, query: { date: "2026-05-10", msnEsn: "635799" } };
   const targetRes = createMockResponse();
@@ -385,10 +385,10 @@ test("maintenance target deltas include aircraft and on-wing utilisation through
   assert.equal(targetRes.statusCode, 200);
   assert.equal(targetRes.body.data[0].fTsn, 83);
   assert.equal(targetRes.body.data[0].fCsn, 93);
-  assert.equal(targetRes.body.data[0].fDsn, 29);
+  assert.equal(targetRes.body.data[0].fDsn, 43);
   assert.equal(targetRes.body.data[0].fTsr, 33);
   assert.equal(targetRes.body.data[0].fCsr, 43);
-  assert.equal(targetRes.body.data[0].fDsr, 37);
+  assert.equal(targetRes.body.data[0].fDsr, 51);
 });
 
 test("maintenance compute uses utilisation assumptions only when assignments are absent", async () => {
@@ -465,6 +465,89 @@ test("maintenance compute uses utilisation assumptions only when assignments are
   assert.equal(day2Util?.csn, 102);
   assert.equal(day3Util?.tsn, 108);
   assert.equal(day3Util?.csn, 103);
+});
+
+test("maintenance compute freezes default utilisation counters outside assumption dates", async () => {
+  const days = Array.from({ length: 15 }, (_, index) => utcDate(2026, 5, 7 + index));
+  const resetDate = days[0];
+  const idleDate = utcDate(2026, 5, 10);
+  const assumptionStart = utcDate(2026, 5, 11);
+  const assumptionPenultimate = utcDate(2026, 5, 20);
+  const assumptionEnd = utcDate(2026, 5, 21);
+
+  await seedFlightDays(days);
+  await seedFleetAsset({
+    msn: 6125,
+    regn: "VT-MAY",
+    entry: resetDate,
+    exit: utcDate(2026, 5, 31),
+  });
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "6125",
+    pn: "U93",
+    snBn: "801",
+    tsn: 150,
+    csn: 150,
+    dsn: 150,
+    tsoTsr: 100,
+    csoCsr: 100,
+    dsoDsr: 100,
+    tsRplmt: 50,
+    csRplmt: 50,
+    dsRplmt: 50,
+    timeMetric: "BH",
+  });
+
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "6125",
+    fromDate: assumptionStart,
+    toDate: assumptionEnd,
+    hours: 4.5,
+    cycles: 2,
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const idleUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: idleDate,
+    msnEsn: "6125",
+    pn: "U93",
+    snBn: "801",
+  }).lean();
+  const penultimateUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: assumptionPenultimate,
+    msnEsn: "6125",
+    pn: "U93",
+    snBn: "801",
+  }).lean();
+  const endUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: assumptionEnd,
+    msnEsn: "6125",
+    pn: "U93",
+    snBn: "801",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(idleUtil?.tsn, 150);
+  assert.equal(idleUtil?.csn, 150);
+  assert.equal(idleUtil?.dsn, 150);
+  assert.equal(idleUtil?.dsoDsr, 100);
+  assert.equal(penultimateUtil?.tsn, 195);
+  assert.equal(penultimateUtil?.csn, 170);
+  assert.equal(penultimateUtil?.dsn, 160);
+  assert.equal(penultimateUtil?.dsoDsr, 110);
+  assert.equal(endUtil?.tsn, 199.5);
+  assert.equal(endUtil?.csn, 172);
+  assert.equal(endUtil?.dsn, 161);
+  assert.equal(endUtil?.dsoDsr, 111);
 });
 
 test("maintenance calendar since-new threshold triggers once inside the master date range", async () => {

@@ -199,7 +199,7 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
 const getAssumptionUsageForDate = ({ assumptions = [], effectiveMsn, date }) => {
     const msn = String(effectiveMsn || "").trim();
     if (!msn || !date) {
-        return { timeUsage: 0, cycleUsage: 0 };
+        return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
     }
 
     const targetDate = moment.utc(date).startOf("day");
@@ -210,18 +210,19 @@ const getAssumptionUsageForDate = ({ assumptions = [], effectiveMsn, date }) => 
     ));
 
     if (!match) {
-        return { timeUsage: 0, cycleUsage: 0 };
+        return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
     }
 
     return {
         timeUsage: Number(match.hours || 0),
-        cycleUsage: Number(match.cycles || 0)
+        cycleUsage: Number(match.cycles || 0),
+        hasUsage: true
     };
 };
 
 const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, assumptions = [] }) => {
     if (!effectiveMsn) {
-        return { timeUsage: 0, cycleUsage: 0 };
+        return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
     }
 
     const msnNumber = Number(effectiveMsn);
@@ -256,7 +257,8 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
 
         return {
             timeUsage,
-            cycleUsage
+            cycleUsage,
+            hasUsage: true
         };
     }
 
@@ -512,25 +514,26 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     continue;
                 }
 
-                const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+                const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
                     userId,
                     effectiveMsn: currentEffectiveMsn,
                     date: currDate,
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
                 });
+                const dayUsage = hasUsage ? 1 : 0;
 
                 const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
                 const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
-                const projectedDsn = currentDsn !== null ? currentDsn + 1 : null;
+                const projectedDsn = currentDsn !== null ? currentDsn + dayUsage : null;
 
                 const projectedTso = currentTso !== null ? Number((currentTso + timeUsage).toFixed(2)) : null;
                 const projectedCso = currentCso !== null ? currentCso + cycleUsage : null;
-                const projectedDso = currentDso !== null ? currentDso + 1 : null;
+                const projectedDso = currentDso !== null ? currentDso + dayUsage : null;
 
                 const projectedTsr = currentTsr !== null ? Number((currentTsr + timeUsage).toFixed(2)) : null;
                 const projectedCsr = currentCsr !== null ? currentCsr + cycleUsage : null;
-                const projectedDsr = currentDsr !== null ? currentDsr + 1 : null;
+                const projectedDsr = currentDsr !== null ? currentDsr + dayUsage : null;
 
                 const projectedValues = {
                     tsn: projectedTsn,
