@@ -44,6 +44,31 @@ test("engine fuel consumption and cost follow table x index x PLF and station fu
   approx(row.engineFuelCost, (8275 / 0.78 / 1000) * 92500);
 });
 
+test("engine fuel cost applies May aircraft fuel index for DEL-BOM monthly schedule", () => {
+  const flights = Array.from({ length: 31 }, (_, index) => ({
+    date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+    flight: "A101",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    variant: "A320",
+    acftType: "A320",
+    aircraft: { registration: "VT-AAB" },
+    paxLF: 80,
+  }));
+
+  const rows = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    fuelConsum: [{ sectorOrGcd: "DEL-BOM", acftRegn: "VT-AAB", month: "05/26", fuelConsumptionKg: 1100 }],
+    fuelConsumIndex: [{ acftRegn: "VT-AAB", month1: "04/26", month2: "05/26", value1: 1.03, value2: 1.05 }],
+    plfEffect: [{ sectorOrGcd: "DEL-BOM", acftRegn: "VT-AAB", p75: 0.95, p90: 1.1 }],
+    ccyFuel: [{ station: "DEL", month: "05/26", kgPerLtr: 0.78, intoPlaneRate: 70000, ccy: "INR" }],
+  });
+
+  approx(rows[0].engineFuelCost, 114019.23);
+  approx(rows.reduce((total, row) => total + row.engineFuelCostRCCY, 0), 3534596.13);
+});
+
 test("PLF consumption supports additional percentage bands beyond the default set", () => {
   const row = computeFlightCosts({
     ...baseFlight,

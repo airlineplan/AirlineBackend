@@ -644,12 +644,28 @@ const extractFuelConsumIndexRecords = (rows = []) => {
       normalizeMonthKey(pick(row, ["month5"])),
     ];
     const values = [
-      row.m1,
-      row.m2,
-      row.m3,
-      row.m4,
-      row.m5,
+      pick(row, ["m1", "value1", "index1"]),
+      pick(row, ["m2", "value2", "index2"]),
+      pick(row, ["m3", "value3", "index3"]),
+      pick(row, ["m4", "value4", "index4"]),
+      pick(row, ["m5", "value5", "index5"]),
     ];
+
+    const explicitMonth = normalizeMonthKey(pick(row, ["month", "mmmYy", "mmmYY", "period", "mth", "mmYY"]));
+    const explicitValue = pick(row, ["fuelConsumptionIndex", "index", "value"]);
+    if (explicitMonth && explicitValue !== "") {
+      records.push({
+        acftRegn,
+        month1: labels[0] || "",
+        month2: labels[1] || "",
+        month3: labels[2] || "",
+        month4: labels[3] || "",
+        month5: labels[4] || "",
+        month: explicitMonth,
+        fuelConsumptionIndex: round2(explicitValue),
+      });
+      return;
+    }
 
     const hasLabelOnly = labels.some(Boolean) && !acftRegn && values.every((value) => value === "" || value === null || value === undefined);
     if (hasLabelOnly) {
