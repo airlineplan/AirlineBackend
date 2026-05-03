@@ -781,6 +781,22 @@ const parseMetricValue = normalizeMetricNumber;
 
 const roundMetricDelta = (value) => Number(value.toFixed(2));
 
+const getMaintenanceDashboardDateWindow = async ({ userId } = {}) => {
+    const flightBounds = await getFlightDateBounds({ userId });
+    if (!flightBounds?.firstDate || !flightBounds?.lastDate) {
+        return null;
+    }
+
+    const startDate = moment.utc(flightBounds.firstDate).startOf("day");
+    const endDate = moment.utc(flightBounds.lastDate).endOf("day");
+
+    return {
+        startDate,
+        openingBalanceDate: startDate.clone().subtract(1, "day").startOf("day"),
+        endDate
+    };
+};
+
 /**
  * 1. GET: Fetch Main Dashboard Data
  */
@@ -811,9 +827,35 @@ exports.getMaintenanceDashboard = async (req, res) => {
         const { date, msnEsn } = req.query;
 
         if (date) {
-            const endOfDay = moment(date).endOf('day').toDate();
+            const selectedDateBounds = getUtcDayBounds(date);
+            if (!selectedDateBounds) {
+                return res.status(400).json({ success: false, message: "Invalid date" });
+            }
+
+            const dashboardWindow = await getMaintenanceDashboardDateWindow({ userId });
+            if (dashboardWindow) {
+                const requestedDate = selectedDateBounds.start.clone();
+                const isBeforeWindow = requestedDate.isBefore(dashboardWindow.openingBalanceDate);
+                const isAfterWindow = requestedDate.isAfter(dashboardWindow.endDate);
+
+                if (isBeforeWindow || isAfterWindow) {
+                    return res.status(200).json({
+                        success: true,
+                        data: {
+                            maintenanceData: [],
+                            aircraft,
+                            utilisation,
+                            status,
+                            rotables
+                        }
+                    });
+                }
+            }
+
+            const startOfDay = selectedDateBounds.start.toDate();
+            const endOfDay = selectedDateBounds.endExclusive.toDate();
             const utilFilter = {
-                date: { $lte: endOfDay }
+                date: { $gte: startOfDay, $lt: endOfDay }
             };
             if (userId) {
                 utilFilter.userId = String(userId);
@@ -836,7 +878,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
             }
             fleetFilter.$and = [
                 { $or: [{ entry: { $exists: false } }, { entry: null }, { entry: { $lte: endOfDay } }] },
-                { $or: [{ exit: { $exists: false } }, { exit: null }, { exit: { $gte: moment(date).startOf("day").toDate() } }] }
+                { $or: [{ exit: { $exists: false } }, { exit: null }, { exit: { $gte: startOfDay } }] }
             ];
 
             const [utils, resetRecords, fleetAssets] = await Promise.all([
@@ -877,7 +919,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 resetRecordsByKey.set(key, recordsForKey);
             });
 
-            const selectedDateMoment = moment.utc(date).endOf("day");
+            const selectedDateMoment = selectedDateBounds.start.clone().endOf("day");
             const selectedDate = selectedDateMoment.format("YYYY-MM-DD");
             const rowSourcesByKey = new Map(utilByKey);
             resetRecords.forEach(record => {
@@ -886,7 +928,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                     String(record.pn || "").trim().toUpperCase(),
                     String(record.snBn || "").trim().toUpperCase()
                 ].join("|");
-                if (!rowSourcesByKey.has(key) && moment.utc(record.date).isSameOrBefore(selectedDateMoment)) {
+                if (!rowSourcesByKey.has(key)) {
                     rowSourcesByKey.set(key, record);
                 }
             });

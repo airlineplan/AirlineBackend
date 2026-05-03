@@ -1403,6 +1403,86 @@ test("maintenance dashboard shows backfilled status before the reset date", asyn
   assert.equal(res.body.data.maintenanceData[0].dsn, 191);
 });
 
+test("maintenance dashboard can seed a pre-reset row from a future reset inside the planning window", async () => {
+  await seedFlightDays([utcDate(2026, 4, 8), utcDate(2026, 4, 10), utcDate(2026, 5, 10)]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 3, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 20),
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 2000,
+    csn: 1001,
+    dsn: 201,
+    timeMetric: "BH",
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-04-10" },
+  }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.maintenanceData.length, 1);
+  assert.equal(res.body.data.maintenanceData[0].msnEsn, "5340");
+  assert.equal(res.body.data.maintenanceData[0].asOnDate, "2026-04-10");
+  assert.equal(res.body.data.maintenanceData[0].savedResetDate, "2026-04-20");
+});
+
+test("maintenance dashboard only shows rows from opening balance day through planning end", async () => {
+  await seedFlightDays([utcDate(2026, 5, 1), utcDate(2026, 5, 31)]);
+  await seedFleetAsset({
+    msn: 5961,
+    regn: "VT-BAL",
+    entry: utcDate(2026, 5, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: utcDate(2026, 5, 5),
+    msnEsn: "5961",
+    pn: "U92",
+    snBn: "805",
+    tsn: 300,
+    csn: 298,
+    dsn: 298,
+    timeMetric: "BH",
+  });
+
+  const beforeOpeningRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-04-29" },
+  }, beforeOpeningRes);
+
+  const openingRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-04-30" },
+  }, openingRes);
+
+  const afterEndRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-06-01" },
+  }, afterEndRes);
+
+  assert.equal(beforeOpeningRes.statusCode, 200);
+  assert.equal(beforeOpeningRes.body.data.maintenanceData.length, 0);
+  assert.equal(openingRes.statusCode, 200);
+  assert.equal(openingRes.body.data.maintenanceData.length, 1);
+  assert.equal(openingRes.body.data.maintenanceData[0].msnEsn, "5961");
+  assert.equal(afterEndRes.statusCode, 200);
+  assert.equal(afterEndRes.body.data.maintenanceData.length, 0);
+});
+
 test("target dashboard returns rendered aliases, deltas, and highlight flags", async () => {
   const targetDate = utcDate(2026, 4, 13);
 
