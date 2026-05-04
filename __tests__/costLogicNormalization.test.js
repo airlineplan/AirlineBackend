@@ -5,10 +5,15 @@ const {
   normalizeCostConfig,
   computeFlightCosts,
   computeFlightCostsBatch,
+  generateMaintenanceReserveSchedule,
   serializeNavigationCostRows,
   getFlightSnContext,
 } = require("../utils/costLogic");
 const { __private__: apuFuelPrivate } = require("../controller/apuFuelController");
+
+const approx = (actual, expected, tolerance = 0.02) => {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `expected ${actual} to be within ${tolerance} of ${expected}`);
+};
 
 test("normalizeCostConfig preserves maintenance UI fields for round-trip save/load", () => {
   const normalized = normalizeCostConfig({
@@ -795,10 +800,10 @@ test("maintenance reserve monthly contribution splits the schedule contribution 
     ],
   });
 
-  assert.equal(enriched[0].mrMonthly, 200);
-  assert.equal(enriched[1].mrMonthly, 600);
-  assert.equal(enriched[2].mrMonthly, 500);
-  assert.equal(enriched[3].mrMonthly, 900);
+  assert.equal(enriched[0].mrMonthly, 225);
+  assert.equal(enriched[1].mrMonthly, 675);
+  assert.equal(enriched[2].mrMonthly, 0);
+  assert.equal(enriched[3].mrMonthly, 0);
 });
 
 test("engine fuel consumption multiplies fuel consumption, fuel index, and the matched PLF band", () => {
@@ -1386,4 +1391,193 @@ test("apu fuel allocation applies additional-use rows with a station alias", () 
 
   assert.equal(enriched.apuFuelCost, 50076.92);
   assert.equal(enriched.apuFuelCostCCY, "INR");
+});
+
+test("maintenance reserve schedule generation dedupes, preserves manual rows, and escalates rates", () => {
+  const generated = generateMaintenanceReserveSchedule([
+    {
+      mrAccId: "MR-ENG-01",
+      schMxEvent: "LLP",
+      acftRegn: "VT-ABC",
+      pn: "LEAP-1A",
+      sn: "740811",
+      setBalance: 1500000,
+      setRate: 290,
+      asOnDate: "2026-04-01",
+      ccy: "USD",
+      driver: "FH",
+      annualEscalation: 7.5,
+      anniversaryDate: "2026-04-01",
+      endDate: "2028-04-30",
+    },
+  ], [
+    {
+      date: "2027-04-01",
+      mrAccId: "MR-ENG-01",
+      sn: "740811",
+      driver: "FH",
+      rate: 999,
+      ccy: "USD",
+      source: "manual",
+    },
+  ]);
+
+  assert.equal(generated.filter((row) => row.mrAccId === "MR-ENG-01" && row.sn === "740811" && row.date === "2026-04-01").length, 1);
+  assert.equal(generated.find((row) => row.date === "2026-04-01").rate, 290);
+  assert.equal(generated.find((row) => row.date === "2027-04-01").rate, 999);
+  approx(generated.find((row) => row.date === "2028-04-01").rate, 335.13);
+
+  const regenerated = generateMaintenanceReserveSchedule([
+    {
+      mrAccId: "MR-ENG-01",
+      sn: "740811",
+      setRate: 290,
+      asOnDate: "2026-04-01",
+      endDate: "2026-06-30",
+      driver: "FH",
+    },
+  ], generated);
+  assert.equal(regenerated.filter((row) => row.mrAccId === "MR-ENG-01" && row.sn === "740811" && row.date === "2026-05-01").length, 1);
+});
+
+test("maintenance reserve schedule drives on-wing SN mapping, next-month lookup, FX, and monthly allocation", () => {
+  const flights = [
+    {
+      date: "2026-04-16",
+      flight: "A103",
+      sector: "CCU-BOM",
+      depStn: "CCU",
+      arrStn: "BOM",
+      acft: "VT-ABC",
+      acftRegn: "VT-ABC",
+      bh: 2.8333333333,
+      fh: 2.6166666667,
+      variant: "A320",
+    },
+    {
+      date: "2026-04-20",
+      flight: "A104",
+      acftRegn: "VT-ABC",
+      bh: 2.8333333333,
+      fh: 1,
+      variant: "A320",
+    },
+  ];
+
+  const enriched = computeFlightCostsBatch(flights, {
+    reportingCurrency: "INR",
+    fxRates: [{ pair: "USD/INR", dateKey: "2026-05-01", rate: 92 }],
+    leasedReserve: [
+      {
+        mrAccId: "MR-ENG-01",
+        acftRegn: "VT-ABC",
+        pn: "LEAP-1A",
+        sn: "740811",
+        setBalance: 1500000,
+        setRate: 281.24,
+        asOnDate: "2026-04-01",
+        ccy: "USD",
+        driver: "FH",
+        annualEscalation: 0,
+        anniversaryDate: "2026-04-01",
+        endDate: "2026-06-30",
+      },
+      {
+        mrAccId: "MR-APU-01",
+        acftRegn: "VT-ABC",
+        pn: "APU",
+        sn: "P-NNNN",
+        setBalance: 0,
+        setRate: 0,
+        asOnDate: "2026-04-01",
+        ccy: "USD",
+        driver: "Month",
+        endDate: "2026-06-30",
+      },
+      {
+        mrAccId: "MR-NOPE",
+        sn: "UNRELATED",
+        setRate: 1000,
+        asOnDate: "2026-04-01",
+        ccy: "USD",
+        driver: "FH",
+        endDate: "2026-06-30",
+      },
+    ],
+    maintenanceReserveSchedule: [
+      {
+        date: "2026-05-01",
+        mrAccId: "MR-ENG-01",
+        acftRegn: "VT-ABC",
+        pn: "LEAP-1A",
+        sn: "740811",
+        driver: "FH",
+        rate: 281.24,
+        contribution: 0,
+        ccy: "USD",
+        openingBalance: 1500000,
+        closingBalance: 1500000,
+        source: "manual",
+      },
+      {
+        date: "2026-05-01",
+        mrAccId: "MR-APU-01",
+        acftRegn: "VT-ABC",
+        pn: "APU",
+        sn: "P-NNNN",
+        driver: "Month",
+        rate: 0,
+        contribution: 141.58,
+        ccy: "USD",
+        openingBalance: 0,
+        closingBalance: 141.58,
+        source: "manual",
+      },
+    ],
+    aircraftOnwing: [
+      {
+        date: "2026-04-01",
+        acftRegn: "VT-ABC",
+        msn: "5825",
+        eng1Esn: "740811",
+        eng2Esn: "NNNNNN",
+        apun: "P-NNNN",
+      },
+    ],
+    debugCosts: true,
+  });
+
+  assert.equal(enriched[0].msn, "5825");
+  assert.equal(enriched[0].eng1Esn, "740811");
+  assert.equal(enriched[0].eng2Esn, "NNNNNN");
+  assert.equal(enriched[0].apun, "P-NNNN");
+  approx(enriched[0].maintenanceReserveContribution, 735.91);
+  assert.equal(enriched[0].maintenanceReserveContributionCCY, "USD");
+  approx(enriched[0].maintenanceReserveContributionRCCY, 67703.72);
+  assert.equal(enriched[0].mrContribution, enriched[0].maintenanceReserveContribution);
+  approx(enriched[0].mrMonthly + enriched[1].mrMonthly, 141.58);
+  approx(enriched[0].mrMonthlyRCCY + enriched[1].mrMonthlyRCCY, 13025.36);
+  assert.equal(enriched[0].mrDebug.qualifyingAccounts[0].scheduleDate, "2026-05-01");
+  assert.equal(enriched[0].mrDebug.qualifyingAccounts.some((row) => row.mrAccId === "MR-NOPE"), false);
+});
+
+test("maintenance reserve supports BH, departure, and APUHR drivers", () => {
+  const [enriched] = computeFlightCostsBatch([
+    {
+      date: "2026-04-16",
+      acftRegn: "VT-ABC",
+      bh: 3,
+      fh: 2,
+      apuHours: 0.5,
+    },
+  ], {
+    reportingCurrency: "USD",
+    leasedReserve: [
+      { mrAccId: "MR-BH", acftRegn: "VT-ABC", setRate: 10, driver: "BH", asOnDate: "2026-04-01", endDate: "2026-06-30", ccy: "USD" },
+      { mrAccId: "MR-DEP", acftRegn: "VT-ABC", setRate: 20, driver: "Departure", asOnDate: "2026-04-01", endDate: "2026-06-30", ccy: "USD" },
+      { mrAccId: "MR-APUHR", acftRegn: "VT-ABC", setRate: 30, driver: "APUHr", asOnDate: "2026-04-01", endDate: "2026-06-30", ccy: "USD" },
+    ],
+  });
+
+  assert.equal(enriched.maintenanceReserveContribution, 65);
 });

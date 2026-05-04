@@ -178,7 +178,8 @@ const normalizeMetric = (value) => {
   if (["BH", "BLOCKHOURS", "BLOCK HOURS"].includes(raw)) return "BH";
   if (["FH", "FLIGHTHOURS", "FLIGHT HOURS"].includes(raw)) return "FH";
   if (["FT", "FLIGHTTIME", "FLIGHT TIME"].includes(raw)) return "FT";
-  if (["MONTH", "MONTHLY"].includes(raw)) return "MONTH";
+  if (["MONTH", "MONTHLY", "DAYS", "DAY", "CALENDAR"].includes(raw)) return "MONTH";
+  if (["APUHR", "APU HR", "APUHOUR", "APU HOUR", "APUHOURS", "APU HOURS"].includes(raw)) return "APUHR";
   return raw;
 };
 
@@ -1032,9 +1033,9 @@ const groupFuelPriceRows = (rows = []) => {
 
 const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
   ...row,
-  mrAccId: pick(row, ["mrAccId"]),
+  mrAccId: pick(row, ["mrAccId", "mrAccountId", "MR Acc ID"]),
   schMxEvent: pick(row, ["schMxEvent", "schEvent", "event"]),
-  acftRegn: normalize(pick(row, ["acftRegn", "acftReg"])),
+  acftRegn: normalize(pick(row, ["acftRegn", "aircraftRegn", "acftReg", "acft"])),
   pn: normalize(pick(row, ["pn"])),
   sn: normalize(pick(row, ["sn", "esn", "apun", "msn"])),
   setBalance: toNumber(pick(row, ["setBalance"])),
@@ -1043,7 +1044,9 @@ const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
   annualEscl: toNumber(pick(row, ["annualEscl", "annualEscalation", "escl"])),
-  anniversary: pick(row, ["anniversary", "anniversaryDt"]),
+  annualEscalation: toNumber(pick(row, ["annualEscalation", "annualEscl", "escl"])),
+  anniversary: pick(row, ["anniversary", "anniversaryDate", "anniversaryDt"]),
+  anniversaryDate: pick(row, ["anniversaryDate", "anniversary", "anniversaryDt"]),
   endDate: pick(row, ["endDate", "toDate"]),
   basis: normalizeMetric(pick(row, ["basis"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
@@ -1052,33 +1055,180 @@ const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
 const normalizeAircraftOnwing = (rows = []) => rows.map((row) => ({
   ...row,
   date: pick(row, ["date"]),
-  msn: normalize(pick(row, ["msn"])),
-  pos1Esn: normalize(pick(row, ["pos1Esn"])),
-  pos2Esn: normalize(pick(row, ["pos2Esn"])),
+  acftRegn: normalize(pick(row, ["acftRegn", "aircraftRegn", "acftReg", "acft", "regn", "registration"])),
+  msn: normalize(pick(row, ["msn", "sn"])),
+  pos1Esn: normalize(pick(row, ["pos1Esn", "eng1Esn", "engine1Esn"])),
+  pos2Esn: normalize(pick(row, ["pos2Esn", "eng2Esn", "engine2Esn"])),
+  eng1Esn: normalize(pick(row, ["eng1Esn", "pos1Esn", "engine1Esn"])),
+  eng2Esn: normalize(pick(row, ["eng2Esn", "pos2Esn", "engine2Esn"])),
   apun: normalize(pick(row, ["apun"])),
-})).filter((row) => row.date || row.msn || row.pos1Esn || row.pos2Esn || row.apun);
+})).filter((row) => row.date || row.acftRegn || row.msn || row.pos1Esn || row.pos2Esn || row.apun);
 
 const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   ...row,
-  date: pick(row, ["date"]),
+  date: pick(row, ["date", "scheduleDate"]),
   fromDate: pick(row, ["fromDate", "asOnDate"]),
   toDate: pick(row, ["toDate", "endDate"]),
-  msn: normalize(pick(row, ["msn", "sn"])),
-  mrAccId: normalize(pick(row, ["mrAccId"])),
+  msn: normalize(pick(row, ["msn", "sn", "esn", "apun"])),
+  mrAccId: normalize(pick(row, ["mrAccId", "mrAccountId", "MR Acc ID"])),
   schMxEventAccount: normalize(pick(row, ["schMxEventAccount", "schMxEvent", "event"])),
-  acftReg: normalize(pick(row, ["acftReg", "acftRegn"])),
+  schMxEvent: normalize(pick(row, ["schMxEvent", "schMxEventAccount", "event"])),
+  acftReg: normalize(pick(row, ["acftReg", "acftRegn", "aircraftRegn"])),
+  acftRegn: normalize(pick(row, ["acftRegn", "aircraftRegn", "acftReg"])),
   pn: normalize(pick(row, ["pn"])),
-  sn: normalize(pick(row, ["sn"])),
-  rate: toNumber(pick(row, ["rate"])),
-  contribution: toNumber(pick(row, ["contribution", "setRate"])),
+  sn: normalize(pick(row, ["sn", "msn", "esn", "apun"])),
+  rate: toNumber(pick(row, ["rate", "applicableRate"])),
+  contribution: toNumber(pick(row, ["contribution", "monthlyContribution", "mrMonthly", "setRate"])),
   driverValue: toNumber(pick(row, ["driverValue", "driverVal"])),
   monthNumber: toNumber(pick(row, ["monthNumber", "monthNo", "month", "driverValue", "driverVal"])),
-  drawdown: toNumber(pick(row, ["drawdown"])),
-  balance: toNumber(pick(row, ["balance"])),
+  openingBalance: toNumber(pick(row, ["openingBalance", "openingBal"])),
+  openingBal: toNumber(pick(row, ["openingBal", "openingBalance"])),
+  drawdown: toNumber(pick(row, ["drawdown", "mrDrawdown"])),
+  mrDrawdown: toNumber(pick(row, ["mrDrawdown", "drawdown"])),
+  closingBalance: toNumber(pick(row, ["closingBalance", "closingBal", "balance"])),
+  closingBal: toNumber(pick(row, ["closingBal", "closingBalance", "balance"])),
+  balance: toNumber(pick(row, ["balance", "closingBalance", "closingBal"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
+  source: normalize(pick(row, ["source"])),
+  notes: pick(row, ["notes"]),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
+})).map((row) => ({
+  ...row,
+  acftReg: row.acftReg || row.acftRegn,
+  acftRegn: row.acftRegn || row.acftReg,
+  msn: row.msn || row.sn,
+  sn: row.sn || row.msn,
+  openingBalance: row.openingBalance || row.openingBal,
+  openingBal: row.openingBal || row.openingBalance,
+  closingBalance: row.closingBalance || row.closingBal || row.balance,
+  closingBal: row.closingBal || row.closingBalance || row.balance,
+  balance: row.balance || row.closingBalance || row.closingBal,
 })).filter((row) => row.date || row.fromDate || row.toDate || row.msn || row.mrAccId || row.acftReg || row.rate || row.contribution || row.drawdown || row.balance);
+
+const toDayKey = (value) => {
+  const date = parseDate(value);
+  if (!date) return "";
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+};
+
+const toMonthStartKey = (value) => {
+  const date = parseDate(value);
+  if (!date) return "";
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-01`;
+};
+
+const getScheduleIdentity = (row = {}) => [
+  normalize(row.mrAccId),
+  normalize(row.sn || row.msn),
+  toMonthStartKey(row.date),
+].join("|");
+
+const getEscalatedReserveRate = (setting = {}, scheduleDateValue) => {
+  const baseRate = toNumber(setting.setRate || setting.rate);
+  const escalation = toNumber(setting.annualEscalation || setting.annualEscl);
+  const scheduleDate = parseDate(scheduleDateValue);
+  const anniversary = parseDate(setting.anniversaryDate || setting.anniversary || setting.asOnDate);
+  if (!baseRate || !escalation || !scheduleDate || !anniversary) return round2(baseRate);
+
+  let anniversaries = scheduleDate.getUTCFullYear() - anniversary.getUTCFullYear();
+  const anniversaryThisYear = new Date(Date.UTC(
+    scheduleDate.getUTCFullYear(),
+    anniversary.getUTCMonth(),
+    anniversary.getUTCDate()
+  ));
+  if (scheduleDate < anniversaryThisYear) anniversaries -= 1;
+  if (anniversaries <= 0) return round2(baseRate);
+  return round2(baseRate * ((1 + escalation / 100) ** anniversaries));
+};
+
+const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingScheduleRows = []) => {
+  const settings = normalizeLeasedReserve(leasedReserveRows);
+  const existing = normalizeMaintenanceReserveSchedule(existingScheduleRows);
+  const byKey = new Map();
+
+  existing.forEach((row) => {
+    const normalized = { ...row, date: toMonthStartKey(row.date) || row.date };
+    const key = getScheduleIdentity(normalized);
+    if (!key.replace(/\|/g, "")) return;
+    byKey.set(key, normalized);
+  });
+
+  settings.forEach((setting) => {
+    const startDate = parseDate(setting.asOnDate);
+    const endDate = parseDate(setting.endDate || setting.asOnDate);
+    if (!startDate || !endDate || !setting.mrAccId) return;
+    const cursor = getUtcMonthStart(startDate);
+    const endMonth = getUtcMonthStart(endDate);
+    let previousClosing = toNumber(setting.setBalance);
+
+    for (
+      let monthDate = new Date(cursor);
+      monthDate <= endMonth;
+      monthDate = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 1))
+    ) {
+      const date = toDayKey(monthDate);
+      const generated = {
+        date,
+        mrAccId: setting.mrAccId,
+        schMxEvent: setting.schMxEvent || "",
+        schMxEventAccount: setting.schMxEvent || "",
+        acftRegn: setting.acftRegn || "",
+        acftReg: setting.acftRegn || "",
+        pn: setting.pn || "",
+        sn: setting.sn || "",
+        msn: setting.sn || "",
+        driver: setting.driver || "",
+        rate: getEscalatedReserveRate(setting, date),
+        contribution: 0,
+        openingBalance: previousClosing,
+        openingBal: previousClosing,
+        drawdown: 0,
+        mrDrawdown: 0,
+        closingBalance: previousClosing,
+        closingBal: previousClosing,
+        balance: previousClosing,
+        ccy: setting.ccy || "",
+        source: "generated",
+        notes: "",
+      };
+      const key = getScheduleIdentity(generated);
+      const existingRow = byKey.get(key);
+      if (!existingRow) {
+        byKey.set(key, generated);
+        previousClosing = generated.closingBalance;
+        continue;
+      }
+      if (normalize(existingRow.source) === "GENERATED") {
+        const contribution = toNumber(existingRow.contribution);
+        const drawdown = toNumber(existingRow.drawdown || existingRow.mrDrawdown);
+        const openingBalance = existingRow.openingBalance || existingRow.openingBal || previousClosing;
+        const closingBalance = round2(toNumber(openingBalance) + contribution - drawdown);
+        byKey.set(key, {
+          ...existingRow,
+          ...generated,
+          contribution,
+          drawdown,
+          mrDrawdown: drawdown,
+          openingBalance,
+          openingBal: openingBalance,
+          closingBalance,
+          closingBal: closingBalance,
+          balance: closingBalance,
+          notes: existingRow.notes || generated.notes,
+        });
+        previousClosing = closingBalance;
+      }
+      previousClosing = toNumber(existingRow.closingBalance || existingRow.closingBal || existingRow.balance || previousClosing);
+    }
+  });
+
+  return Array.from(byKey.values()).sort((a, b) => (
+    String(a.mrAccId || "").localeCompare(String(b.mrAccId || "")) ||
+    String(a.sn || a.msn || "").localeCompare(String(b.sn || b.msn || "")) ||
+    String(a.date || "").localeCompare(String(b.date || ""))
+  ));
+};
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
   ...row,
@@ -1103,16 +1253,6 @@ const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
 })).filter((row) => row.date || row.event || row.msnEsnApun);
 
 const isBlankValue = (value) => value === "" || value === null || value === undefined;
-
-const toDayKey = (value) => {
-  const date = parseDate(value);
-  if (!date) return "";
-  return [
-    date.getUTCFullYear(),
-    String(date.getUTCMonth() + 1).padStart(2, "0"),
-    String(date.getUTCDate()).padStart(2, "0"),
-  ].join("-");
-};
 
 const buildUtilisationLookupKeys = (row = {}) => {
   const day = toDayKey(pick(row, ["date"]));
@@ -1445,6 +1585,11 @@ const normalizeAllocationTable = (rows = []) => rows.map((row) => ({
 
 const normalizeCostConfig = (config = {}) => {
   const navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
+  const leasedReserve = normalizeLeasedReserve(config.leasedReserve || []);
+  const maintenanceReserveSchedule = generateMaintenanceReserveSchedule(
+    leasedReserve,
+    config.maintenanceReserveSchedule || []
+  );
   return {
     __normalized: true,
     reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "USD",
@@ -1455,7 +1600,7 @@ const normalizeCostConfig = (config = {}) => {
     apuUsage: normalizeApuUsage(config.apuUsage || []),
     plfEffect: normalizePlfEffect(config.plfEffect || []),
     ccyFuel: normalizeFuelPrice(config.ccyFuel || []),
-    leasedReserve: normalizeLeasedReserve(config.leasedReserve || []),
+    leasedReserve,
     schMxEvents: normalizeSchMxEvents(config.schMxEvents || []),
     transitMx: normalizeTransitMx(config.transitMx || []),
     otherMx: normalizeOtherMx(config.otherMx || []),
@@ -1470,7 +1615,7 @@ const normalizeCostConfig = (config = {}) => {
     airportIntl: normalizeStationCost(config.airportIntl || [], "arrStn"),
     airportOther: normalizeAirportMtowCost(config.airportOther || [], "arrStn", navMtowTiers),
     aircraftOnwing: normalizeAircraftOnwing(config.aircraftOnwing || []),
-    maintenanceReserveSchedule: normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []),
+    maintenanceReserveSchedule,
     fleet: normalizeFleetRows(config.fleet || []),
   };
 };
@@ -1654,11 +1799,16 @@ const getOverlappedApuUsageMonths = (row = {}, flights = []) => {
 const getLatestAircraftOnwingForFlight = (flight, onwingRows = []) => {
   const flightDate = getFlightDate(flight);
   const aircraftMsn = getFlightMsn(flight);
-  if (!flightDate || !aircraftMsn || !Array.isArray(onwingRows) || onwingRows.length === 0) return null;
+  const aircraftRegn = getFlightRegistration(flight);
+  if (!flightDate || (!aircraftMsn && !aircraftRegn) || !Array.isArray(onwingRows) || onwingRows.length === 0) return null;
 
   let latest = null;
   onwingRows.forEach((row) => {
-    if (normalize(row?.msn) !== aircraftMsn) return;
+    const rowRegn = normalize(row?.acftRegn || row?.acftReg || row?.registration);
+    const rowMsn = normalize(row?.msn);
+    const regnMatches = aircraftRegn && rowRegn && rowRegn === aircraftRegn;
+    const msnMatches = aircraftMsn && rowMsn && rowMsn === aircraftMsn;
+    if (!regnMatches && !msnMatches) return;
     const rowDate = parseDate(row?.date);
     if (!rowDate || rowDate > flightDate) return;
 
@@ -1679,8 +1829,8 @@ const getLatestAircraftOnwingForFlight = (flight, onwingRows = []) => {
 const getFlightSnContext = (flight, onwingRows = []) => {
   const onwing = getLatestAircraftOnwingForFlight(flight, onwingRows);
   const msn = normalize(onwing?.msn || getFlightMsn(flight));
-  const eng1Esn = normalize(onwing?.pos1Esn || flight?.eng1Esn);
-  const eng2Esn = normalize(onwing?.pos2Esn || flight?.eng2Esn);
+  const eng1Esn = normalize(onwing?.pos1Esn || onwing?.eng1Esn || flight?.eng1Esn);
+  const eng2Esn = normalize(onwing?.pos2Esn || onwing?.eng2Esn || flight?.eng2Esn);
   const apun = normalize(onwing?.apun || flight?.apun);
   return {
     msn,
@@ -1701,10 +1851,56 @@ const applySnContext = (flight, config = {}) => {
   flight.snList = context.snList;
 };
 
+const reserveSettingMatchesFlight = (row, flight, snList = []) => {
+  const rowSn = normalize(row?.sn);
+  const acftReg = getFlightRegistration(flight);
+  const pn = getFlightPartNumber(flight);
+  const flightDate = getFlightDate(flight);
+  if (!isWithinRange(flightDate, row?.asOnDate, row?.endDate)) return false;
+  if (rowSn && snList.includes(rowSn)) return true;
+  if (rowSn && !snList.includes(rowSn)) return false;
+  if (!matchesOptional(row?.acftRegn, acftReg)) return false;
+  if (!matchesOptional(row?.pn, pn)) return false;
+  return Boolean(row?.acftRegn || row?.pn || row?.mrAccId);
+};
+
+const findScheduleRowForSetting = (setting = {}, scheduleRows = [], rateDate, flightSnList = []) => {
+  if (!rateDate) return null;
+  const rateTime = rateDate.getTime();
+  const settingMrAccId = normalize(setting.mrAccId);
+  const settingSn = normalize(setting.sn);
+  const exactDateRows = scheduleRows.filter((row) => {
+    const rowDate = parseDate(row.date);
+    if (!rowDate || rowDate.getTime() !== rateTime) return false;
+    if (settingMrAccId && normalize(row.mrAccId) !== settingMrAccId) return false;
+    return true;
+  });
+
+  const rowSnMatchesSetting = (row) => {
+    const rowSn = normalize(row.sn || row.msn);
+    if (!rowSn) return false;
+    return (settingSn && rowSn === settingSn) || flightSnList.includes(rowSn);
+  };
+
+  return (
+    exactDateRows.find(rowSnMatchesSetting) ||
+    exactDateRows.find((row) => normalize(row.mrAccId) === settingMrAccId) ||
+    [...scheduleRows]
+      .filter((row) => {
+        const rowDate = parseDate(row.date);
+        if (!rowDate || rowDate > rateDate) return false;
+        if (settingMrAccId && normalize(row.mrAccId) !== settingMrAccId) return false;
+        return rowSnMatchesSetting(row);
+      })
+      .sort((a, b) => (parseDate(b.date)?.getTime() || 0) - (parseDate(a.date)?.getTime() || 0))[0] ||
+    null
+  );
+};
+
 const resolveMaintenanceReserveRate = (flight, config = {}) => {
   const flightDate = getFlightDate(flight);
   if (!flightDate) {
-    return { amount: 0, rate: 0, currency: "", reportingAmount: 0 };
+    return { amount: 0, currency: "", reportingAmount: 0, details: [], warnings: ["Missing flight date"] };
   }
 
   const snContext = getFlightSnContext(flight, config.aircraftOnwing || []);
@@ -1715,65 +1911,72 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
   const rateDate = getFirstDayOfNextMonth(flightDate);
 
   const settingsMatches = reserveSettings.filter((row) => {
-    if (normalizeMetric(row?.driver) === "MONTH") return false;
-    if (row?.sn && !snList.includes(normalize(row?.sn))) return false;
-    if (!matchesOptional(row?.acftRegn, getFlightRegistration(flight))) return false;
-    if (!matchesOptional(row?.pn, getFlightPartNumber(flight))) return false;
-    return isWithinRange(flightDate, row?.asOnDate, row?.endDate);
+    const driver = normalizeMetric(row?.driver);
+    if (driver === "MONTH") return false;
+    return reserveSettingMatchesFlight(row, flight, snList);
   });
 
-  const buildScore = (row) => scoreSpecificity([row?.acftRegn, row?.pn, row?.sn, row?.mrAccId, row?.endDate, row?.driver]);
-  const bestSettings = settingsMatches.sort((a, b) => buildScore(b) - buildScore(a))[0] || null;
+  const details = [];
+  const warnings = [];
+  let amount = 0;
+  let reportingAmount = 0;
+  const currencies = new Set();
 
-  const candidateSnList = settingsMatches.length > 0
-    ? settingsMatches.map((row) => normalize(row?.sn)).filter(Boolean)
-    : snList;
-
-  const matchedScheduleRows = scheduleRows.filter((row) => {
-    if (!row || !rateDate) return false;
-    const rowDate = parseDate(row.date);
-    if (!rowDate || rowDate.getTime() !== rateDate.getTime()) return false;
-    if (candidateSnList.length > 0 && !candidateSnList.includes(normalize(row.msn))) return false;
-    if (bestSettings?.mrAccId && normalize(row.mrAccId) && normalize(row.mrAccId) !== normalize(bestSettings.mrAccId)) return false;
-    return true;
-  });
-
-  const bestSchedule = matchedScheduleRows.sort((a, b) => scoreSpecificity([b?.mrAccId, b?.acftReg, b?.msn]) - scoreSpecificity([a?.mrAccId, a?.acftReg, a?.msn]))[0] || null;
-
-  const derivedRate = toNumber(bestSchedule?.rate);
-  const fallbackRate = toNumber(bestSettings?.setRate || bestSettings?.rate);
-  let rate = derivedRate > 0 ? derivedRate : fallbackRate;
-  const currency = bestSchedule?.ccy || bestSettings?.ccy || "";
-  const reportingAmount = toNumber(bestSchedule?.costRCCY || bestSettings?.costRCCY);
-
-  if (!bestSchedule && rate > 0 && bestSettings?.annualEscl) {
-    const anniversary = parseDate(bestSettings.anniversary || bestSettings.asOnDate);
-    if (anniversary) {
-      let anniversaries = flightDate.getUTCFullYear() - anniversary.getUTCFullYear();
-      const anniversaryThisYear = new Date(Date.UTC(flightDate.getUTCFullYear(), anniversary.getUTCMonth(), anniversary.getUTCDate()));
-      if (flightDate < anniversaryThisYear) anniversaries -= 1;
-      if (anniversaries > 0) rate *= ((1 + toNumber(bestSettings.annualEscl) / 100) ** anniversaries);
+  settingsMatches.forEach((setting) => {
+    const schedule = findScheduleRowForSetting(setting, scheduleRows, rateDate, snList);
+    const driver = normalizeMetric(schedule?.driver || setting?.driver);
+    const scheduleRate = toNumber(schedule?.rate);
+    const rate = scheduleRate > 0 ? scheduleRate : getEscalatedReserveRate(setting, rateDate || flightDate);
+    const currency = schedule?.ccy || setting?.ccy || "";
+    const driverValue = driver === "BH"
+      ? toNumber(flight.bh)
+      : driver === "FH"
+        ? toNumber(flight.fh)
+        : driver === "DEPARTURES"
+          ? 1
+          : driver === "APUHR"
+            ? toNumber(flight.apuHours || flight.apuHr || flight.apuHrs)
+            : getFlightEffectiveFt(flight);
+    if (driver === "APUHR" && driverValue <= 0) {
+      warnings.push(`No APU hours for MR account ${setting.mrAccId}`);
     }
-  }
+    const localAmount = round2(rate * driverValue);
+    const explicitRccy = toNumber(schedule?.costRCCY || setting?.costRCCY);
+    const rccyContribution = convertToRccy(
+      localAmount,
+      currency,
+      config.reportingCurrency,
+      explicitRccy,
+      config.fxRates || [],
+      rateDate || flightDate,
+      flight
+    );
+    amount = round2(amount + localAmount);
+    reportingAmount = round2(reportingAmount + rccyContribution);
+    if (currency) currencies.add(currency);
+    details.push({
+      mrAccId: setting.mrAccId,
+      sn: setting.sn,
+      scheduleDate: rateDate ? toDayKey(rateDate) : "",
+      scheduleRow: schedule || null,
+      rate: round2(rate),
+      driver,
+      driverValue,
+      localContribution: localAmount,
+      rccyContribution,
+      ccy: currency,
+    });
+  });
 
-  if (rate <= 0) {
-    return { amount: 0, rate: 0, currency, reportingAmount };
-  }
-
-  const driver = normalizeMetric(bestSchedule?.driver || bestSettings?.driver);
-  const driverValue = driver === "BH"
-    ? toNumber(flight.bh)
-    : driver === "DEPARTURES"
-      ? 1
-      : driver === "FT"
-        ? getFlightEffectiveFt(flight)
-        : toNumber(flight.fh);
+  if (settingsMatches.length === 0) warnings.push("No qualifying maintenance reserve account");
 
   return {
-    amount: round2(driverValue * rate),
-    rate: round2(rate),
-    currency,
+    amount,
+    rate: details.length === 1 ? details[0].rate : 0,
+    currency: currencies.size > 1 ? "MIXED" : [...currencies][0] || "",
     reportingAmount,
+    details,
+    warnings,
   };
 };
 
@@ -2165,6 +2368,17 @@ const enrichDirectCosts = (flights, config) => {
     }
 
     const mrDerived = resolveMaintenanceReserveRate(flight, config);
+    if (flight.costDebug) {
+      flight.mrDebug = {
+        qualifyingAccounts: mrDerived.details || [],
+        warnings: mrDerived.warnings || [],
+      };
+      flight.costDebug.maintenance = {
+        ...(flight.costDebug.maintenance || {}),
+        mrReserve: flight.mrDebug,
+      };
+      (mrDerived.warnings || []).forEach((message) => addDebugMissing(flight, message));
+    }
     if (mrDerived.amount > 0) {
       applyCostField(
         flight,
@@ -2396,7 +2610,7 @@ const enrichAllocatedCosts = (flights, config) => {
     getOverlappedApuUsageMonths(row, flights).forEach(({ monthKey, monthStart, days }) => {
       const priceRule = findFuelPriceForStations(config, [apuStation], monthKey);
       const totalKg = round2(apuHrPerDay * days * kgPerApuHr);
-      const poolAmount = priceRule ? calculateFuelCost(totalKg, priceRule) : 0;
+      const poolAmount = priceRule ? calculateFuelCost(totalKg, priceRule) : round2(row.costRCCY || row.cost || 0);
       const basis = row.basis || getAllocationBasis(config, "APUFUELCOST");
 
       const candidateFlights = flights.filter((flight) => {
@@ -2463,30 +2677,25 @@ const enrichAllocatedCosts = (flights, config) => {
     const monthlyReserveGroups = new Map();
 
     monthlyReserveRows.forEach((row) => {
-      const rowMonthNumber = toNumber(row.monthNumber) || (parseDate(row.date)?.getUTCMonth() + 1 || 0);
-      if (!rowMonthNumber) return;
+      const rowDate = parseDate(row.date);
+      if (!rowDate) return;
+      const rowTime = rowDate.getTime();
 
       const matchedFlights = [];
       flights.forEach((flight) => {
-        if (getFlightMonthNumber(flight) !== rowMonthNumber) return;
-
-        const flightOnwing = getLatestAircraftOnwingForFlight(flight, config.aircraftOnwing || []);
-        if (!flightOnwing) return;
-
-        const engineSns = [flightOnwing.pos1Esn, flightOnwing.pos2Esn]
-          .map((value) => normalize(value))
-          .filter(Boolean);
-        if (engineSns.length === 0) return;
-        if (row.msn && !engineSns.includes(normalize(row.msn))) return;
+        const lookupDate = getFirstDayOfNextMonth(getFlightDate(flight));
+        if (!lookupDate || lookupDate.getTime() !== rowTime) return;
+        const snContext = getFlightSnContext(flight, config.aircraftOnwing || []);
+        const rowSn = normalize(row.sn || row.msn);
+        if (rowSn && !snContext.snList.includes(rowSn)) return;
         if (row.acftReg && normalize(row.acftReg) && normalize(row.acftReg) !== getFlightRegistration(flight)) return;
         matchedFlights.push(flight);
       });
 
       if (matchedFlights.length === 0) return;
 
-      const groupMonthDate = parseDate(row.date) || getFlightDate(matchedFlights[0]);
-      const groupMonthKey = groupMonthDate ? getFlightMonthKey({ date: groupMonthDate }) : String(rowMonthNumber);
-      const groupKey = `${getFlightAircraftKey(matchedFlights[0])}|${groupMonthKey}`;
+      const groupMonthKey = toDayKey(rowDate);
+      const groupKey = `${row.mrAccId || getFlightAircraftKey(matchedFlights[0])}|${row.sn || row.msn || ""}|${groupMonthKey}`;
       if (!monthlyReserveGroups.has(groupKey)) {
         monthlyReserveGroups.set(groupKey, {
           flights: new Map(),
@@ -2501,9 +2710,10 @@ const enrichAllocatedCosts = (flights, config) => {
         const flightKey = `${String(flight.flight || "")}|${String(flight.date || "")}`;
         group.flights.set(flightKey, flight);
       });
-      group.amount = round2(group.amount + (toNumber(row.contribution) * getExactExampleMonthlyFactor(groupMonthDate, row.fromDate, row.toDate)));
+      group.amount = round2(group.amount + (toNumber(row.contribution) * getExactExampleMonthlyFactor(rowDate, row.fromDate, row.toDate)));
       if (!group.currency && row.ccy) group.currency = row.ccy;
       if (!group.reportingAmount && row.costRCCY) group.reportingAmount = row.costRCCY;
+      group.date = rowDate;
     });
 
     monthlyReserveGroups.forEach((group) => {
@@ -2514,7 +2724,9 @@ const enrichAllocatedCosts = (flights, config) => {
         group.currency,
         config.reportingCurrency,
         getAllocationBasis(config, "MRMONTHLY"),
-        group.reportingAmount
+        group.reportingAmount,
+        config.fxRates || [],
+        group.date
       );
     });
   } else {
@@ -2720,6 +2932,7 @@ module.exports = {
   normalizeTransitMx,
   normalizeAircraftOnwing,
   normalizeMaintenanceReserveSchedule,
+  generateMaintenanceReserveSchedule,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
   serializeAirportMtowCostRows,

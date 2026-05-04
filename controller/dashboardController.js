@@ -36,6 +36,32 @@ const createConnections = require('../helper/createConnections');
 
 moment.tz.setDefault("America/New_York");
 
+const mergeByIdentity = (primaryRows = [], fallbackRows = [], keyBuilder = (row) => JSON.stringify(row)) => {
+  const seen = new Set();
+  const merged = [];
+  [...(Array.isArray(primaryRows) ? primaryRows : []), ...(Array.isArray(fallbackRows) ? fallbackRows : [])].forEach((row) => {
+    const key = keyBuilder(row);
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(row);
+  });
+  return merged;
+};
+
+const mergeMaintenanceContext = (costConfig = {}, mrContext = {}) => ({
+  ...mrContext,
+  aircraftOnwing: mergeByIdentity(
+    costConfig.aircraftOnwing || [],
+    mrContext.aircraftOnwing || [],
+    (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+  ),
+  maintenanceReserveSchedule: mergeByIdentity(
+    costConfig.maintenanceReserveSchedule || [],
+    mrContext.maintenanceReserveSchedule || [],
+    (row) => [row?.mrAccId, row?.sn || row?.msn, row?.date].join("|")
+  ),
+});
+
 const normalizeQueryValues = (value) => {
   if (value === undefined || value === null || value === "") {
     return [];
@@ -521,7 +547,7 @@ const getDashboardDataLegacy = async (req, res) => {
           const mrContext = await buildMaintenanceReserveContext(id, flightsInPeriod);
           flightsInPeriod = computeFlightCostsBatch(flightsInPeriod, {
             ...costConfig,
-            ...mrContext,
+            ...mergeMaintenanceContext(costConfig, mrContext),
             fleet: fleetRows,
           });
 
@@ -1213,7 +1239,7 @@ const getDashboardData = async (req, res) => {
       const mrContext = await buildMaintenanceReserveContext(userId, flightsRaw);
       const flightsInPeriod = computeFlightCostsBatch(flightsRaw, {
         ...baseCostConfig,
-        ...mrContext,
+        ...mergeMaintenanceContext(baseCostConfig, mrContext),
         fleet: fleetRows,
       });
 

@@ -1,17 +1,31 @@
 const mongoose = require("mongoose");
 
 const MaintenanceReserveScheduleRowSchema = new mongoose.Schema({
+  date: { type: String, default: "" },
   mrAccId: { type: String, default: "" },
+  schMxEvent: { type: String, default: "" },
   schMxEventAccount: { type: String, default: "" },
   acftRegn: { type: String, default: "" },
+  acftReg: { type: String, default: "" },
   pn: { type: String, default: "" },
   sn: { type: String, default: "" },
-  date: { type: String, default: "" },
+  msn: { type: String, default: "" },
+  driver: { type: String, default: "" },
   rate: { type: Number, default: 0 },
   driverValue: { type: Number, default: 0 },
+  driverVal: { type: Number, default: 0 },
   contribution: { type: Number, default: 0 },
+  openingBalance: { type: Number, default: 0 },
+  openingBal: { type: Number, default: 0 },
   drawdown: { type: Number, default: 0 },
+  mrDrawdown: { type: Number, default: 0 },
+  closingBalance: { type: Number, default: 0 },
+  closingBal: { type: Number, default: 0 },
   balance: { type: Number, default: 0 },
+  ccy: { type: String, default: "" },
+  source: { type: String, default: "" },
+  notes: { type: String, default: "" },
+  costRCCY: { type: Number, default: 0 },
 }, { _id: false });
 
 const CostConfigSchema = new mongoose.Schema({
@@ -31,6 +45,7 @@ const CostConfigSchema = new mongoose.Schema({
   
   leasedReserve: { type: Array, default: [] },
   maintenanceReserveSchedule: { type: [MaintenanceReserveScheduleRowSchema], default: [] },
+  aircraftOnwing: { type: Array, default: [] },
   schMxEvents: { type: Array, default: [] },
   transitMx: { type: Array, default: [] },
   otherMx: { type: Array, default: [] },

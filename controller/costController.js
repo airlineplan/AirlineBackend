@@ -16,6 +16,9 @@ const {
   normalizeOtherMx,
   normalizeOtherDoc,
   normalizeTransitMx,
+  normalizeAircraftOnwing,
+  normalizeMaintenanceReserveSchedule,
+  generateMaintenanceReserveSchedule,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
   hydrateSchMxEvents,
@@ -45,7 +48,7 @@ const buildExactDayDates = (schMxEvents = []) => {
   return Array.from(exactDates.values());
 };
 
-const hydrateSchMxEventsForUser = async (userId, schMxEvents = []) => {
+const hydrateSchMxEventsForUser = async (userId, schMxEvents = [], scheduleRows = []) => {
   if (!Array.isArray(schMxEvents) || schMxEvents.length === 0) {
     return [];
   }
@@ -62,7 +65,10 @@ const hydrateSchMxEventsForUser = async (userId, schMxEvents = []) => {
 
   return hydrateSchMxEvents(schMxEvents, {
     utilisationRows,
-    maintenanceReserveRows,
+    maintenanceReserveRows: [
+      ...(Array.isArray(scheduleRows) ? scheduleRows : []),
+      ...maintenanceReserveRows,
+    ],
   });
 };
 
@@ -74,6 +80,32 @@ const normalizeNavigationTablesForStorage = (configData = {}) => {
     navTerm: serializeNavigationCostRows(configData.navTerm || [], "arrStn", navMtowTiers),
   };
 };
+
+const mergeByIdentity = (primaryRows = [], fallbackRows = [], keyBuilder = (row) => JSON.stringify(row)) => {
+  const seen = new Set();
+  const merged = [];
+  [...(Array.isArray(primaryRows) ? primaryRows : []), ...(Array.isArray(fallbackRows) ? fallbackRows : [])].forEach((row) => {
+    const key = keyBuilder(row);
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(row);
+  });
+  return merged;
+};
+
+const mergeMaintenanceContext = (costConfig = {}, mrContext = {}) => ({
+  ...mrContext,
+  aircraftOnwing: mergeByIdentity(
+    costConfig.aircraftOnwing || [],
+    mrContext.aircraftOnwing || [],
+    (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+  ),
+  maintenanceReserveSchedule: mergeByIdentity(
+    costConfig.maintenanceReserveSchedule || [],
+    mrContext.maintenanceReserveSchedule || [],
+    (row) => [row?.mrAccId, row?.sn || row?.msn, row?.date].join("|")
+  ),
+});
 
 const validateApuUsageRows = (apuUsage = []) => {
   const rows = Array.isArray(apuUsage) ? apuUsage : [];
@@ -105,9 +137,16 @@ exports.saveCostConfig = async (req, res) => {
       return res.status(400).json({ success: false, message: apuValidation.message });
     }
 
+    const normalizedLeasedReserve = normalizeCostConfig({ leasedReserve: configData.leasedReserve || [] }).leasedReserve;
+    const normalizedAircraftOnwing = normalizeAircraftOnwing(configData.aircraftOnwing || []);
+    const normalizedMaintenanceReserveSchedule = generateMaintenanceReserveSchedule(
+      normalizedLeasedReserve,
+      normalizeMaintenanceReserveSchedule(configData.maintenanceReserveSchedule || [])
+    );
     const hydratedSchMxEvents = await hydrateSchMxEventsForUser(
       userId,
-      Array.isArray(configData.schMxEvents) ? configData.schMxEvents : []
+      Array.isArray(configData.schMxEvents) ? configData.schMxEvents : [],
+      normalizedMaintenanceReserveSchedule
     );
     const navigationTables = normalizeNavigationTablesForStorage(configData);
 
@@ -122,6 +161,9 @@ exports.saveCostConfig = async (req, res) => {
       otherMx: normalizeOtherMx(configData.otherMx || []),
       otherDoc: normalizeOtherDoc(configData.otherDoc || []),
       transitMx: normalizeTransitMx(configData.transitMx || []),
+      leasedReserve: normalizedLeasedReserve,
+      aircraftOnwing: normalizedAircraftOnwing,
+      maintenanceReserveSchedule: normalizedMaintenanceReserveSchedule,
       schMxEvents: hydratedSchMxEvents,
       ...navigationTables,
     };
@@ -149,7 +191,7 @@ exports.getCostConfig = async (req, res) => {
       config = {
         allocationTable: [],
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
-        leasedReserve: [], maintenanceReserveSchedule: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
+        leasedReserve: [], maintenanceReserveSchedule: [], aircraftOnwing: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navMtowTiers: [73000, 77000, 78000, 79000],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], airportOther: [], otherDoc: []
       };
@@ -163,7 +205,13 @@ exports.getCostConfig = async (req, res) => {
       config.otherMx = normalizeOtherMx(config.otherMx || []);
       config.otherDoc = normalizeOtherDoc(config.otherDoc || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);
-      config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || []);
+      config.leasedReserve = normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve;
+      config.aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
+      config.maintenanceReserveSchedule = generateMaintenanceReserveSchedule(
+        config.leasedReserve || [],
+        config.maintenanceReserveSchedule || []
+      );
+      config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || [], config.maintenanceReserveSchedule || []);
       config.navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
       config.navEnr = serializeNavigationCostRows(config.navEnr || [], "sector", config.navMtowTiers);
       config.navTerm = serializeNavigationCostRows(config.navTerm || [], "arrStn", config.navMtowTiers);
@@ -217,9 +265,10 @@ exports.getCostPageData = async (req, res) => {
     });
 
     // 4. Compute Costs
+    const maintenanceContext = mergeMaintenanceContext(costConfig, mrContext);
     let enrichedFlights = computeFlightCostsBatch(flights, {
       ...costConfig,
-      ...mrContext,
+      ...maintenanceContext,
       fleet: fleetRows,
       debugCosts: req.query?.debug === "true" || req.body?.debug === true || costConfig.debugCosts === true,
     });
@@ -227,7 +276,7 @@ exports.getCostPageData = async (req, res) => {
     if (sn?.length) {
       const selectedSn = new Set(sn.map((item) => String(item.value ?? item).trim().toUpperCase()).filter(Boolean));
       enrichedFlights = enrichedFlights.filter((flight) => {
-        const context = getFlightSnContext(flight, mrContext.aircraftOnwing || []);
+        const context = getFlightSnContext(flight, maintenanceContext.aircraftOnwing || []);
         return context.snList.some((value) => selectedSn.has(value));
       });
     }
@@ -272,7 +321,7 @@ exports.recalculateAndSaveCostPageData = async (req, res) => {
       fxRates: rawRevenueConfig?.fxRates || rawCostConfig?.fxRates,
       fleet: fleetRows,
     });
-    const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mrContext, fleet: fleetRows });
+    const enrichedFlights = computeFlightCostsBatch(flights, { ...costConfig, ...mergeMaintenanceContext(costConfig, mrContext), fleet: fleetRows });
 
     const costColumns = [
       "engineFuelConsumptionKg", "engineFuelConsumption", "engineFuelKg", "engineFuelLitres",
@@ -294,6 +343,7 @@ exports.recalculateAndSaveCostPageData = async (req, res) => {
       "layoverCost", "layoverCostCCY", "layoverCostRCCY",
       "crewPositioningCost", "crewPositioningCostCCY", "crewPositioningCostRCCY",
       "totalCost", "totalCostCCY", "totalCostRCCY", "ftEffective", "mtowUsed",
+      "msn", "eng1Esn", "eng2Esn", "apun", "sn", "snList", "mrDebug",
     ];
 
     await Promise.all(enrichedFlights.map((row) => {
