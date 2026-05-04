@@ -149,7 +149,7 @@ exports.getCostConfig = async (req, res) => {
       config = {
         allocationTable: [],
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
-        leasedReserve: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
+        leasedReserve: [], maintenanceReserveSchedule: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
         navMtowTiers: [73000, 77000, 78000, 79000],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], airportOther: [], otherDoc: []
       };

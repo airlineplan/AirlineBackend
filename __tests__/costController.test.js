@@ -156,6 +156,7 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
     ],
     ccyFuel: [{ ccy: "INR", station: "CCU", kgPerLtr: "0.78", month1: "APR-26", m1: "92500" }],
     leasedReserve: [{ mrAccId: "MR-1", schMxEvent: "C-check", acftRegn: "VT-ABC", pn: "A320", sn: "5825", setBalance: "1000", setRate: "10", asOnDate: "2026-04-01", ccy: "INR", driver: "FH" }],
+    maintenanceReserveSchedule: [{ mrAccId: "MR-1", schMxEventAccount: "C-check", acftRegn: "VT-ABC", pn: "A320", sn: "5825", date: "2026-04-20", rate: "10", driverValue: "50", contribution: "500", drawdown: "250", balance: "750" }],
     schMxEvents: [{ date: "2026-04-20", msnEsnApun: "5825", event: "C-check", pn: "A320", snBn: "5825", cost: "500", ccy: "INR", capitalisation: "N" }],
     transitMx: [{ depStn: "CCU", variant: "A320", acftRegn: "VT-ABC", pn: "A320", sn: "5825", costPerDeparture: "20", ccy: "INR", fromDate: "2026-04-01", toDate: "2026-04-30" }],
     otherMx: [{ depStn: "CCU", acftRegn: "VT-ABC", costPerBh: "5", costPerDeparture: "3", costPerMonth: "30", ccy: "INR" }],
@@ -191,7 +192,7 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   const data = loadRes.body.data;
   [
     "allocationTable", "fuelConsum", "fuelConsumIndex", "apuUsage", "plfEffect", "ccyFuel",
-    "leasedReserve", "schMxEvents", "transitMx", "otherMx", "rotableChanges",
+    "leasedReserve", "maintenanceReserveSchedule", "schMxEvents", "transitMx", "otherMx", "rotableChanges",
     "navEnr", "navTerm", "airportLanding", "airportDom", "airportIntl", "airportAvsec", "airportOther", "otherDoc",
   ].forEach((key) => assert.ok(Array.isArray(data[key]), `${key} should round-trip as an array`));
 
@@ -202,6 +203,8 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.apuUsage[0].apuHrPerDay, 0.75);
   assert.equal(data.apuUsage[0].kgPerApuHr, 255);
   assert.equal(data.leasedReserve[0].mrAccId, "MR-1");
+  assert.equal(data.maintenanceReserveSchedule[0].mrAccId, "MR-1");
+  assert.equal(data.maintenanceReserveSchedule[0].balance, 750);
   assert.equal(data.transitMx[0].sn, "5825");
   assert.equal(data.otherDoc[0].label, "Doc");
   assert.equal(data.otherDoc[0].variantOrAcftRegn, "A320");

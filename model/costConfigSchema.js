@@ -1,5 +1,19 @@
 const mongoose = require("mongoose");
 
+const MaintenanceReserveScheduleRowSchema = new mongoose.Schema({
+  mrAccId: { type: String, default: "" },
+  schMxEventAccount: { type: String, default: "" },
+  acftRegn: { type: String, default: "" },
+  pn: { type: String, default: "" },
+  sn: { type: String, default: "" },
+  date: { type: String, default: "" },
+  rate: { type: Number, default: 0 },
+  driverValue: { type: Number, default: 0 },
+  contribution: { type: Number, default: 0 },
+  drawdown: { type: Number, default: 0 },
+  balance: { type: Number, default: 0 },
+}, { _id: false });
+
 const CostConfigSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -16,6 +30,7 @@ const CostConfigSchema = new mongoose.Schema({
   ccyFuel: { type: Array, default: [] },
   
   leasedReserve: { type: Array, default: [] },
+  maintenanceReserveSchedule: { type: [MaintenanceReserveScheduleRowSchema], default: [] },
   schMxEvents: { type: Array, default: [] },
   transitMx: { type: Array, default: [] },
   otherMx: { type: Array, default: [] },

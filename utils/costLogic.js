@@ -1063,16 +1063,22 @@ const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   date: pick(row, ["date"]),
   fromDate: pick(row, ["fromDate", "asOnDate"]),
   toDate: pick(row, ["toDate", "endDate"]),
-  msn: normalize(pick(row, ["msn"])),
+  msn: normalize(pick(row, ["msn", "sn"])),
   mrAccId: normalize(pick(row, ["mrAccId"])),
-  acftReg: normalize(pick(row, ["acftReg"])),
+  schMxEventAccount: normalize(pick(row, ["schMxEventAccount", "schMxEvent", "event"])),
+  acftReg: normalize(pick(row, ["acftReg", "acftRegn"])),
+  pn: normalize(pick(row, ["pn"])),
+  sn: normalize(pick(row, ["sn"])),
   rate: toNumber(pick(row, ["rate"])),
   contribution: toNumber(pick(row, ["contribution", "setRate"])),
-  monthNumber: toNumber(pick(row, ["monthNumber", "monthNo", "month", "driverVal"])),
+  driverValue: toNumber(pick(row, ["driverValue", "driverVal"])),
+  monthNumber: toNumber(pick(row, ["monthNumber", "monthNo", "month", "driverValue", "driverVal"])),
+  drawdown: toNumber(pick(row, ["drawdown"])),
+  balance: toNumber(pick(row, ["balance"])),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
-})).filter((row) => row.date || row.fromDate || row.toDate || row.msn || row.mrAccId || row.rate || row.contribution);
+})).filter((row) => row.date || row.fromDate || row.toDate || row.msn || row.mrAccId || row.acftReg || row.rate || row.contribution || row.drawdown || row.balance);
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
   ...row,

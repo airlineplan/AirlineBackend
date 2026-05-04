@@ -7,7 +7,8 @@
     "test": "node --test --test-concurrency=1 --test-reporter=spec __tests__/*.test.js",
     "start": "node --inspect  index.js",
     "dev": "nodemon --inspect index.js",
-    "migrate:flights-acft-fh-ft": "node scripts/backfillFlightAcftFhFt.js"
+    "migrate:flights-acft-fh-ft": "node scripts/backfillFlightAcftFhFt.js",
+    "migrate:maintenance-reserve-schedule": "node scripts/createMaintenanceReserveScheduleField.js"
   },
   "keywords": [],
   "author": "",
