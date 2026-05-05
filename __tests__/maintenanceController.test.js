@@ -569,6 +569,101 @@ test("maintenance dashboard shows computed status before and after reset date", 
   assert.equal(next.dsr, 101);
 });
 
+test("saving reset status on a new date replaces the prior anchor and recomputes the full range", async () => {
+  const days = [7, 8, 9, 10, 11].map(day => utcDate(2026, 5, day));
+
+  await seedFlightDays(days);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-RESET",
+    entry: days[0],
+    exit: utcDate(2026, 5, 31),
+  });
+
+  for (const date of days) {
+    await seedAssignment({
+      date,
+      flightNumber: `MX${date.getUTCDate()}`,
+      msn: 5340,
+      registration: "VT-RESET",
+      bh: 10,
+    });
+  }
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: days[0],
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+    tsn: 1000,
+    csn: 1000,
+    dsn: 1000,
+    tsoTsr: 1000,
+    csoCsr: 1000,
+    dsoDsr: 1000,
+    tsRplmt: 1000,
+    csRplmt: 1000,
+    dsRplmt: 1000,
+    timeMetric: "BH",
+  });
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+
+  const saveRes = createMockResponse();
+  await maintenanceController.bulkSaveResetRecords({
+    user: { id: USER_ID },
+    body: {
+      resetDate: "2026-05-10",
+      resetData: [{
+        msnEsn: "5340",
+        pn: "A320",
+        snBn: "5340",
+        tsn: 5000,
+        csn: 1000,
+        dsn: 1000,
+        tso: 5000,
+        cso: 1000,
+        dso: 1000,
+        tsr: 5000,
+        csr: 1000,
+        dsr: 1000,
+        metric: "BH",
+      }],
+    },
+  }, saveRes);
+
+  const remainingResets = await MaintenanceReset.find({
+    userId: USER_ID,
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+  }).sort({ date: 1 }).lean();
+  const beforeReset = await Utilisation.findOne({
+    userId: USER_ID,
+    date: days[0],
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+  }).lean();
+  const afterReset = await Utilisation.findOne({
+    userId: USER_ID,
+    date: days[4],
+    msnEsn: "5340",
+    pn: "A320",
+    snBn: "5340",
+  }).lean();
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(remainingResets.length, 1);
+  assert.equal(remainingResets[0].date.toISOString().slice(0, 10), "2026-05-10");
+  assert.equal(beforeReset?.tsn, 4970);
+  assert.equal(beforeReset?.csn, 997);
+  assert.equal(beforeReset?.dsn, 997);
+  assert.equal(afterReset?.tsn, 5010);
+  assert.equal(afterReset?.csn, 1001);
+  assert.equal(afterReset?.dsn, 1001);
+});
+
 test("maintenance compute freezes default utilisation counters outside assumption dates", async () => {
   const days = Array.from({ length: 15 }, (_, index) => utcDate(2026, 5, 7 + index));
   const resetDate = days[0];

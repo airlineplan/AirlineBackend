@@ -1151,6 +1151,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
 
         const bulkOperations = [];
         const utilisationOps = [];
+        const replaceExistingResetOps = [];
         const saveDateStrings = new Set();
         const changedResetGroups = new Map();
 
@@ -1205,6 +1206,18 @@ exports.bulkSaveResetRecords = async (req, res) => {
             saveDateStrings.add(moment(normalizedDate).format("YYYY-MM-DD"));
             changedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
 
+            replaceExistingResetOps.push({
+                deleteMany: {
+                    filter: {
+                        userId: String(userId),
+                        msnEsn,
+                        pn,
+                        snBn,
+                        date: { $ne: normalizedDate }
+                    }
+                }
+            });
+
             // 1. MaintenanceReset mapping (for the explicit reset date)
             bulkOperations.push({
                 updateOne: {
@@ -1255,6 +1268,19 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 MaintenanceReset.bulkWrite(bulkOperations, { ordered: false }),
                 Utilisation.bulkWrite(utilisationOps, { ordered: false })
             ]);
+        }
+
+        if (replaceExistingResetOps.length > 0) {
+            await MaintenanceReset.bulkWrite(replaceExistingResetOps, { ordered: false });
+        }
+
+        if (changedResetGroups.size > 0) {
+            await Promise.all([...changedResetGroups.values()].map(group => Utilisation.deleteMany({
+                userId: String(userId),
+                msnEsn: group.msnEsn,
+                pn: group.pn,
+                snBn: group.snBn
+            })));
         }
 
         if (saveDateStrings.size > 0) {
