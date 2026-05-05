@@ -64,6 +64,7 @@ const CHUNK_SIZE = 1000;
 
                     const bhDecimal = btMins / 60;
                     const fhDecimal = fhMins / 60;
+                    const ft = formatMinutesAsHHMM(fhMins);
 
                     const dataDoc = {
                         _id: dataId,
@@ -73,7 +74,8 @@ const CHUNK_SIZE = 1000;
                         domINTL: processed.domINTL?.toLowerCase() || "",
                         // Pass computed values to the flight generator
                         bh: bhDecimal,
-                        fh: fhDecimal
+                        fh: fhDecimal,
+                        ft
                     };
 
                     dataBulk.push({ insertOne: { document: dataDoc } });
@@ -111,7 +113,8 @@ const CHUNK_SIZE = 1000;
                                 behind1: processed.behind1,
                                 behind2: processed.behind2,
                                 bh: bhDecimal,
-                                fh: fhDecimal
+                                fh: fhDecimal,
+                                ft
                             }
                         }
                     });
@@ -160,6 +163,13 @@ function timeStrToMinutes(timeStr) {
         return (hours * 60) + minutes;
     }
     return parseFloat(timeStr) * 60 || 0;
+}
+
+function formatMinutesAsHHMM(minutesValue) {
+    const safeMinutes = Math.max(0, Math.round(Number(minutesValue) || 0));
+    const hours = Math.floor(safeMinutes / 60);
+    const minutes = safeMinutes % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function parseExcelTime(excelTime) {
@@ -336,6 +346,7 @@ async function generateFlightsBulk(dataDocs) {
                             acftType: doc.acftType,
                             bh: doc.bh,
                             fh: doc.fh,
+                            ft: doc.ft,
                             isComplete: true
                         }
                     }
