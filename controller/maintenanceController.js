@@ -947,20 +947,31 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 { $or: [{ exit: { $exists: false } }, { exit: null }, { exit: { $gte: startOfDay } }] }
             ];
 
-            const [utils, resetRecords, fleetAssets, utilisationAssumptions] = await Promise.all([
+            const allFleetFilter = {};
+            if (userId) {
+                allFleetFilter.userId = String(userId);
+            }
+
+            const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
-                Fleet.find(fleetFilter).select("sn titled").lean(),
+                Fleet.find(fleetFilter).select("sn titled regn").lean(),
+                Fleet.find(allFleetFilter).select("sn titled regn").lean(),
                 UtilisationAssumption.find({ userId: String(userId) }).lean(),
             ]);
 
-            const titledBySn = new Map();
-            fleetAssets.forEach(asset => {
+            const getFleetTitledDisplay = (asset = {}) =>
+                String(asset.titled || asset.regn || "").trim();
+            const addTitledBySn = (map, asset) => {
                 const sn = String(asset.sn || "").trim().toUpperCase();
-                if (sn && !titledBySn.has(sn)) {
-                    titledBySn.set(sn, asset.titled || "");
+                const titledDisplay = getFleetTitledDisplay(asset);
+                if (sn && titledDisplay && !map.has(sn)) {
+                    map.set(sn, titledDisplay);
                 }
-            });
+            };
+            const titledBySn = new Map();
+            fleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
+            allFleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
 
             const utilByKey = new Map();
             utils.forEach(record => {

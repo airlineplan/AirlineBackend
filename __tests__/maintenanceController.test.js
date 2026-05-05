@@ -1400,6 +1400,45 @@ test("maintenance dashboard autopopulates titled spare from active fleet asset",
   assert.equal(res.body.data.maintenanceData[0].titled, "Spare");
 });
 
+test("maintenance dashboard autopopulates titled value from fleet when status row is outside fleet window", async () => {
+  const selectedDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([selectedDate]);
+  await seedFleetAsset({
+    msn: 6125,
+    regn: "VT-AAC",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 4, 30),
+    titled: "VT-AAC",
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: selectedDate,
+    msnEsn: "6125",
+    pn: "U92",
+    snBn: "805",
+    tsn: 300,
+    csn: 302,
+    dsn: 302,
+    timeMetric: "BH",
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    query: {
+      date: "2026-05-05",
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.getMaintenanceDashboard(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.maintenanceData.length, 1);
+  assert.equal(res.body.data.maintenanceData[0].msnEsn, "6125");
+  assert.equal(res.body.data.maintenanceData[0].titled, "VT-AAC");
+});
+
 test("maintenance dashboard shows the exact reset-day metrics when viewing the reset date", async () => {
   const resetDate = utcDate(2026, 4, 20);
 
