@@ -760,6 +760,40 @@ test("reporting rows repair stale final revenue from saved OD inputs", () => {
     assert.equal(row.fnlRccyTotalRev, 394000);
 });
 
+test("reporting rows recalculate stale non-zero final revenue with current FX config", () => {
+    const [row] = normalizeRevenueRowsForReporting([
+        {
+            date: new Date("2026-05-02T00:00:00.000Z"),
+            trafficType: "leg",
+            stops: 0,
+            pax: 76,
+            cargoT: 0.4,
+            odFare: 5000,
+            odRate: 35000,
+            legFare: 5000,
+            legRate: 35000,
+            odPaxRev: 380000,
+            odCargoRev: 14000,
+            odTotalRev: 394000,
+            fnlRccyPaxRev: 1,
+            fnlRccyCargoRev: 1,
+            fnlRccyTotalRev: 2,
+            pooCcy: "USD",
+            reportingCurrency: "INR",
+            pooCcyToRccy: 1,
+            applySSPricing: false,
+        },
+    ], {
+        reportingCurrency: "INR",
+        fxRates: [{ pair: "USD/INR", dateKey: "2026-05-01", rate: 83 }],
+    });
+
+    assert.equal(row.pooCcyToRccy, 83);
+    assert.equal(row.fnlRccyPaxRev, 31540000);
+    assert.equal(row.fnlRccyCargoRev, 1162000);
+    assert.equal(row.fnlRccyTotalRev, 32702000);
+});
+
 test("multiplies local OD revenue by FX into final reporting currency", () => {
     const row = recalculateRevenue({
         stops: 0,

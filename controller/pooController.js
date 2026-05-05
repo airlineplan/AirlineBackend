@@ -719,18 +719,7 @@ function hasRevenueValue(row, fields) {
 
 function normalizeRevenueRowsForReporting(rows, revenueConfig = null) {
     return rows.map((row) => {
-        const hasFinalRevenue = hasRevenueValue(row, [
-            "fnlRccyPaxRev",
-            "fnlRccyCargoRev",
-            "fnlRccyTotalRev",
-        ]);
         const hasSourceRevenue = hasRevenueValue(row, [
-            "rccyOdPaxRev",
-            "rccyOdCargoRev",
-            "rccyOdTotalRev",
-            "rccyLegPaxRev",
-            "rccyLegCargoRev",
-            "rccyLegTotalRev",
             "odPaxRev",
             "odCargoRev",
             "odTotalRev",
@@ -743,7 +732,7 @@ function normalizeRevenueRowsForReporting(rows, revenueConfig = null) {
             "legRate",
         ]);
 
-        if (hasFinalRevenue || !hasSourceRevenue) {
+        if (!hasSourceRevenue) {
             return row;
         }
 
@@ -2436,6 +2425,7 @@ exports.getPooData = async (req, res) => {
                 selectedPoo: poo ? normalizeStation(poo) : "",
                 stationCurrency: normalizeCurrencyCode(station?.currencyCode),
                 reportingCurrency: revenueConfig.reportingCurrency,
+                currencyCodes: revenueConfig.currencyCodes,
             },
         });
     } catch (error) {
