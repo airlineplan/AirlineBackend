@@ -730,6 +730,32 @@ test("direct leg revenue calculates leg, cargo, and final INR totals", () => {
     assert.equal(row.fnlRccyTotalRev, 144010);
 });
 
+test("direct leg revenue uses leg fare and rate when OD fare and rate are blank", () => {
+    const row = recalculateRevenueForPooRow({
+        date: new Date("2026-05-02T00:00:00.000Z"),
+        stops: 0,
+        trafficType: "leg",
+        identifier: "Leg",
+        pax: 76,
+        cargoT: 0.4,
+        legFare: 5000,
+        legRate: 35000,
+        odFare: 0,
+        odRate: 0,
+        pooCcy: "USD",
+        applySSPricing: false,
+    }, {
+        reportingCurrency: "INR",
+        fxRates: [{ pair: "USD/INR", dateKey: "2026-05-01", rate: 1 }],
+    });
+
+    assert.equal(row.odFare, 5000);
+    assert.equal(row.odRate, 35000);
+    assert.equal(row.fnlRccyPaxRev, 380000);
+    assert.equal(row.fnlRccyCargoRev, 14000);
+    assert.equal(row.fnlRccyTotalRev, 394000);
+});
+
 test("reporting rows repair stale final revenue from saved OD inputs", () => {
     const [row] = normalizeRevenueRowsForReporting([
         {

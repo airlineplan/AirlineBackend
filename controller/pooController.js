@@ -682,8 +682,12 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
     next.legCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(next.legRate));
     next.legTotalRev = roundToTwo(next.legPaxRev + next.legCargoRev);
 
-    next.odPaxRev = roundToTwo(parseNumber(next.pax) * parseNumber(row.odFare));
-    next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(row.odRate));
+    const odFare = parseNumber(row.odFare) || (row.trafficType === TRAFFIC_TYPES.LEG ? parseNumber(next.legFare) : 0);
+    const odRate = parseNumber(row.odRate) || (row.trafficType === TRAFFIC_TYPES.LEG ? parseNumber(next.legRate) : 0);
+    next.odFare = odFare;
+    next.odRate = odRate;
+    next.odPaxRev = roundToTwo(parseNumber(next.pax) * odFare);
+    next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * odRate);
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
     const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "USD";
