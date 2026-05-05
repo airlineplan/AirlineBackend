@@ -199,12 +199,41 @@ exports.getWeeklyAssignments = async (req, res) => {
 
         const assignments = await Assignment.find({
             userId,
-            date: { $gte: startDate, $lte: endDate }
+            date: { $gte: startDate, $lte: endDate },
+            isValid: true,
         })
             .sort({ rotationNumber: 1, flightNumber: 1, date: 1 })
             .lean();
 
-        res.status(200).json({ data: assignments });
+        if (assignments.length === 0) {
+            return res.status(200).json({ data: [] });
+        }
+
+        const flightRegexArray = [...new Set(assignments
+            .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
+            .filter(Boolean))]
+            .map((flight) => new RegExp(`^${flight}$`, "i"));
+
+        const flights = flightRegexArray.length > 0
+            ? await Flight.find({
+                userId,
+                date: { $gte: startDate, $lte: endDate },
+                flight: { $in: flightRegexArray },
+            })
+                .select("date flight")
+                .lean()
+            : [];
+
+        const activeFlightKeys = new Set(flights.map((flight) => (
+            `${moment.utc(flight.date).format("YYYY-MM-DD")}_${String(flight.flight || "").trim().toUpperCase()}`
+        )));
+
+        const currentAssignments = assignments.filter((assignment) => {
+            const key = `${moment.utc(assignment.date).format("YYYY-MM-DD")}_${String(assignment.flightNumber || "").trim().toUpperCase()}`;
+            return activeFlightKeys.has(key);
+        });
+
+        res.status(200).json({ data: currentAssignments });
     } catch (error) {
         console.error("🔥 Fetch Error:", error);
         res.status(500).json({ message: "Failed to fetch assignments" });

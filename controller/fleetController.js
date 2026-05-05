@@ -164,6 +164,8 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             const dateStr = moment.utc(assign.date).format("DD MMM YY");
             const dateKey = moment.utc(assign.date).format("YYYY-MM-DD");
             const fKey = `${dateKey}_${String(assign.flightNumber || "").trim().toUpperCase()}`;
+            const matchedFlights = flightMap.get(fKey) || [];
+            if (matchedFlights.length === 0) return;
 
             if (!metricsMap[snKey]) metricsMap[snKey] = {};
 
@@ -172,7 +174,6 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                     metricsMap[snKey][dateStr] = createAssignedMetricEntry();
                 }
 
-                const matchedFlights = flightMap.get(fKey) || [];
                 matchedFlights.forEach((f) => {
                     metricsMap[snKey][dateStr].bh += Number(f.bh) || 0;
                     metricsMap[snKey][dateStr].fh += Number(f.fh) || 0;
