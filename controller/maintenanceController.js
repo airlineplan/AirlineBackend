@@ -521,7 +521,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
                 });
-                const dayUsage = hasUsage ? 1 : 0;
+                const dayUsage = 1;
 
                 const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
                 const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
@@ -765,6 +765,72 @@ const getUtilisationWindow = ({ masterStartDate, masterEndDate, fleet }) => {
     return { startBoundaryDate, endBoundaryDate };
 };
 
+const buildMaintenanceStatusFromReset = async ({ userId, reset, selectedDate, assumptions = [] }) => {
+    if (!reset || !selectedDate) return null;
+
+    const resetDate = moment.utc(reset.date).startOf("day");
+    const targetDate = moment.utc(selectedDate).startOf("day");
+    if (!resetDate.isValid() || !targetDate.isValid()) return null;
+
+    let currentTsn = normalizeMetricNumber(reset.tsn);
+    let currentCsn = normalizeMetricNumber(reset.csn);
+    let currentDsn = normalizeMetricNumber(reset.dsn);
+    let currentTso = normalizeMetricNumber(reset.tsoTsr);
+    let currentCso = normalizeMetricNumber(reset.csoCsr);
+    let currentDso = normalizeMetricNumber(reset.dsoDsr);
+    let currentTsr = normalizeMetricNumber(reset.tsRplmt);
+    let currentCsr = normalizeMetricNumber(reset.csRplmt);
+    let currentDsr = normalizeMetricNumber(reset.dsRplmt);
+
+    const applyUsage = async (date, direction) => {
+        const utilizationContext = await getEffectiveUtilisationContext({
+            userId,
+            msnEsn: reset.msnEsn,
+            date
+        });
+        const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+            userId,
+            effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
+            date,
+            metric: reset.timeMetric,
+            assumptions
+        });
+
+        if (currentTsn !== null) currentTsn = Number((currentTsn + (direction * timeUsage)).toFixed(2));
+        if (currentCsn !== null) currentCsn += direction * cycleUsage;
+        if (currentDsn !== null) currentDsn += direction;
+        if (currentTso !== null) currentTso = Number((currentTso + (direction * timeUsage)).toFixed(2));
+        if (currentCso !== null) currentCso += direction * cycleUsage;
+        if (currentDso !== null) currentDso += direction;
+        if (currentTsr !== null) currentTsr = Number((currentTsr + (direction * timeUsage)).toFixed(2));
+        if (currentCsr !== null) currentCsr += direction * cycleUsage;
+        if (currentDsr !== null) currentDsr += direction;
+    };
+
+    if (targetDate.isBefore(resetDate)) {
+        for (let cursor = resetDate.clone(); cursor.isAfter(targetDate); cursor.subtract(1, "day")) {
+            await applyUsage(cursor.clone(), -1);
+        }
+    } else if (targetDate.isAfter(resetDate)) {
+        for (let cursor = resetDate.clone().add(1, "day"); cursor.isSameOrBefore(targetDate); cursor.add(1, "day")) {
+            await applyUsage(cursor.clone(), 1);
+        }
+    }
+
+    return {
+        tsn: currentTsn,
+        csn: currentCsn,
+        dsn: currentDsn,
+        tsoTsr: currentTso,
+        csoCsr: currentCso,
+        dsoDsr: currentDso,
+        tsRplmt: currentTsr,
+        csRplmt: currentCsr,
+        dsRplmt: currentDsr,
+        timeMetric: reset.timeMetric
+    };
+};
+
 const targetMetricFields = [
     { key: "tsn", utilKey: "tsn" },
     { key: "csn", utilKey: "csn" },
@@ -881,10 +947,11 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 { $or: [{ exit: { $exists: false } }, { exit: null }, { exit: { $gte: startOfDay } }] }
             ];
 
-            const [utils, resetRecords, fleetAssets] = await Promise.all([
+            const [utils, resetRecords, fleetAssets, utilisationAssumptions] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 Fleet.find(fleetFilter).select("sn titled").lean(),
+                UtilisationAssumption.find({ userId: String(userId) }).lean(),
             ]);
 
             const titledBySn = new Map();
@@ -933,7 +1000,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 }
             });
 
-            const rows = Array.from(rowSourcesByKey.entries()).map(([utilKey, util]) => {
+            const rows = await Promise.all(Array.from(rowSourcesByKey.entries()).map(async ([utilKey, util]) => {
                 const resetRecordsForKey = resetRecordsByKey.get(utilKey) || [];
                 const record = resetRecordsForKey.find(reset =>
                     moment.utc(reset.date).isSameOrBefore(selectedDateMoment)
@@ -945,7 +1012,15 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 );
                 const sourceRecord = exactResetRecord || record || util;
                 const savedResetDate = sourceRecord?.date ? moment.utc(sourceRecord.date).format("YYYY-MM-DD") : "";
-                const metricSource = exactResetRecord || util || sourceRecord;
+                const computedMetricSource = sourceRecord
+                    ? await buildMaintenanceStatusFromReset({
+                        userId,
+                        reset: sourceRecord,
+                        selectedDate: selectedDateMoment,
+                        assumptions: utilisationAssumptions
+                    })
+                    : null;
+                const metricSource = computedMetricSource || exactResetRecord || util || sourceRecord;
 
                 return {
                     id: sourceRecord?._id,
@@ -971,7 +1046,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                     dsr: metricSource?.dsRplmt ?? sourceRecord?.dsRplmt ?? "",
                     allDisplay: ""
                 };
-            });
+            }));
 
             maintenanceData = rows;
         }
