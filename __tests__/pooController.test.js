@@ -366,6 +366,23 @@ test("capacity decrease resets leg traffic to the new equal allocation", () => {
     assert.deepEqual(rows.map((row) => row.cargoT), [0.2, 0.2]);
 });
 
+test("small cargo totals split across leg POO rows without exceeding max cargo", () => {
+    const snapshot = makeConnectionSnapshot({
+        sourceCargoTotal: 0.06,
+        maxCargoT: 0.06,
+    });
+
+    const { rows } = buildLegRows({
+        snapshot,
+        existingRowsByKey: new Map(),
+        existingRecords: [],
+        currencyContextByPoo: {},
+    });
+
+    assert.deepEqual(rows.map((row) => row.cargoT), [0.03, 0.03]);
+    assert.ok(rows.every((row) => row.cargoT <= row.maxCargoT));
+});
+
 test("connection rows are generated for both OD endpoint POO values", () => {
     const firstSnapshot = makeConnectionSnapshot();
     const secondSnapshot = makeConnectionSnapshot({

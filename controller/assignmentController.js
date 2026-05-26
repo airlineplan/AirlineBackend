@@ -4,6 +4,8 @@ const Flight = require('../model/flight');
 const moment = require('moment');
 const { buildAssignmentSyncPlan } = require('../utils/assignmentSync');
 
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const hasValidationRejections = (diagnostics) => Boolean(
     diagnostics?.rejections &&
     Object.values(diagnostics.rejections).some((count) => Number(count) > 0)
@@ -212,7 +214,7 @@ exports.getWeeklyAssignments = async (req, res) => {
         const flightRegexArray = [...new Set(assignments
             .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
             .filter(Boolean))]
-            .map((flight) => new RegExp(`^${flight}$`, "i"));
+            .map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
 
         const flights = flightRegexArray.length > 0
             ? await Flight.find({

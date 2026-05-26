@@ -6,7 +6,7 @@ const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const userData = require("../model/userSchema");
 const { calculateBH_FH } = require('../utils/calculateFlightHours');
-const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
+const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
@@ -897,6 +897,7 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
         domINTL: doc.domINTL,
         userId: doc.userId
       });
+      await purgeStaleAssignmentsForUser({ userId: doc.userId });
       return;
     }
 

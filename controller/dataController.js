@@ -27,7 +27,7 @@ const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
-const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
+const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
 const createConnections = require('../helper/createConnections');
 
@@ -345,6 +345,8 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
         flightNumber: { $in: flightNumbersToDelete }
       });
     }
+
+    await purgeStaleAssignmentsForUser({ userId });
 
     // Delete entries from RotationDetails model
     await RotationDetails.deleteMany({ rotationNumber: { $in: rotationNumbersToDelete }, userId });

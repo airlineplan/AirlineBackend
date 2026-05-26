@@ -98,9 +98,16 @@ function splitPaxValue(total) {
 }
 
 function splitCargoValue(total) {
-    const normalized = roundToOne(total);
-    const departure = Math.floor((normalized / 2) * 10) / 10;
-    const arrival = roundToOne(normalized - departure);
+    const normalized = roundToTwo(total);
+    const oneDecimalTotal = roundToOne(total);
+    if (Math.abs(normalized - oneDecimalTotal) < 0.001) {
+        const departure = Math.floor((oneDecimalTotal / 2) * 10) / 10;
+        const arrival = roundToOne(oneDecimalTotal - departure);
+        return [departure, arrival];
+    }
+
+    const departure = Math.floor((normalized / 2) * 100) / 100;
+    const arrival = roundToTwo(normalized - departure);
     return [departure, arrival];
 }
 

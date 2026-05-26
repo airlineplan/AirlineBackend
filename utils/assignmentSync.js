@@ -4,6 +4,8 @@ const Fleet = require("../model/fleet");
 const GroundDay = require("../model/groundDay");
 const moment = require("moment");
 
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const normalizeSnForCompare = (value) => {
   if (value === null || value === undefined) return "";
   const raw = String(value).trim().toUpperCase();
@@ -176,8 +178,8 @@ const buildValidationContext = async ({ userId, rows }) => {
 
   const minDate = new Date(Math.min(...dateSet));
   const maxDate = new Date(Math.max(...dateSet));
-  const flightRegexArray = [...flightSet].map((flight) => new RegExp(`^${flight}$`, "i"));
-  const acftRegexArray = [...acftSet].map((acft) => new RegExp(`^${acft}$`, "i"));
+  const flightRegexArray = [...flightSet].map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
+  const acftRegexArray = [...acftSet].map((acft) => new RegExp(`^${escapeRegExp(acft)}$`, "i"));
 
   const [flights, fleetData, groundDays] = await Promise.all([
     Flight.find({
@@ -490,7 +492,70 @@ const revalidateAssignmentsForUser = async ({ userId }) => {
   return result.diagnostics;
 };
 
+const purgeStaleAssignmentsForUser = async ({ userId }) => {
+  const assignments = await Assignment.find({ userId })
+    .select("_id date flightNumber")
+    .lean();
+
+  if (assignments.length === 0) {
+    return { deletedCount: 0 };
+  }
+
+  const dates = assignments
+    .map((assignment) => assignment.date)
+    .filter(Boolean)
+    .map((date) => moment.utc(date).startOf("day").toDate());
+
+  if (dates.length === 0) {
+    const result = await Assignment.deleteMany({
+      userId,
+      _id: { $in: assignments.map((assignment) => assignment._id) },
+    });
+    return { deletedCount: result.deletedCount || 0 };
+  }
+
+  const minDate = moment.utc(Math.min(...dates.map((date) => date.getTime()))).startOf("day").toDate();
+  const maxDate = moment.utc(Math.max(...dates.map((date) => date.getTime()))).endOf("day").toDate();
+  const flightRegexArray = [...new Set(assignments
+    .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
+    .filter(Boolean))]
+    .map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
+
+  const flights = flightRegexArray.length > 0
+    ? await Flight.find({
+      userId,
+      date: { $gte: minDate, $lte: maxDate },
+      flight: { $in: flightRegexArray },
+    })
+      .select("date flight")
+      .lean()
+    : [];
+
+  const activeFlightKeys = new Set(flights.map((flight) => (
+    `${moment.utc(flight.date).format("YYYY-MM-DD")}_${String(flight.flight || "").trim().toUpperCase()}`
+  )));
+
+  const staleAssignmentIds = assignments
+    .filter((assignment) => {
+      const key = `${moment.utc(assignment.date).format("YYYY-MM-DD")}_${String(assignment.flightNumber || "").trim().toUpperCase()}`;
+      return !activeFlightKeys.has(key);
+    })
+    .map((assignment) => assignment._id);
+
+  if (staleAssignmentIds.length === 0) {
+    return { deletedCount: 0 };
+  }
+
+  const result = await Assignment.deleteMany({
+    userId,
+    _id: { $in: staleAssignmentIds },
+  });
+
+  return { deletedCount: result.deletedCount || 0 };
+};
+
 module.exports = {
   buildAssignmentSyncPlan,
   revalidateAssignmentsForUser,
+  purgeStaleAssignmentsForUser,
 };
