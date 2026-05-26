@@ -380,23 +380,24 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         date: backfillCursor
                     });
 
-                    const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+                    const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
                         userId,
                         effectiveMsn: backfillUtilizationContext.effectiveMsn || msnEsn,
                         date: backfillCursor,
                         metric: currentReset.timeMetric,
                         assumptions: utilisationAssumptions
                     });
+                    const dayUsage = hasUsage ? 1 : 0;
 
                     if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
                     if (currentCsn !== null) currentCsn -= cycleUsage;
-                    if (currentDsn !== null) currentDsn -= 1;
+                    if (currentDsn !== null) currentDsn -= dayUsage;
                     if (currentTso !== null) currentTso = Number((currentTso - timeUsage).toFixed(2));
                     if (currentCso !== null) currentCso -= cycleUsage;
-                    if (currentDso !== null) currentDso -= 1;
+                    if (currentDso !== null) currentDso -= dayUsage;
                     if (currentTsr !== null) currentTsr = Number((currentTsr - timeUsage).toFixed(2));
                     if (currentCsr !== null) currentCsr -= cycleUsage;
-                    if (currentDsr !== null) currentDsr -= 1;
+                    if (currentDsr !== null) currentDsr -= dayUsage;
 
                     totalOps.push({
                         updateOne: {
@@ -521,7 +522,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
                 });
-                const dayUsage = 1;
+                const dayUsage = hasUsage ? 1 : 0;
 
                 const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
                 const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
@@ -788,23 +789,24 @@ const buildMaintenanceStatusFromReset = async ({ userId, reset, selectedDate, as
             msnEsn: reset.msnEsn,
             date
         });
-        const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+        const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
             userId,
             effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
             date,
             metric: reset.timeMetric,
             assumptions
         });
+        const dayUsage = hasUsage ? 1 : 0;
 
         if (currentTsn !== null) currentTsn = Number((currentTsn + (direction * timeUsage)).toFixed(2));
         if (currentCsn !== null) currentCsn += direction * cycleUsage;
-        if (currentDsn !== null) currentDsn += direction;
+        if (currentDsn !== null) currentDsn += direction * dayUsage;
         if (currentTso !== null) currentTso = Number((currentTso + (direction * timeUsage)).toFixed(2));
         if (currentCso !== null) currentCso += direction * cycleUsage;
-        if (currentDso !== null) currentDso += direction;
+        if (currentDso !== null) currentDso += direction * dayUsage;
         if (currentTsr !== null) currentTsr = Number((currentTsr + (direction * timeUsage)).toFixed(2));
         if (currentCsr !== null) currentCsr += direction * cycleUsage;
-        if (currentDsr !== null) currentDsr += direction;
+        if (currentDsr !== null) currentDsr += direction * dayUsage;
     };
 
     if (targetDate.isBefore(resetDate)) {
@@ -1154,6 +1156,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
         const replaceExistingResetOps = [];
         const saveDateStrings = new Set();
         const changedResetGroups = new Map();
+        const seenResetGroups = new Set();
 
         // Use a for...of loop to handle async Await calls
         for (const record of resetData) {
@@ -1176,6 +1179,15 @@ exports.bulkSaveResetRecords = async (req, res) => {
                     message: "MSN/ESN, PN, and SN/BN are required before saving reset records."
                 });
             }
+
+            const resetGroupKey = buildResetGroupKey(resetGroup);
+            if (seenResetGroups.has(resetGroupKey)) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Only one maintenance status setting is allowed for ${msnEsn}/${pn}/${snBn}.`
+                });
+            }
+            seenResetGroups.add(resetGroupKey);
 
             const rawDate = fallbackResetDate || record.date;
             const parsedDate = moment.utc(rawDate, moment.ISO_8601, true);
@@ -1204,7 +1216,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 dsRplmt: parseNum(record.dsr),
             };
             saveDateStrings.add(moment(normalizedDate).format("YYYY-MM-DD"));
-            changedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
+            changedResetGroups.set(resetGroupKey, resetGroup);
 
             replaceExistingResetOps.push({
                 deleteMany: {
@@ -1311,18 +1323,32 @@ exports.deleteResetRecord = async (req, res) => {
             return res.status(404).json({ message: "Maintenance reset record not found." });
         }
 
-        await Utilisation.deleteOne({
-            userId: String(userId),
-            date: deletedRecord.date,
+        const resetGroup = {
             msnEsn: deletedRecord.msnEsn,
             pn: deletedRecord.pn,
             snBn: deletedRecord.snBn
+        };
+
+        await Utilisation.deleteMany({
+            userId: String(userId),
+            msnEsn: resetGroup.msnEsn,
+            pn: resetGroup.pn,
+            snBn: resetGroup.snBn
         });
 
-        await recomputeMaintenanceTimeline({
-            userId,
-            resetGroups: [deletedRecord]
+        const remainingReset = await MaintenanceReset.exists({
+            userId: String(userId),
+            msnEsn: resetGroup.msnEsn,
+            pn: resetGroup.pn,
+            snBn: resetGroup.snBn
         });
+
+        if (remainingReset) {
+            await recomputeMaintenanceTimeline({
+                userId,
+                resetGroups: [resetGroup]
+            });
+        }
 
         res.status(200).json({ success: true, message: "Maintenance reset record deleted successfully." });
     } catch (error) {
