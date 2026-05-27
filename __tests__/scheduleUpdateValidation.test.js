@@ -15,6 +15,7 @@ const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
 const { uploadAssignments, getWeeklyAssignments } = require("../controller/assignmentController");
 const { deleteFlightsAndUpdateSectors } = require("../controller/dataController");
+const fleetController = require("../controller/fleetController");
 const { buildAssignmentSyncPlan } = require("../utils/assignmentSync");
 
 const USER_ID = "test-user";
@@ -127,6 +128,7 @@ async function connectMongo() {
       stdio: ["ignore", "ignore", "ignore"],
     }
   );
+  mongodProcess.unref();
 
   await waitForPortOpen(port);
   await mongoose.connect(`mongodb://127.0.0.1:${port}/${dbName}`, {
@@ -248,11 +250,16 @@ before(async () => {
 });
 
 after(async () => {
-  await mongoose.connection.close();
   if (mongodProcess) {
     await new Promise((resolve) => {
+      if (mongodProcess.exitCode !== null || mongodProcess.signalCode !== null) {
+        resolve();
+        return;
+      }
+
       const timeout = setTimeout(() => {
         mongodProcess.kill("SIGKILL");
+        resolve();
       }, 5000);
 
       mongodProcess.once("exit", () => {
@@ -263,6 +270,10 @@ after(async () => {
       mongodProcess.kill("SIGINT");
     });
   }
+  await Promise.race([
+    mongoose.connection.client?.close(true) || mongoose.connection.close(true),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
+  ]);
   if (dbPath) {
     fs.rmSync(dbPath, { recursive: true, force: true });
   }
@@ -439,6 +450,10 @@ test("non-schedule field updates keep the same flight rows and revalidate assign
   const assignment = await Assignment.findOne({ userId: USER_ID }).lean();
 
   assert.equal(flightsAfter.length, flightsBefore.length);
+  assert.deepEqual(
+    flightsAfter.map((flight) => flight._id.toString()),
+    flightsBefore.map((flight) => flight._id.toString())
+  );
   assert.equal(flightsAfter[0].bt, "03:00");
   assert.equal(flightsAfter[0].remarks1, "Updated remark");
   assert.equal(assignment?.isValid, true);
@@ -472,7 +487,9 @@ test("assignment sync rejects ACFT values that are not fleet registrations", asy
   });
 
   assert.equal(result.assignmentBulkOps.length, 1);
+  assert.ok(result.assignmentBulkOps[0].deleteOne);
   assert.equal(result.flightBulkOps.length, 1);
+  assert.ok(result.flightBulkOps[0].updateOne.update.$unset);
   assert.equal(result.diagnostics.rejections.missingFromFleetDB, 1);
   assert.equal(result.diagnostics.rejectedRows[0].acft, "A320");
   assert.match(result.diagnostics.rejectedRows[0].errors[0], /not found in Fleet master/i);
@@ -509,7 +526,7 @@ test("assignment sync treats base variant before hyphen as a match", async () =>
   assert.equal(result.assignmentBulkOps[0].updateOne.update.$set.isValid, true);
 });
 
-test("assignment upload rejects the whole file when any row fails validation", async () => {
+test("assignment upload applies valid rows and skips invalid rows", async () => {
   await seedNetwork({ variant: BASE_VARIANT });
   await Fleet.create([
     {
@@ -552,14 +569,209 @@ test("assignment upload rejects the whole file when any row fails validation", a
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 
-  const assignments = await Assignment.find({ userId: USER_ID }).lean();
-  const flights = await Flight.find({ userId: USER_ID }).lean();
+  const assignments = await Assignment.find({ userId: USER_ID }).sort({ date: 1 }).lean();
+  const validFlight = await Flight.findOne({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 6),
+    flight: BASE_FLIGHT,
+  }).lean();
+  const invalidFlight = await Flight.findOne({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 8),
+    flight: BASE_FLIGHT,
+  }).lean();
 
-  assert.equal(res.statusCode, 422);
-  assert.equal(res.body?.success, false);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body?.success, true);
   assert.equal(res.body?.diagnostics?.rejections?.variantMismatches, 1);
-  assert.equal(assignments.length, 0);
-  assert.ok(flights.every((flight) => !flight.aircraft?.registration));
+  assert.equal(res.body?.diagnostics?.appliedCount, 1);
+  assert.equal(res.body?.diagnostics?.discardedCount, 1);
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].aircraft?.registration, "VT-AAA");
+  assert.equal(validFlight?.aircraft?.registration, "VT-AAA");
+  assert.ok(!invalidFlight?.aircraft?.registration);
+});
+
+test("assignment upload invalid row deletes the previous assignment for that date and flight", async () => {
+  await seedNetwork({ variant: BASE_VARIANT });
+  await Fleet.create([
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: BASE_VARIANT,
+      variant: BASE_VARIANT,
+      sn: "4120",
+      regn: "VT-AAA",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: "B737",
+      variant: "B737",
+      sn: "7370",
+      regn: "VT-BAD",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+  ]);
+  await Assignment.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 8),
+    flightNumber: BASE_FLIGHT,
+    aircraft: { registration: "VT-AAA", msn: 4120 },
+    isValid: true,
+    validationErrors: [],
+  });
+  await Flight.updateOne(
+    { userId: USER_ID, date: utcDate(2026, 4, 8), flight: BASE_FLIGHT },
+    { $set: { aircraft: { registration: "VT-AAA", msn: 4120 } } }
+  );
+
+  const { tempDir, filePath } = createAssignmentWorkbook([
+    { Date: "08-Apr-26", "Flight #": BASE_FLIGHT, ACFT: "VT-BAD" },
+  ]);
+  const res = createMockResponse();
+
+  try {
+    await uploadAssignments({ user: { id: USER_ID }, file: { path: filePath } }, res);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const assignment = await Assignment.findOne({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 8),
+    flightNumber: BASE_FLIGHT,
+  }).lean();
+  const flight = await Flight.findOne({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 8),
+    flight: BASE_FLIGHT,
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body?.diagnostics?.discardedCount, 1);
+  assert.equal(assignment, null);
+  assert.ok(!flight?.aircraft?.registration);
+});
+
+test("assignment upload revalidates existing assignments not mentioned in the upload", async () => {
+  await seedNetwork({ variant: BASE_VARIANT });
+  await Fleet.create([
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: BASE_VARIANT,
+      variant: BASE_VARIANT,
+      sn: "4120",
+      regn: "VT-AAA",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: "B737",
+      variant: "B737",
+      sn: "7370",
+      regn: "VT-BAD",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+  ]);
+  await Assignment.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 8),
+    flightNumber: BASE_FLIGHT,
+    aircraft: { registration: "VT-BAD", msn: 7370 },
+    isValid: true,
+    validationErrors: [],
+  });
+
+  const { tempDir, filePath } = createAssignmentWorkbook([
+    { Date: "06-Apr-26", "Flight #": BASE_FLIGHT, ACFT: "VT-AAA" },
+  ]);
+  const res = createMockResponse();
+
+  try {
+    await uploadAssignments({ user: { id: USER_ID }, file: { path: filePath } }, res);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const assignments = await Assignment.find({ userId: USER_ID }).sort({ date: 1 }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body?.diagnostics?.revalidatedCount, 2);
+  assert.equal(res.body?.diagnostics?.discardedCount, 1);
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].aircraft?.registration, "VT-AAA");
+});
+
+test("fleet save revalidates and deletes assignments for removed aircraft registrations", async () => {
+  const { networkId } = await seedNetwork({ variant: BASE_VARIANT });
+  const targetFlight = await Flight.findOne({ networkId, date: utcDate(2026, 4, 8) }).lean();
+
+  await Fleet.create([
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: BASE_VARIANT,
+      variant: BASE_VARIANT,
+      sn: "4120",
+      regn: "VT-AAA",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: BASE_VARIANT,
+      variant: BASE_VARIANT,
+      sn: "5150",
+      regn: "VT-OLD",
+      entry: utcDate(2026, 4, 1),
+      exit: utcDate(2026, 6, 30),
+    },
+  ]);
+  await Assignment.create({
+    userId: USER_ID,
+    date: targetFlight.date,
+    flightNumber: targetFlight.flight,
+    aircraft: { registration: "VT-OLD", msn: 5150 },
+    isValid: true,
+    validationErrors: [],
+  });
+  await Flight.updateOne(
+    { _id: targetFlight._id },
+    { $set: { aircraft: { registration: "VT-OLD", msn: 5150 } } }
+  );
+
+  const res = createMockResponse();
+  await fleetController.bulkUpsertFleet({
+    user: { id: USER_ID },
+    body: {
+      fleetData: [{
+        category: "Aircraft",
+        type: BASE_VARIANT,
+        variant: BASE_VARIANT,
+        sn: "4120",
+        regn: "VT-AAA",
+        entry: utcDate(2026, 4, 1),
+        exit: utcDate(2026, 6, 30),
+      }],
+    },
+  }, res);
+
+  const assignment = await Assignment.findOne({ userId: USER_ID }).lean();
+  const flight = await Flight.findById(targetFlight._id).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body?.assignmentDiagnostics?.discardedCount, 1);
+  assert.equal(assignment, null);
+  assert.ok(!flight?.aircraft?.registration);
 });
 
 test("assignment and flight tenant indexes reject duplicate rows for the same user scope", async () => {

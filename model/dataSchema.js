@@ -7,6 +7,7 @@ const StationsHistory = require("../model/stationHistorySchema");
 const userData = require("../model/userSchema");
 const { calculateBH_FH } = require('../utils/calculateFlightHours');
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
+const moment = require("moment");
 const Schema = mongoose.Schema;
 // const createConnections = require('../helper/createConnections');
 
@@ -635,208 +636,47 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
     }
 
     const updatedFields = [];
+    const assignIfChanged = (targetField, nextValue, label = targetField, options = {}) => {
+      if (nextValue === undefined || nextValue === null) return;
 
-    if (doc.effFromDt.toString() !== data.fromDt.toString()) {
-      data.fromDt = doc.effFromDt;
-      updatedFields.push('fromDt');
-    }
+      const currentComparable = options.date
+        ? normalizeScheduleDate(data[targetField])
+        : String(data[targetField] ?? "");
+      const nextComparable = options.date
+        ? normalizeScheduleDate(nextValue)
+        : String(nextValue ?? "");
 
-    if (doc.flight.toString() !== data.flight.toString()) {
-      data.flight = doc.flight;
-      updatedFields.push('flight');
-    }
-
-    ["sourceSerialNo", "beyond1", "beyond2", "behind1", "behind2"].forEach((field) => {
-      if (String(doc[field] || "") !== String(data[field] || "")) {
-        data[field] = doc[field];
-        updatedFields.push(field);
+      if (currentComparable !== nextComparable) {
+        data[targetField] = nextValue;
+        updatedFields.push(label);
       }
+    };
+
+    assignIfChanged("fromDt", doc.effFromDt, "fromDt", { date: true });
+    assignIfChanged("toDt", doc.effToDt, "toDt", { date: true });
+    assignIfChanged("flight", doc.flight, "flight");
+    ["sourceSerialNo", "beyond1", "beyond2", "behind1", "behind2"].forEach((field) => {
+      assignIfChanged(field, doc[field], field);
     });
-
-    if (doc.effToDt.toString() !== data.toDt.toString()) {
-      data.toDt = doc.effToDt;
-      updatedFields.push('toDt');
-    }
-
-    if (doc.dow.toString() !== data.dow.toString()) {
-      data.dow = doc.dow;
-      updatedFields.push('dow');
-    }
-
-    if (doc.arrStn.toString() !== data.sector2.toString()) {
-      data.sector2 = doc.arrStn;
-      updatedFields.push('arrStn');
-    }
-
-    if (doc.bt.toString() !== data.bt.toString()) {
-      data.bt = doc.bt;
-      updatedFields.push('bt');
-    }
-
-    if (doc.depStn.toLowerCase().toString() !== data.sector1.toLowerCase().toString()) {
-      data.sector1 = doc.depStn;
-      updatedFields.push('depStn');
-    }
-
-    if (doc.sta.toString() !== data.sta.toString()) {
-      data.sta = doc.sta;
-      updatedFields.push('sta');
-    }
-
-    if (doc.std.toString() !== data.std.toString()) {
-      data.std = doc.std;
-      updatedFields.push('std');
-    }
-
-    if (doc.variant.toString() !== data.variant.toString()) {
-      data.variant = doc.variant;
-      updatedFields.push('variant');
-    }
-
-    if (doc.domINTL.toString() !== data.domINTL.toString()) {
-      data.domINTL = doc.domINTL;
-      updatedFields.push('domINTL');
-    }
-
-    if (doc.userTag1 && doc.userTag1.toString() !== data.userTag1 && data.userTag1.toString()) {
-      data.userTag1 = doc.userTag1;
-      updatedFields.push('userTag1');
-    }
-
-    if (doc.userTag2 && doc.userTag2.toString() !== data.userTag2 && data.userTag2.toString()) {
-      data.userTag2 = doc.userTag2;
-      updatedFields.push('userTag2');
-    }
-
-    if (doc.remarks1 && doc.remarks1.toString() !== data.remarks1 && data.remarks1.toString()) {
-      data.remarks1 = doc.remarks1;
-      updatedFields.push('remarks1');
-    }
-
-    if (doc.remarks2 && doc.remarks2.toString() !== data.remarks2 && data.remarks2.toString()) {
-      data.remarks2 = doc.remarks2;
-      updatedFields.push('remarks2');
-    }
+    assignIfChanged("dow", doc.dow, "dow");
+    assignIfChanged("sector2", doc.arrStn, "arrStn");
+    assignIfChanged("bt", doc.bt, "bt");
+    assignIfChanged("sector1", doc.depStn, "depStn");
+    assignIfChanged("sta", doc.sta, "sta");
+    assignIfChanged("std", doc.std, "std");
+    assignIfChanged("variant", doc.variant, "variant");
+    assignIfChanged("domINTL", doc.domINTL, "domINTL");
+    assignIfChanged("userTag1", doc.userTag1, "userTag1");
+    assignIfChanged("userTag2", doc.userTag2, "userTag2");
+    assignIfChanged("remarks1", doc.remarks1, "remarks1");
+    assignIfChanged("remarks2", doc.remarks2, "remarks2");
 
     if (updatedFields.length > 0) {
       await data.save();
-      console.log(`Updated fields [${updatedFields.join(', ')}] for networkId: ${networkId}`);
+      console.log(`Updated fields [${updatedFields.join(", ")}] for networkId: ${networkId}`);
     } else {
       console.log(`No fields updated for networkId: ${networkId}`);
       return;
-    }
-
-    const hasNonEffectiveDateChanges = updatedFields.some((field) => !["fromDt", "toDt"].includes(field));
-
-    const timeZoneCorrectedDates = (date, tzString) => {
-      return new Date((typeof date === "string" ? new Date(date) : date).toLocaleString("en-US", { timeZone: tzString }));
-    }
-
-    let startDate = startOfUtcDay(data.fromDt);
-    let endDate = startOfUtcDay(data.toDt);
-
-    //set to midnight
-    const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-    const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
-    let currentFlightCount;
-
-    const result = await FLIGHT.deleteMany({ networkId: networkId });
-    console.log(`Existing flight entries deleted: ${result.deletedCount}`);
-
-    // Get the current count of flights for the user
-    currentFlightCount = await FLIGHT.countDocuments({ userId: doc.userId });
-
-    // If the user has already reached or exceeded the limit, skip creating flights
-    if (currentFlightCount >= FLIGHT_LIMIT) {
-      console.log(`Flight limit of ${FLIGHT_LIMIT} reached for user: ${doc.userId}`);
-      return; // Exit the function
-    }
-
-    const firstElement = parseInt(data.dow.charAt(0));
-    const lastElement = parseInt(data.dow.charAt(data.dow.length - 1));
-
-    let currentDate = new Date(startDate);
-
-    while (currentDate <= endDate) {
-
-      // Stop if the overall flight limit is reached
-      if (currentFlightCount >= FLIGHT_LIMIT) {
-        console.log(`Flight limit of ${FLIGHT_LIMIT} reached while processing.`);
-        break;
-      }
-
-      const currentDow = getUtcDayOfWeek(currentDate);
-      const dayOfWeek = daysOfWeek[currentDow];
-
-      const currentDayOfWeek = currentDow !== 0 ? currentDow : 7;
-      const allowedDaysOfWeek = Array.from(data.dow).map(Number);
-
-      if (allowedDaysOfWeek.includes(currentDayOfWeek)) {
-        const flightDate = new Date(currentDate);
-        flightDate.setUTCHours(0, 0, 0, 0);
-        const newFlight = {
-          date: flightDate,
-          day: dayOfWeek,
-          flight: doc.flight,
-          sourceSerialNo: data.sourceSerialNo,
-          depStn: data.sector1,
-          std: data.std,
-          bt: data.bt,
-          sta: data.sta,
-          arrStn: data.sector2,
-          sector: `${data.sector1}-${data.sector2}`,
-          variant: data.variant,
-          seats: data.paxCapacity,
-          CargoCapT: data.CargoCapT,
-          dist: data.gcd,
-          pax: data.paxCapacity * (data.paxLF / 100),
-          CargoT: data.CargoCapT * (data.cargoLF / 100),
-          ask: data.paxCapacity * data.gcd,
-          rsk: data.paxCapacity * (data.paxLF / 100) * data.gcd,
-          cargoAtk: data.CargoCapT * data.gcd,
-          cargoRtk: data.CargoCapT * (data.cargoLF / 100) * data.gcd,
-          domIntl: data.domINTL.toLowerCase(),
-          userTag1: data.userTag1,
-          userTag2: data.userTag2,
-          remarks1: data.remarks1,
-          remarks2: data.remarks2,
-          sectorId: data._id,
-          userId: data.userId,
-          networkId: data.networkId,
-          effFromDt: doc.effFromDt,
-          effToDt: doc.effToDt,
-          dow: doc.dow,
-          beyond1: data.beyond1,
-          beyond2: data.beyond2,
-          behind1: data.behind1,
-          behind2: data.behind2
-        };
-
-        if (
-          !isNaN(newFlight.pax) &&
-          !isNaN(newFlight.CargoT) &&
-          !isNaN(newFlight.rsk) &&
-          !isNaN(newFlight.ask) &&
-          !isNaN(newFlight.cargoAtk) &&
-          !isNaN(newFlight.cargoRtk)
-        ) {
-          newFlight.isComplete = true;
-        } else {
-          newFlight.isComplete = false;
-        }
-
-        const newFlgt = new FLIGHT(newFlight);
-
-        currentFlightCount++;
-
-        console.log(newFlgt, "this is new value");
-
-        await newFlgt.save();
-        console.log("New flight entry created.");
-      }
-
-      currentDate = addUtcDays(currentDate, 1);
     }
 
     if (oldArrStn !== doc.arrStn) {
@@ -853,35 +693,39 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       effFromDt: originalData.fromDt,
       effToDt: originalData.toDt,
       dow: originalData.dow,
-      flight: originalData.flight,
     };
 
     const updatedScheduleDoc = {
       effFromDt: doc.effFromDt,
       effToDt: doc.effToDt,
       dow: doc.dow,
-      flight: doc.flight,
     };
 
     const scheduleChanged = hasScheduleChange(originalScheduleDoc, updatedScheduleDoc);
 
     if (scheduleChanged) {
-      const flightNumbersToDelete = [...new Set([
-        normalizeScheduleFlight(originalData.flight),
-        normalizeScheduleFlight(doc.flight)
-      ].filter(Boolean))];
+      const existingFlights = await FLIGHT.find({ networkId: networkId })
+        .select("date flight")
+        .lean();
 
       const deletedFlights = await FLIGHT.deleteMany({ networkId: networkId });
       console.log(`Deleted ${deletedFlights.deletedCount} existing flight rows for networkId: ${networkId}`);
 
-      if (flightNumbersToDelete.length > 0) {
+      const assignmentOccurrenceFilters = existingFlights
+        .filter((flight) => flight.date && flight.flight)
+        .map((flight) => ({
+          date: moment.utc(flight.date).startOf("day").toDate(),
+          flightNumber: normalizeScheduleFlight(flight.flight),
+        }));
+
+      if (assignmentOccurrenceFilters.length > 0) {
         const assignmentDeleteResult = await Assignment.deleteMany({
           userId: doc.userId,
-          flightNumber: { $in: flightNumbersToDelete }
+          $or: assignmentOccurrenceFilters
         });
 
         console.log(
-          `Deleted ${assignmentDeleteResult.deletedCount} assignment rows for networkId ${networkId} and flights [${flightNumbersToDelete.join(", ")}]`
+          `Deleted ${assignmentDeleteResult.deletedCount} assignment rows for schedule-changed networkId ${networkId}`
         );
       }
 
@@ -901,7 +745,41 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       return;
     }
 
-    if (hasNonEffectiveDateChanges) {
+    const hasNonScheduleChanges = updatedFields.some((field) => !["fromDt", "toDt", "dow"].includes(field));
+
+    if (hasNonScheduleChanges) {
+      const flightUpdatePayload = {
+        flight: data.flight,
+        sourceSerialNo: data.sourceSerialNo,
+        depStn: data.sector1,
+        std: data.std,
+        bt: data.bt,
+        sta: data.sta,
+        arrStn: data.sector2,
+        sector: `${data.sector1}-${data.sector2}`,
+        variant: data.variant,
+        acftType: data.acftType || data.variant,
+        domIntl: String(data.domINTL || "").toLowerCase(),
+        userTag1: data.userTag1,
+        userTag2: data.userTag2,
+        remarks1: data.remarks1,
+        remarks2: data.remarks2,
+        sectorId: data._id,
+        effFromDt: doc.effFromDt,
+        effToDt: doc.effToDt,
+        dow: doc.dow,
+        beyond1: data.beyond1,
+        beyond2: data.beyond2,
+        behind1: data.behind1,
+        behind2: data.behind2,
+      };
+
+      Object.keys(flightUpdatePayload).forEach((key) => {
+        if (flightUpdatePayload[key] === undefined) delete flightUpdatePayload[key];
+      });
+
+      await FLIGHT.updateMany({ networkId: networkId }, { $set: flightUpdatePayload });
+
       if (!shouldSkipAssignmentResync) {
         await revalidateAssignmentsForUser({ userId: doc.userId });
       }
@@ -909,9 +787,6 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
     }
 
     console.log(`Schedule fields unchanged for networkId ${networkId}; flights updated in place.`);
-
-    // await createConnections(doc.userId);
-    // console.log("createConnections completed successfully.");
   } catch (error) {
     console.error("An error occurred:", error);
   }

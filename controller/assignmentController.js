@@ -2,7 +2,12 @@ const xlsx = require('xlsx');
 const Assignment = require('../model/assignment');
 const Flight = require('../model/flight');
 const moment = require('moment');
-const { buildAssignmentSyncPlan } = require('../utils/assignmentSync');
+const {
+    applyAssignmentSyncPlan,
+    buildAssignmentSyncPlan,
+    buildDateFlightKey,
+    revalidateAssignmentsForUser,
+} = require('../utils/assignmentSync');
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -19,9 +24,14 @@ const buildUploadMessage = (diagnostics) => {
     const variantMismatches = diagnostics?.rejections?.variantMismatches || 0;
     const groundConflicts = diagnostics?.rejections?.groundConflicts || 0;
     const overlaps = diagnostics?.rejections?.acftOverlaps || 0;
-    const rejectedRows = Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : [];
+    const rejectedRows = Array.isArray(diagnostics?.discardedRows)
+        ? diagnostics.discardedRows
+        : (Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : []);
 
     if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches && !groundConflicts && !overlaps) {
+        if (Number(diagnostics?.discardedCount || 0) > 0) {
+            return `Assignments uploaded with warnings. ${diagnostics.discardedCount} row(s) were disregarded.`;
+        }
         return "Assignments uploaded successfully!";
     }
 
@@ -57,6 +67,11 @@ const buildUploadMessage = (diagnostics) => {
         if (sampleLabel) {
             parts.push(`Example rejected row: ${sampleLabel}.`);
         }
+    }
+
+    const discardedCount = Number(diagnostics?.discardedCount || 0);
+    if (discardedCount > 0) {
+        parts.unshift(`${discardedCount} row(s) were disregarded.`);
     }
 
     return `Assignments uploaded with warnings. ${parts.join(" ")}`.trim();
@@ -150,27 +165,28 @@ exports.uploadAssignments = async (req, res) => {
         if (validRows.length === 0) {
             return res.status(400).json({ message: "No valid rows found. Check your Excel column names." });
         }
-        const { assignmentBulkOps, flightBulkOps, diagnostics } = await buildAssignmentSyncPlan({
+        const uploadedKeys = validRows.map((row) => buildDateFlightKey(row.dateKey, row.flight));
+        const syncResult = await buildAssignmentSyncPlan({
             userId,
             rows: validRows,
+            priorityKeys: uploadedKeys,
         });
 
-        const hasRejections = hasValidationRejections(diagnostics);
+        await applyAssignmentSyncPlan(syncResult);
+
+        const revalidationDiagnostics = await revalidateAssignmentsForUser({
+            userId,
+            priorityKeys: uploadedKeys,
+        });
+        const diagnostics = {
+            ...syncResult.diagnostics,
+            discardedCount:
+                Number(syncResult.diagnostics?.discardedCount || 0) +
+                Number(revalidationDiagnostics?.discardedCount || 0),
+            revalidatedCount: revalidationDiagnostics?.revalidatedCount || 0,
+            revalidation: revalidationDiagnostics,
+        };
         const message = buildUploadMessage(diagnostics);
-
-        if (hasRejections) {
-            return res.status(422).json({
-                success: false,
-                message,
-                diagnostics,
-            });
-        }
-
-        const dbPromises = [];
-        if (assignmentBulkOps.length > 0) dbPromises.push(Assignment.bulkWrite(assignmentBulkOps, { ordered: false }));
-        if (flightBulkOps.length > 0) dbPromises.push(Flight.bulkWrite(flightBulkOps, { ordered: false }));
-
-        await Promise.all(dbPromises);
 
         res.status(200).json({
             message,

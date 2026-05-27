@@ -11,6 +11,7 @@ const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema.js");
 const moment = require('moment'); // <-- Added missing moment import
+const { deleteAssignmentsForAircraftDate } = require("../utils/assignmentSync");
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 const isValidObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
@@ -296,6 +297,11 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
     const totalOps = [];
     const calendarEventState = new Map();
     const calendarIdsTouched = new Set();
+    const assignmentImpact = {
+        deletedCount: 0,
+        clearedFlightCount: 0,
+        daysTouched: 0
+    };
 
     const recordCalendarEvent = ({ cal, date, triggeredGroups, projectedValues }) => {
         const key = String(cal._id);
@@ -476,17 +482,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 const currentEffectiveMsn = currentUtilizationContext.effectiveMsn || msnEsn;
 
                 if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
-                    await Assignment.updateMany({
-                        userId: String(userId),
-                        date: {
-                            $gte: currDate.toDate(),
-                            $lt: moment.utc(currDate).endOf("day").toDate()
-                        },
-                        "aircraft.msn": Number(currentEffectiveMsn)
-                    }, {
-                        $unset: { "aircraft.msn": "", "aircraft.registration": "" },
-                        $set: { removedReason: "GROUND_DAY_CONFLICT" }
+                    const cleanup = await deleteAssignmentsForAircraftDate({
+                        userId,
+                        msn: currentEffectiveMsn,
+                        date: currDate,
+                        reason: "GROUND_DAY_CONFLICT"
                     });
+                    assignmentImpact.deletedCount += cleanup.deletedCount;
+                    assignmentImpact.clearedFlightCount += cleanup.clearedFlightCount;
+                    if (cleanup.deletedCount > 0) assignmentImpact.daysTouched += 1;
 
                     if (currentDsn !== null) currentDsn += 1;
                     if (currentDso !== null) currentDso += 1;
@@ -574,17 +578,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 }
 
                 if (triggeredCalendars.length > 0) {
-                    await Assignment.updateMany({
-                        userId: String(userId),
-                        date: {
-                            $gte: currDate.toDate(),
-                            $lt: moment.utc(currDate).endOf("day").toDate()
-                        },
-                        "aircraft.msn": Number(currentEffectiveMsn)
-                    }, {
-                        $unset: { "aircraft.msn": "", "aircraft.registration": "" },
-                        $set: { removedReason: "GROUND_DAY_CONFLICT" }
+                    const cleanup = await deleteAssignmentsForAircraftDate({
+                        userId,
+                        msn: currentEffectiveMsn,
+                        date: currDate,
+                        reason: "GROUND_DAY_CONFLICT"
                     });
+                    assignmentImpact.deletedCount += cleanup.deletedCount;
+                    assignmentImpact.clearedFlightCount += cleanup.clearedFlightCount;
+                    if (cleanup.deletedCount > 0) assignmentImpact.daysTouched += 1;
 
                     if (downDaysToApply > 0) {
                         inMaintenanceUntil = moment.utc(currDate).add(downDaysToApply - 1, "days");
@@ -712,6 +714,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
     return {
         resetGroupCount: resetGroups.length,
         message: `Maintenance logic computed for ${resetGroups.length} assets.`,
+        assignmentImpact,
     };
 };
 
@@ -1371,10 +1374,18 @@ exports.computeMaintenanceLogic = async (req, res) => {
         const result = await recomputeMaintenanceTimeline({ userId });
 
         if (result.message === "No flights found to compute.") {
-            return res.status(200).json({ success: true, message: result.message });
+            return res.status(200).json({
+                success: true,
+                message: result.message,
+                assignmentImpact: result.assignmentImpact || { deletedCount: 0, clearedFlightCount: 0, daysTouched: 0 }
+            });
         }
 
-        res.status(200).json({ success: true, message: result.message });
+        res.status(200).json({
+            success: true,
+            message: result.message,
+            assignmentImpact: result.assignmentImpact
+        });
     } catch (error) {
         console.error("🔥 Error computing maintenance logic:", error);
         res.status(500).json({ message: "Failed to recalculate maintenance logic", error: error.message });

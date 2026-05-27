@@ -598,7 +598,6 @@ const updateData = async (req, res) => {
     const idArray = id.split(",").map((item) => item.trim());
 
     const updatedFlights = [];
-    let shouldRevalidateAssignments = false;
 
     const updatePayloadFromBody = {};
     Object.entries(req.body).forEach(([key, value]) => {
@@ -612,14 +611,23 @@ const updateData = async (req, res) => {
       }
     });
 
-    shouldRevalidateAssignments = Object.keys(updatePayloadFromBody).some((key) => ![
+    const scheduleUpdateFields = [
       "effFromDt",
       "effFromDate",
       "effToDt",
       "effToDate",
+      "dow",
+    ];
+    const ignoredUpdateFields = [
       "timeZone",
       "timezone",
-    ].includes(key));
+    ];
+    const payloadKeys = Object.keys(updatePayloadFromBody);
+    const hasScheduleUpdate = payloadKeys.some((key) => scheduleUpdateFields.includes(key));
+    const shouldRevalidateAssignments = payloadKeys.some((key) => (
+      !scheduleUpdateFields.includes(key) && !ignoredUpdateFields.includes(key)
+    ));
+    const shouldControllerRevalidateAssignments = shouldRevalidateAssignments && !hasScheduleUpdate;
 
     for (const dataId of idArray) {
 
@@ -674,7 +682,7 @@ const updateData = async (req, res) => {
       const updatedData = await Data.findOneAndUpdate(
         { _id: dataId, userId },
         { $set: updatePayload },
-        { new: true, runValidators: true, skipAssignmentResync: shouldRevalidateAssignments }
+        { new: true, runValidators: true, skipAssignmentResync: shouldControllerRevalidateAssignments }
       );
 
       if (!updatedData) {
@@ -684,7 +692,7 @@ const updateData = async (req, res) => {
       updatedFlights.push(updatedData);
     }
 
-    if (shouldRevalidateAssignments) {
+    if (shouldControllerRevalidateAssignments) {
       try {
         await revalidateAssignmentsForUser({ userId: req.user.id });
       } catch (revalidationError) {

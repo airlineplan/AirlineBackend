@@ -5,6 +5,7 @@ const GroundDay = require('../model/groundDay');
 const AircraftOnwing = require('../model/aircraftOnwing');
 const RotableMovement = require('../model/rotableMovementSchema');
 const moment = require('moment');
+const { revalidateAssignmentsForUser } = require('../utils/assignmentSync');
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 const normalizeNumericAssetKey = (value) => {
@@ -491,7 +492,12 @@ exports.bulkUpsertFleet = async (req, res) => {
             await AircraftOnwing.bulkWrite(onwingOps, { ordered: false });
         }
 
-        res.status(200).json({ message: "Fleet data and Onwing configurations saved successfully!" });
+        const assignmentDiagnostics = await revalidateAssignmentsForUser({ userId });
+
+        res.status(200).json({
+            message: "Fleet data and Onwing configurations saved successfully!",
+            assignmentDiagnostics
+        });
     } catch (error) {
         console.error("🔥 Bulk Save Error:", error);
         res.status(500).json({ message: "Failed to save fleet data", error: error.message });
@@ -512,7 +518,12 @@ exports.deleteFleetAsset = async (req, res) => {
             return res.status(404).json({ message: "Asset not found" });
         }
 
-        res.status(200).json({ message: "Asset deleted successfully" });
+        const assignmentDiagnostics = await revalidateAssignmentsForUser({ userId });
+
+        res.status(200).json({
+            message: "Asset deleted successfully",
+            assignmentDiagnostics
+        });
     } catch (error) {
         console.error("🔥 Delete Error:", error);
         res.status(500).json({ message: "Failed to delete asset", error: error.message });

@@ -942,6 +942,71 @@ test("maintenance calendar since-new threshold triggers once inside the master d
   assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-04-03");
 });
 
+test("maintenance compute deletes affected assignments and clears matching flights", async () => {
+  const day1 = utcDate(2026, 4, 1);
+  const day2 = utcDate(2026, 4, 2);
+
+  await seedFlightDays([day1, day2], "MX");
+  await seedFleetAsset({
+    msn: 4150,
+    regn: "VT-MX1",
+    entry: day1,
+    exit: utcDate(2026, 4, 30),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: day1,
+    msnEsn: "4150",
+    pn: "PN-MX",
+    snBn: "SN-MX",
+    tsn: 100,
+    csn: 50,
+    dsn: 10,
+    tsoTsr: 20,
+    csoCsr: 20,
+    dsoDsr: 20,
+    tsRplmt: 20,
+    csRplmt: 20,
+    dsRplmt: 20,
+    timeMetric: "BH",
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "4150",
+    calPn: "PN-MX",
+    snBn: "SN-MX",
+    schEvent: "Performance restoration",
+    eTsn: 105,
+    downDays: 1,
+  });
+  await seedAssignment({
+    date: day2,
+    flightNumber: "MX2",
+    msn: 4150,
+    registration: "VT-MX1",
+    bh: 10,
+  });
+  await Flight.updateOne(
+    { userId: USER_ID, date: day2, flight: "MX2" },
+    { $set: { aircraft: { msn: 4150, registration: "VT-MX1" } } }
+  );
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const assignment = await Assignment.findOne({
+    userId: USER_ID,
+    date: day2,
+    flightNumber: "MX2",
+  }).lean();
+  const flight = await Flight.findOne({ userId: USER_ID, date: day2, flight: "MX2" }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.assignmentImpact.deletedCount, 1);
+  assert.equal(assignment, null);
+  assert.ok(!flight?.aircraft?.registration);
+});
+
 test("maintenance calendar restoration intervals reset and repeat", async () => {
   const days = [1, 2, 3, 4, 5].map(day => utcDate(2026, 4, day));
 

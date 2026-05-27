@@ -141,6 +141,31 @@ const normalizeAssignmentRow = (row) => {
   };
 };
 
+const buildDateFlightKey = (dateKey, flight) => (
+  `${dateKey}_${String(flight || "").trim().toUpperCase()}`
+);
+
+const buildEmptyDiagnostics = (duplicateComboCount = 0) => ({
+  totalRows: 0,
+  uniqueRows: 0,
+  duplicateComboCount,
+  successfullyAssigned: 0,
+  appliedCount: 0,
+  discardedCount: 0,
+  revalidatedCount: 0,
+  rejections: {
+    missingFromFleetDB: 0,
+    preEntryDates: 0,
+    postExitDates: 0,
+    variantMismatches: 0,
+    groundConflicts: 0,
+    acftOverlaps: 0,
+    flightNotFound: 0,
+  },
+  rejectedRows: [],
+  discardedRows: [],
+});
+
 const buildValidationContext = async ({ userId, rows }) => {
   const normalizedRows = [];
   const seenRowKeys = new Set();
@@ -149,17 +174,20 @@ const buildValidationContext = async ({ userId, rows }) => {
   const acftSet = new Set();
   let duplicateComboCount = 0;
 
+  let sequence = 0;
   for (const row of rows || []) {
     const normalized = normalizeAssignmentRow(row);
     if (!normalized) continue;
 
-    const rowKey = `${normalized.dateKey}_${normalized.flight}`;
+    const rowKey = buildDateFlightKey(normalized.dateKey, normalized.flight);
     if (seenRowKeys.has(rowKey)) {
       duplicateComboCount++;
       continue;
     }
 
     seenRowKeys.add(rowKey);
+    normalized.sequence = sequence;
+    sequence += 1;
     normalizedRows.push(normalized);
     flightSet.add(normalized.flight);
     dateSet.add(normalized.assignDate.getTime());
@@ -213,7 +241,7 @@ const buildValidationContext = async ({ userId, rows }) => {
   };
 };
 
-const buildAssignmentSyncPlan = async ({ userId, rows }) => {
+const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
   const { normalizedRows, duplicateComboCount, flights, fleetData, groundDays } = await buildValidationContext({
     userId,
     rows,
@@ -223,28 +251,14 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
     return {
       assignmentBulkOps: [],
       flightBulkOps: [],
-      diagnostics: {
-        totalRows: 0,
-        uniqueRows: 0,
-        duplicateComboCount,
-        successfullyAssigned: 0,
-        rejections: {
-          missingFromFleetDB: 0,
-          preEntryDates: 0,
-          postExitDates: 0,
-          variantMismatches: 0,
-          groundConflicts: 0,
-          acftOverlaps: 0,
-          flightNotFound: 0,
-        },
-      },
+      diagnostics: buildEmptyDiagnostics(duplicateComboCount),
     };
   }
 
   const flightMap = new Map();
   for (const flight of flights) {
     if (!flight.flight) continue;
-    const key = `${moment.utc(flight.date).format("YYYY-MM-DD")}_${String(flight.flight).trim().toUpperCase()}`;
+    const key = buildDateFlightKey(moment.utc(flight.date).format("YYYY-MM-DD"), flight.flight);
     flightMap.set(key, flight);
   }
 
@@ -278,8 +292,18 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
   let overlapConflictCount = 0;
   let successfulAcftLinks = 0;
 
-  for (const row of normalizedRows) {
-    const flightKey = `${row.dateKey}_${row.flight}`;
+  const priorityKeySet = new Set(
+    (priorityKeys || []).map((key) => String(key || "").trim().toUpperCase()).filter(Boolean)
+  );
+  const rowsForValidation = [...normalizedRows].sort((a, b) => {
+    const aPriority = priorityKeySet.has(buildDateFlightKey(a.dateKey, a.flight)) ? 1 : 0;
+    const bPriority = priorityKeySet.has(buildDateFlightKey(b.dateKey, b.flight)) ? 1 : 0;
+    if (aPriority !== bPriority) return bPriority - aPriority;
+    return (a.sequence || 0) - (b.sequence || 0);
+  });
+
+  for (const row of rowsForValidation) {
+    const flightKey = buildDateFlightKey(row.dateKey, row.flight);
     const flightRecord = flightMap.get(flightKey);
     const fleetRecordsForRegn = row.acft ? (fleetMap.get(row.acft) || []) : [];
     const fleetRecord = pickFleetRecordForDate(fleetRecordsForRegn, row.assignDate);
@@ -363,7 +387,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
       }
     }
 
-    if (assignedAcft) successfulAcftLinks++;
+    if (isValid && assignedAcft) successfulAcftLinks++;
     if (errors.length > 0 && rejectedRows.length < 10) {
       rejectedRows.push(buildRejectionSummary(row, errors));
     }
@@ -409,37 +433,52 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
       removedReason,
     } = item;
 
-    assignmentBulkOps.push({
-      updateOne: {
-        filter: { userId, date: row.assignDate, flightNumber: row.flight },
-        update: {
-          $set: {
-            userId,
-            date: row.assignDate,
-            flightNumber: row.flight,
-            "aircraft.registration": assignedAcft,
-            "aircraft.msn": msnVal,
-            rotationNumber: rotationNum,
-            legNumber,
-            isValid,
-            validationErrors: errors,
-            removedReason,
+    if (isValid && assignedAcft) {
+      assignmentBulkOps.push({
+        updateOne: {
+          filter: { userId, date: row.assignDate, flightNumber: row.flight },
+          update: {
+            $set: {
+              userId,
+              date: row.assignDate,
+              flightNumber: row.flight,
+              "aircraft.registration": assignedAcft,
+              "aircraft.msn": msnVal,
+              rotationNumber: rotationNum,
+              legNumber,
+              isValid: true,
+              validationErrors: [],
+              removedReason: null,
+            },
           },
+          upsert: true,
         },
-        upsert: true,
-      },
-    });
+      });
+    } else {
+      assignmentBulkOps.push({
+        deleteOne: {
+          filter: { userId, date: row.assignDate, flightNumber: row.flight },
+        },
+      });
+    }
 
     if (flightRecord && flightRecord._id) {
       flightBulkOps.push({
         updateOne: {
           filter: { _id: flightRecord._id, userId },
-          update: {
-            $set: {
-              "aircraft.registration": assignedAcft,
-              "aircraft.msn": msnVal,
+          update: isValid && assignedAcft
+            ? {
+              $set: {
+                "aircraft.registration": assignedAcft,
+                "aircraft.msn": msnVal,
+              },
+            }
+            : {
+              $unset: {
+                "aircraft.registration": "",
+                "aircraft.msn": "",
+              },
             },
-          },
         },
       });
     }
@@ -453,6 +492,9 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
       uniqueRows: processedRowsByFlightKey.size,
       duplicateComboCount,
       successfullyAssigned: successfulAcftLinks,
+      appliedCount: successfulAcftLinks,
+      discardedCount: processedRowsByFlightKey.size - successfulAcftLinks,
+      revalidatedCount: 0,
       rejections: {
         missingFromFleetDB: missingFleetDBCount,
         preEntryDates: preEntryCount,
@@ -463,15 +505,38 @@ const buildAssignmentSyncPlan = async ({ userId, rows }) => {
         flightNotFound: notFoundCount,
       },
       rejectedRows,
+      discardedRows: rejectedRows,
     },
   };
 };
 
-const revalidateAssignmentsForUser = async ({ userId }) => {
+const applyAssignmentSyncPlan = async (result = {}) => {
+  const writes = [];
+  if (result.assignmentBulkOps?.length > 0) {
+    writes.push(Assignment.bulkWrite(result.assignmentBulkOps, { ordered: false }));
+  }
+  if (result.flightBulkOps?.length > 0) {
+    writes.push(Flight.bulkWrite(result.flightBulkOps, { ordered: false }));
+  }
+
+  if (writes.length === 0) {
+    return { assignmentWriteResult: null, flightWriteResult: null };
+  }
+
+  const [assignmentWriteResult = null, flightWriteResult = null] = await Promise.all(writes);
+  return { assignmentWriteResult, flightWriteResult };
+};
+
+const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [] }) => {
+  if (Assignment.db?.readyState !== 1) {
+    return buildEmptyDiagnostics();
+  }
+
   const assignments = await Assignment.find({
     userId,
   })
     .select("date flightNumber aircraft.registration")
+    .sort({ date: 1, flightNumber: 1, _id: 1 })
     .lean();
 
   const rows = assignments.map((assignment) => ({
@@ -481,15 +546,13 @@ const revalidateAssignmentsForUser = async ({ userId }) => {
     acft: assignment.aircraft?.registration || null,
   }));
 
-  const result = await buildAssignmentSyncPlan({ userId, rows });
-  if (result.assignmentBulkOps.length > 0) {
-    await Assignment.bulkWrite(result.assignmentBulkOps, { ordered: false });
-  }
-  if (result.flightBulkOps.length > 0) {
-    await Flight.bulkWrite(result.flightBulkOps, { ordered: false });
-  }
+  const result = await buildAssignmentSyncPlan({ userId, rows, priorityKeys });
+  await applyAssignmentSyncPlan(result);
 
-  return result.diagnostics;
+  return {
+    ...result.diagnostics,
+    revalidatedCount: assignments.length,
+  };
 };
 
 const purgeStaleAssignmentsForUser = async ({ userId }) => {
@@ -532,12 +595,12 @@ const purgeStaleAssignmentsForUser = async ({ userId }) => {
     : [];
 
   const activeFlightKeys = new Set(flights.map((flight) => (
-    `${moment.utc(flight.date).format("YYYY-MM-DD")}_${String(flight.flight || "").trim().toUpperCase()}`
+    buildDateFlightKey(moment.utc(flight.date).format("YYYY-MM-DD"), flight.flight)
   )));
 
   const staleAssignmentIds = assignments
     .filter((assignment) => {
-      const key = `${moment.utc(assignment.date).format("YYYY-MM-DD")}_${String(assignment.flightNumber || "").trim().toUpperCase()}`;
+      const key = buildDateFlightKey(moment.utc(assignment.date).format("YYYY-MM-DD"), assignment.flightNumber);
       return !activeFlightKeys.has(key);
     })
     .map((assignment) => assignment._id);
@@ -554,8 +617,67 @@ const purgeStaleAssignmentsForUser = async ({ userId }) => {
   return { deletedCount: result.deletedCount || 0 };
 };
 
+const deleteAssignmentsForAircraftDate = async ({ userId, msn, date, reason = "GROUND_DAY_CONFLICT" }) => {
+  const msnNumber = Number(msn);
+  if (!userId || !date || !Number.isFinite(msnNumber)) {
+    return { deletedCount: 0, clearedFlightCount: 0, reason };
+  }
+
+  const start = moment.utc(date).startOf("day");
+  const end = start.clone().add(1, "day");
+  const assignments = await Assignment.find({
+    userId: String(userId),
+    date: { $gte: start.toDate(), $lt: end.toDate() },
+    "aircraft.msn": msnNumber,
+  })
+    .select("_id date flightNumber")
+    .lean();
+
+  if (assignments.length === 0) {
+    return { deletedCount: 0, clearedFlightCount: 0, reason };
+  }
+
+  const flightBulkOps = assignments
+    .filter((assignment) => assignment.date && assignment.flightNumber)
+    .map((assignment) => ({
+      updateOne: {
+        filter: {
+          userId: String(userId),
+          date: {
+            $gte: moment.utc(assignment.date).startOf("day").toDate(),
+            $lt: moment.utc(assignment.date).startOf("day").add(1, "day").toDate(),
+          },
+          flight: new RegExp(`^${escapeRegExp(assignment.flightNumber)}$`, "i"),
+        },
+        update: {
+          $unset: {
+            "aircraft.registration": "",
+            "aircraft.msn": "",
+          },
+        },
+      },
+    }));
+
+  const [deleteResult] = await Promise.all([
+    Assignment.deleteMany({
+      userId: String(userId),
+      _id: { $in: assignments.map((assignment) => assignment._id) },
+    }),
+    flightBulkOps.length > 0 ? Flight.bulkWrite(flightBulkOps, { ordered: false }) : Promise.resolve(null),
+  ]);
+
+  return {
+    deletedCount: deleteResult.deletedCount || 0,
+    clearedFlightCount: flightBulkOps.length,
+    reason,
+  };
+};
+
 module.exports = {
   buildAssignmentSyncPlan,
+  applyAssignmentSyncPlan,
   revalidateAssignmentsForUser,
   purgeStaleAssignmentsForUser,
+  deleteAssignmentsForAircraftDate,
+  buildDateFlightKey,
 };
