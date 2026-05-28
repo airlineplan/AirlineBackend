@@ -1719,6 +1719,42 @@ test("maintenance dashboard autopopulates titled value from fleet when status ro
   assert.equal(res.body.data.maintenanceData[0].titled, "VT-AAC");
 });
 
+test("maintenance dashboard hides reset rows for assets no longer in fleet master", async () => {
+  const selectedDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([selectedDate]);
+  await seedFleetAsset({
+    msn: 5150,
+    regn: "VT-ACT",
+    entry: utcDate(2026, 5, 1),
+    exit: utcDate(2026, 5, 30),
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: selectedDate,
+    msnEsn: "1001",
+    pn: "ATR72-600",
+    snBn: "1001",
+    tsn: 1000,
+    csn: 1000,
+    dsn: 994,
+    timeMetric: "BH",
+  });
+
+  const req = {
+    user: { id: USER_ID },
+    query: {
+      date: "2026-05-05",
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.getMaintenanceDashboard(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.maintenanceData.length, 0);
+});
+
 test("maintenance dashboard shows the exact reset-day metrics when viewing the reset date", async () => {
   const resetDate = utcDate(2026, 4, 20);
 

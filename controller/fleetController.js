@@ -4,10 +4,18 @@ const Assignment = require('../model/assignment'); // Adjust path if needed
 const GroundDay = require('../model/groundDay');
 const AircraftOnwing = require('../model/aircraftOnwing');
 const RotableMovement = require('../model/rotableMovementSchema');
+const Utilisation = require('../model/utilisation');
+const MaintenanceStatus = require('../model/maintenanceStatusSchema');
+const MaintenanceTarget = require('../model/maintenanceTargetSchema');
+const MaintenanceReset = require('../model/maintenanceReset');
+const MaintenanceCalendar = require('../model/maintenanceCalendarSchema');
+const UtilisationAssumption = require('../model/utilisationAssumptionSchema');
 const moment = require('moment');
 const { revalidateAssignmentsForUser } = require('../utils/assignmentSync');
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
+const escapeRegex = (value = "") =>
+    String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const normalizeNumericAssetKey = (value) => {
     if (value === null || value === undefined) return "";
     const raw = String(value).trim().toUpperCase();
@@ -51,6 +59,193 @@ const createMaintenanceMetricEntry = (event = "Maintenance") => ({
 const isSpareFleetAsset = (asset = {}) =>
     ["Engine", "APU"].includes(asset.category) &&
     String(asset.titled || "").toLowerCase().includes("spare");
+
+const buildAssetMatchClauses = (fields = [], assetSns = []) => fields.flatMap((field) =>
+    assetSns.map((sn) => ({
+        [field]: { $regex: `^${escapeRegex(sn)}$`, $options: "i" }
+    }))
+);
+
+const pickDeletedAssetSns = (assets = []) => [...new Set(
+    assets
+        .map((asset) => String(asset?.sn || "").trim())
+        .filter(Boolean)
+)];
+
+const expandAssetSnsForExactMatch = (assetSns = []) => [...new Set(
+    assetSns.flatMap((sn) => {
+        const trimmed = String(sn || "").trim();
+        return [trimmed, trimmed.toUpperCase(), trimmed.toLowerCase()].filter(Boolean);
+    })
+)];
+
+const buildInactiveFleetIdentityFilter = ({ userId, fields = [], activeAssetSns = [] } = {}) => {
+    const filter = { userId: String(userId) };
+    const activeValues = expandAssetSnsForExactMatch(activeAssetSns);
+
+    if (activeValues.length === 0) {
+        return filter;
+    }
+
+    filter.$and = fields.map((field) => ({
+        [field]: { $nin: activeValues }
+    }));
+    return filter;
+};
+
+const purgeMaintenanceDataForFleetAssets = async ({ userId, assets = [] } = {}) => {
+    const assetSns = pickDeletedAssetSns(assets);
+    if (!userId || assetSns.length === 0) {
+        return { assetSns, deletedCounts: {}, updatedCounts: {} };
+    }
+
+    const userKey = String(userId);
+    const resetUtilClauses = buildAssetMatchClauses(["msnEsn", "snBn"], assetSns);
+    const calendarClauses = buildAssetMatchClauses(["calMsn", "snBn"], assetSns);
+    const statusClauses = buildAssetMatchClauses(["targetId"], assetSns);
+    const assumptionClauses = buildAssetMatchClauses(["msn"], assetSns);
+    const rotableClauses = buildAssetMatchClauses(["msn", "removedSN", "installedSN"], assetSns);
+    const onwingAircraftClauses = buildAssetMatchClauses(["msn"], assetSns);
+
+    const [
+        resetResult,
+        utilisationResult,
+        targetResult,
+        calendarResult,
+        statusResult,
+        assumptionResult,
+        rotableResult,
+        onwingDeleteResult,
+        ...onwingUpdateResults
+    ] = await Promise.all([
+        MaintenanceReset.deleteMany({ userId: userKey, $or: resetUtilClauses }),
+        Utilisation.deleteMany({ userId: userKey, $or: resetUtilClauses }),
+        MaintenanceTarget.deleteMany({ userId: userKey, $or: resetUtilClauses }),
+        MaintenanceCalendar.deleteMany({ userId: userKey, $or: calendarClauses }),
+        MaintenanceStatus.deleteMany({ userId: userKey, $or: statusClauses }),
+        UtilisationAssumption.deleteMany({ userId: userKey, $or: assumptionClauses }),
+        RotableMovement.deleteMany({ userId: userKey, $or: rotableClauses }),
+        AircraftOnwing.deleteMany({ userId: userKey, $or: onwingAircraftClauses }),
+        ...["pos1Esn", "pos2Esn", "apun"].map((field) =>
+            AircraftOnwing.updateMany(
+                { userId: userKey, $or: buildAssetMatchClauses([field], assetSns) },
+                { $set: { [field]: null } }
+            )
+        )
+    ]);
+
+    return {
+        assetSns,
+        deletedCounts: {
+            maintenanceReset: resetResult.deletedCount || 0,
+            utilisation: utilisationResult.deletedCount || 0,
+            maintenanceTarget: targetResult.deletedCount || 0,
+            maintenanceCalendar: calendarResult.deletedCount || 0,
+            maintenanceStatus: statusResult.deletedCount || 0,
+            utilisationAssumption: assumptionResult.deletedCount || 0,
+            rotableMovement: rotableResult.deletedCount || 0,
+            aircraftOnwing: onwingDeleteResult.deletedCount || 0,
+        },
+        updatedCounts: {
+            aircraftOnwingComponents: onwingUpdateResults.reduce(
+                (total, result) => total + (result.modifiedCount || result.matchedCount || 0),
+                0
+            )
+        }
+    };
+};
+
+const purgeOrphanMaintenanceDataForActiveFleet = async ({ userId, activeAssetSns = [] } = {}) => {
+    if (!userId) {
+        return { activeAssetCount: 0, deletedCounts: {}, updatedCounts: {} };
+    }
+
+    const activeValues = expandAssetSnsForExactMatch(activeAssetSns);
+    const userKey = String(userId);
+    const [
+        resetResult,
+        utilisationResult,
+        targetResult,
+        calendarResult,
+        statusResult,
+        assumptionResult,
+        rotableResult,
+        onwingDeleteResult,
+        ...onwingUpdateResults
+    ] = await Promise.all([
+        MaintenanceReset.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msnEsn", "snBn"],
+            activeAssetSns
+        })),
+        Utilisation.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msnEsn", "snBn"],
+            activeAssetSns
+        })),
+        MaintenanceTarget.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msnEsn", "snBn"],
+            activeAssetSns
+        })),
+        MaintenanceCalendar.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["calMsn", "snBn"],
+            activeAssetSns
+        })),
+        MaintenanceStatus.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["targetId"],
+            activeAssetSns
+        })),
+        UtilisationAssumption.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msn"],
+            activeAssetSns
+        })),
+        RotableMovement.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msn", "removedSN", "installedSN"],
+            activeAssetSns
+        })),
+        AircraftOnwing.deleteMany(buildInactiveFleetIdentityFilter({
+            userId: userKey,
+            fields: ["msn"],
+            activeAssetSns
+        })),
+        ...["pos1Esn", "pos2Esn", "apun"].map((field) =>
+            AircraftOnwing.updateMany(
+                {
+                    userId: userKey,
+                    [field]: activeValues.length > 0
+                        ? { $nin: [...activeValues, null, ""] }
+                        : { $exists: true }
+                },
+                { $set: { [field]: null } }
+            )
+        )
+    ]);
+
+    return {
+        activeAssetCount: activeAssetSns.length,
+        deletedCounts: {
+            maintenanceReset: resetResult.deletedCount || 0,
+            utilisation: utilisationResult.deletedCount || 0,
+            maintenanceTarget: targetResult.deletedCount || 0,
+            maintenanceCalendar: calendarResult.deletedCount || 0,
+            maintenanceStatus: statusResult.deletedCount || 0,
+            utilisationAssumption: assumptionResult.deletedCount || 0,
+            rotableMovement: rotableResult.deletedCount || 0,
+            aircraftOnwing: onwingDeleteResult.deletedCount || 0,
+        },
+        updatedCounts: {
+            aircraftOnwingComponents: onwingUpdateResults.reduce(
+                (total, result) => total + (result.modifiedCount || result.matchedCount || 0),
+                0
+            )
+        }
+    };
+};
 
 exports.getFleetScheduleMetrics = async (req, res) => {
     try {
@@ -413,9 +608,25 @@ exports.bulkUpsertFleet = async (req, res) => {
             await Fleet.bulkWrite(fleetBulkOps, { ordered: false });
         }
 
+        const deletedFleetAssets = await Fleet.find({
+            userId,
+            sn: { $nin: Array.from(savedSnSet) }
+        })
+            .select("sn")
+            .lean();
+
         await Fleet.deleteMany({
             userId,
             sn: { $nin: Array.from(savedSnSet) }
+        });
+
+        const maintenanceCleanup = await purgeMaintenanceDataForFleetAssets({
+            userId,
+            assets: deletedFleetAssets
+        });
+        const orphanMaintenanceCleanup = await purgeOrphanMaintenanceDataForActiveFleet({
+            userId,
+            activeAssetSns: Array.from(savedSnSet)
         });
 
         // --------------------------------------------------------
@@ -496,6 +707,8 @@ exports.bulkUpsertFleet = async (req, res) => {
 
         res.status(200).json({
             message: "Fleet data and Onwing configurations saved successfully!",
+            maintenanceCleanup,
+            orphanMaintenanceCleanup,
             assignmentDiagnostics
         });
     } catch (error) {
@@ -518,10 +731,16 @@ exports.deleteFleetAsset = async (req, res) => {
             return res.status(404).json({ message: "Asset not found" });
         }
 
+        const maintenanceCleanup = await purgeMaintenanceDataForFleetAssets({
+            userId,
+            assets: [deletedAsset]
+        });
+
         const assignmentDiagnostics = await revalidateAssignmentsForUser({ userId });
 
         res.status(200).json({
             message: "Asset deleted successfully",
+            maintenanceCleanup,
             assignmentDiagnostics
         });
     } catch (error) {

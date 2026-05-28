@@ -977,6 +977,11 @@ exports.getMaintenanceDashboard = async (req, res) => {
             const titledBySn = new Map();
             fleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
             allFleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
+            const activeFleetSnSet = new Set(
+                allFleetAssets
+                    .map(asset => String(asset.sn || "").trim().toUpperCase())
+                    .filter(Boolean)
+            );
 
             const utilByKey = new Map();
             utils.forEach(record => {
@@ -1016,7 +1021,13 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 }
             });
 
-            const rows = await Promise.all(Array.from(rowSourcesByKey.entries()).map(async ([utilKey, util]) => {
+            const rowSourceEntries = Array.from(rowSourcesByKey.entries()).filter(([utilKey]) => {
+                if (activeFleetSnSet.size === 0) return true;
+                const [msnEsn, , snBn] = utilKey.split("|");
+                return activeFleetSnSet.has(msnEsn) || activeFleetSnSet.has(snBn);
+            });
+
+            const rows = await Promise.all(rowSourceEntries.map(async ([utilKey, util]) => {
                 const resetRecordsForKey = resetRecordsByKey.get(utilKey) || [];
                 const record = resetRecordsForKey.find(reset =>
                     moment.utc(reset.date).isSameOrBefore(selectedDateMoment)
