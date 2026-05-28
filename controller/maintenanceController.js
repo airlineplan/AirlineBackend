@@ -246,10 +246,45 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
     if (assignments.length > 0) {
         const primaryTimeKey = metric === "FH" ? "flightHours" : "blockHours";
         const fallbackTimeKey = metric === "FH" ? "blockHours" : "flightHours";
-        const primaryTimeUsage = assignments.reduce((sum, a) =>
-            sum + (a.metrics?.[primaryTimeKey] || 0), 0);
-        const fallbackTimeUsage = assignments.reduce((sum, a) =>
-            sum + (a.metrics?.[fallbackTimeKey] || 0), 0);
+        const flightNumbers = [...new Set(assignments
+            .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
+            .filter(Boolean))];
+        const flightRegexArray = flightNumbers.map((flightNumber) => new RegExp(`^${escapeRegex(flightNumber)}$`, "i"));
+        const flightRecords = flightRegexArray.length > 0
+            ? await Flight.find({
+                ...(userId ? { userId: String(userId) } : {}),
+                date: {
+                    $gte: date.toDate(),
+                    $lt: moment.utc(date).endOf("day").toDate()
+                },
+                flight: { $in: flightRegexArray }
+            }).select("flight bh fh").lean()
+            : [];
+        const flightsByNumber = new Map();
+        flightRecords.forEach((flight) => {
+            const flightNumber = String(flight.flight || "").trim().toUpperCase();
+            if (!flightNumber) return;
+            if (!flightsByNumber.has(flightNumber)) flightsByNumber.set(flightNumber, []);
+            flightsByNumber.get(flightNumber).push(flight);
+        });
+
+        const sumAssignmentTime = (key) => assignments.reduce((sum, assignment) => {
+            const metricValue = Number(assignment.metrics?.[key]);
+            if (Number.isFinite(metricValue) && metricValue > 0) {
+                return sum + metricValue;
+            }
+
+            const flightNumber = String(assignment.flightNumber || "").trim().toUpperCase();
+            const matchedFlights = flightsByNumber.get(flightNumber) || [];
+            const flightKey = key === "flightHours" ? "fh" : "bh";
+            return sum + matchedFlights.reduce((flightSum, flight) => {
+                const flightValue = Number(flight?.[flightKey]);
+                return flightSum + (Number.isFinite(flightValue) ? flightValue : 0);
+            }, 0);
+        }, 0);
+
+        const primaryTimeUsage = sumAssignmentTime(primaryTimeKey);
+        const fallbackTimeUsage = sumAssignmentTime(fallbackTimeKey);
         const timeUsage = primaryTimeUsage || fallbackTimeUsage;
         const cycleUsage = assignments.reduce((sum, a) => {
             const cycles = Number(a.metrics?.cycles);

@@ -141,8 +141,8 @@ async function seedFleetAsset({ msn, regn, entry, exit, titled = "" }) {
   });
 }
 
-async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, fh = 0 }) {
-  await Assignment.create({
+async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, fh = 0, includeMetrics = true }) {
+  const assignment = {
     userId: USER_ID,
     date,
     flightNumber,
@@ -157,7 +157,13 @@ async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, f
     },
     isValid: true,
     validationErrors: [],
-  });
+  };
+
+  if (!includeMetrics) {
+    delete assignment.metrics;
+  }
+
+  await Assignment.create(assignment);
 }
 
 before(async () => {
@@ -567,6 +573,82 @@ test("maintenance dashboard shows computed status before and after reset date", 
   assert.equal(next.tsr, 102.5);
   assert.equal(next.csr, 101);
   assert.equal(next.dsr, 101);
+});
+
+test("maintenance dashboard uses flight utilisation when assignments do not embed metrics", async () => {
+  const day1 = utcDate(2026, 5, 1);
+  const day2 = utcDate(2026, 5, 2);
+  const resetDate = utcDate(2026, 5, 3);
+  const day4 = utcDate(2026, 5, 4);
+
+  await seedFlightDays([day1, day2, resetDate, day4]);
+  await Flight.updateMany(
+    { userId: USER_ID, date: { $in: [day1, day2, resetDate, day4] } },
+    { $set: { bh: 2.5, fh: 1.5 } }
+  );
+  await seedFleetAsset({
+    msn: 5961,
+    regn: "VT-MAY",
+    entry: day1,
+    exit: utcDate(2026, 5, 31),
+  });
+
+  for (const date of [day1, day2, resetDate, day4]) {
+    await seedAssignment({
+      date,
+      flightNumber: `FL${date.getUTCDate()}`,
+      msn: 5961,
+      registration: "VT-MAY",
+      includeMetrics: false,
+    });
+  }
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "5961",
+    pn: "U92",
+    snBn: "805",
+    tsn: 300,
+    csn: 300,
+    dsn: 300,
+    tsoTsr: 200,
+    csoCsr: 200,
+    dsoDsr: 200,
+    tsRplmt: 100,
+    csRplmt: 100,
+    dsRplmt: 100,
+    timeMetric: "BH",
+  });
+
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+
+  const previousRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-05-02", msnEsn: "5961" },
+  }, previousRes);
+
+  const nextRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-05-04", msnEsn: "5961" },
+  }, nextRes);
+
+  const previous = previousRes.body.data.maintenanceData[0];
+  const next = nextRes.body.data.maintenanceData[0];
+
+  assert.equal(previous.tsn, 297.5);
+  assert.equal(previous.csn, 299);
+  assert.equal(previous.dsn, 299);
+  assert.equal(previous.tso, 197.5);
+  assert.equal(previous.tsr, 97.5);
+
+  assert.equal(next.tsn, 302.5);
+  assert.equal(next.csn, 301);
+  assert.equal(next.dsn, 301);
+  assert.equal(next.tso, 202.5);
+  assert.equal(next.tsr, 102.5);
 });
 
 test("saving reset status on a new date replaces the prior anchor and recomputes the full range", async () => {
