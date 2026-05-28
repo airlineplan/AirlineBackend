@@ -74,7 +74,8 @@ function normalizeCurrencyCode(value) {
 }
 
 function parseNumber(value, fallback = 0) {
-    const parsed = Number(value);
+    if (value === null || value === undefined || value === "") return fallback;
+    const parsed = Number(String(value).replace(/,/g, ""));
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
