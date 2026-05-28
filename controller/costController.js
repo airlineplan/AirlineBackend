@@ -19,6 +19,7 @@ const {
   normalizeAircraftOnwing,
   normalizeMaintenanceReserveSchedule,
   generateMaintenanceReserveSchedule,
+  generateMaintenanceReserveScheduleWithContributions,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
   hydrateSchMxEvents,
@@ -139,9 +140,19 @@ exports.saveCostConfig = async (req, res) => {
 
     const normalizedLeasedReserve = normalizeCostConfig({ leasedReserve: configData.leasedReserve || [] }).leasedReserve;
     const normalizedAircraftOnwing = normalizeAircraftOnwing(configData.aircraftOnwing || []);
-    const normalizedMaintenanceReserveSchedule = generateMaintenanceReserveSchedule(
+    const flightsForSchedule = await Flights.find({ userId }).lean();
+    const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
+    const normalizedMaintenanceReserveSchedule = generateMaintenanceReserveScheduleWithContributions(
       normalizedLeasedReserve,
-      normalizeMaintenanceReserveSchedule(configData.maintenanceReserveSchedule || [])
+      normalizeMaintenanceReserveSchedule(configData.maintenanceReserveSchedule || []),
+      flightsForSchedule,
+      {
+        aircraftOnwing: mergeByIdentity(
+          normalizedAircraftOnwing,
+          mrScheduleContext.aircraftOnwing || [],
+          (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+        ),
+      }
     );
     const hydratedSchMxEvents = await hydrateSchMxEventsForUser(
       userId,
@@ -207,9 +218,19 @@ exports.getCostConfig = async (req, res) => {
       config.transitMx = normalizeTransitMx(config.transitMx || []);
       config.leasedReserve = normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve;
       config.aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
-      config.maintenanceReserveSchedule = generateMaintenanceReserveSchedule(
+      const flightsForSchedule = await Flights.find({ userId }).lean();
+      const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
+      config.maintenanceReserveSchedule = generateMaintenanceReserveScheduleWithContributions(
         config.leasedReserve || [],
-        config.maintenanceReserveSchedule || []
+        config.maintenanceReserveSchedule || [],
+        flightsForSchedule,
+        {
+          aircraftOnwing: mergeByIdentity(
+            config.aircraftOnwing || [],
+            mrScheduleContext.aircraftOnwing || [],
+            (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+          ),
+        }
       );
       config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || [], config.maintenanceReserveSchedule || []);
       config.navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
@@ -220,6 +241,34 @@ exports.getCostConfig = async (req, res) => {
   } catch (error) {
     console.error("Error getting cost config:", error);
     res.status(500).json({ success: false, message: "Failed to load cost settings." });
+  }
+};
+
+exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const body = req.body || {};
+    const normalizedLeasedReserve = normalizeCostConfig({ leasedReserve: body.leasedReserve || [] }).leasedReserve;
+    const normalizedAircraftOnwing = normalizeAircraftOnwing(body.aircraftOnwing || []);
+    const flightsForSchedule = await Flights.find({ userId }).lean();
+    const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
+    const schedule = generateMaintenanceReserveScheduleWithContributions(
+      normalizedLeasedReserve,
+      normalizeMaintenanceReserveSchedule(body.maintenanceReserveSchedule || []),
+      flightsForSchedule,
+      {
+        aircraftOnwing: mergeByIdentity(
+          normalizedAircraftOnwing,
+          mrScheduleContext.aircraftOnwing || [],
+          (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+        ),
+      }
+    );
+
+    res.status(200).json({ success: true, data: schedule });
+  } catch (error) {
+    console.error("Error generating maintenance reserve schedule:", error);
+    res.status(500).json({ success: false, message: "Failed to generate maintenance reserve schedule." });
   }
 };
 

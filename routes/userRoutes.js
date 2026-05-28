@@ -103,6 +103,7 @@ user.get("/master-weeks", verifyToken, masterController.getMasterWeeks);
 // --- COST ENDPOINTS ---
 user.get("/cost-config", verifyToken, costController.getCostConfig);
 user.post("/cost-config", verifyToken, jsonParser, costController.saveCostConfig);
+user.post("/cost-config/maintenance-reserve-schedule/generate", verifyToken, jsonParser, costController.generateMaintenanceReserveSchedulePreview);
 user.post("/cost-page-data", verifyToken, jsonParser, costController.getCostPageData);
 user.post("/cost-page-data/recalculate-and-save", verifyToken, jsonParser, costController.recalculateAndSaveCostPageData);
 

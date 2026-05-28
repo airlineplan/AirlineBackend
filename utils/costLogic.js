@@ -1864,6 +1864,15 @@ const reserveSettingMatchesFlight = (row, flight, snList = []) => {
   return Boolean(row?.acftRegn || row?.pn || row?.mrAccId);
 };
 
+const getMaintenanceReserveDriverValue = (driverValue, flight) => {
+  const driver = normalizeMetric(driverValue);
+  if (driver === "BH") return toNumber(flight?.bh);
+  if (driver === "FH") return toNumber(flight?.fh);
+  if (driver === "DEPARTURES") return 1;
+  if (driver === "APUHR") return toNumber(flight?.apuHours || flight?.apuHr || flight?.apuHrs);
+  return getFlightEffectiveFt(flight);
+};
+
 const findScheduleRowForSetting = (setting = {}, scheduleRows = [], rateDate, flightSnList = []) => {
   if (!rateDate) return null;
   const rateTime = rateDate.getTime();
@@ -1897,6 +1906,94 @@ const findScheduleRowForSetting = (setting = {}, scheduleRows = [], rateDate, fl
   );
 };
 
+const scheduleRowMatchesReserveSetting = (row = {}, setting = {}) => {
+  const settingMrAccId = normalize(setting.mrAccId);
+  const rowMrAccId = normalize(row.mrAccId);
+  if (settingMrAccId && rowMrAccId && settingMrAccId !== rowMrAccId) return false;
+
+  const settingSn = normalize(setting.sn);
+  const rowSn = normalize(row.sn || row.msn);
+  if (settingSn || rowSn) return settingSn === rowSn;
+
+  if (setting.acftRegn && row.acftRegn && normalize(setting.acftRegn) !== normalize(row.acftRegn)) return false;
+  return Boolean(settingMrAccId || setting.acftRegn || settingSn);
+};
+
+const getFlightsForReserveScheduleRow = (flights = [], setting = {}, row = {}, aircraftOnwing = []) => {
+  const rowDate = parseDate(row.date);
+  if (!rowDate) return [];
+  const rowTime = rowDate.getTime();
+
+  return (Array.isArray(flights) ? flights : []).filter((flight) => {
+    const lookupDate = getFirstDayOfNextMonth(getFlightDate(flight));
+    if (!lookupDate || lookupDate.getTime() !== rowTime) return false;
+    const snContext = getFlightSnContext(flight, aircraftOnwing);
+    return reserveSettingMatchesFlight(setting, flight, snContext.snList || []);
+  });
+};
+
+const generateMaintenanceReserveScheduleWithContributions = (
+  leasedReserveRows = [],
+  existingScheduleRows = [],
+  flights = [],
+  config = {}
+) => {
+  const settings = normalizeLeasedReserve(leasedReserveRows);
+  const schedule = generateMaintenanceReserveSchedule(settings, existingScheduleRows);
+  const aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
+
+  settings.forEach((setting) => {
+    let previousClosing = toNumber(setting.setBalance);
+    const settingRows = schedule
+      .filter((row) => scheduleRowMatchesReserveSetting(row, setting))
+      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+    settingRows.forEach((row) => {
+      const source = normalize(row.source);
+      if (source && source !== "GENERATED") {
+        const contribution = toNumber(row.contribution);
+        const drawdown = toNumber(row.drawdown || row.mrDrawdown);
+        const openingBalance = toNumber(row.openingBalance || row.openingBal || previousClosing);
+        const closingBalance = toNumber(row.closingBalance || row.closingBal || row.balance || (openingBalance + contribution - drawdown));
+        previousClosing = closingBalance;
+        return;
+      }
+
+      const driver = normalizeMetric(row.driver || setting.driver);
+      const rate = toNumber(row.rate) || getEscalatedReserveRate(setting, row.date);
+      const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, aircraftOnwing);
+      const driverValue = driver === "MONTH"
+        ? toNumber(row.driverValue || row.monthNumber)
+        : round2(matchedFlights.reduce((sum, flight) => sum + getMaintenanceReserveDriverValue(driver, flight), 0));
+      const contribution = driver === "MONTH"
+        ? toNumber(row.contribution)
+        : round2(rate * driverValue);
+      const drawdown = toNumber(row.drawdown || row.mrDrawdown);
+      const openingBalance = previousClosing;
+      const closingBalance = round2(openingBalance + contribution - drawdown);
+
+      Object.assign(row, {
+        driver,
+        rate,
+        driverValue,
+        monthNumber: driverValue,
+        contribution,
+        openingBalance,
+        openingBal: openingBalance,
+        drawdown,
+        mrDrawdown: drawdown,
+        closingBalance,
+        closingBal: closingBalance,
+        balance: closingBalance,
+        source: row.source || "generated",
+      });
+      previousClosing = closingBalance;
+    });
+  });
+
+  return schedule;
+};
+
 const resolveMaintenanceReserveRate = (flight, config = {}) => {
   const flightDate = getFlightDate(flight);
   if (!flightDate) {
@@ -1928,15 +2025,7 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
     const scheduleRate = toNumber(schedule?.rate);
     const rate = scheduleRate > 0 ? scheduleRate : getEscalatedReserveRate(setting, rateDate || flightDate);
     const currency = schedule?.ccy || setting?.ccy || "";
-    const driverValue = driver === "BH"
-      ? toNumber(flight.bh)
-      : driver === "FH"
-        ? toNumber(flight.fh)
-        : driver === "DEPARTURES"
-          ? 1
-          : driver === "APUHR"
-            ? toNumber(flight.apuHours || flight.apuHr || flight.apuHrs)
-            : getFlightEffectiveFt(flight);
+    const driverValue = getMaintenanceReserveDriverValue(driver, flight);
     if (driver === "APUHR" && driverValue <= 0) {
       warnings.push(`No APU hours for MR account ${setting.mrAccId}`);
     }
@@ -2151,6 +2240,45 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
       : round2((amount * safeWeights[index]) / safeTotal);
     allocated = round2(allocated + share);
     addAllocation(flight, field, share, currency, reportingCurrency, explicitRccy, fxRates, date);
+  });
+};
+
+const allocateGeneratedReserveOpeningBalances = (flights = [], config = {}) => {
+  const scheduleRows = Array.isArray(config.maintenanceReserveSchedule) ? config.maintenanceReserveSchedule : [];
+  if (!scheduleRows.length) return;
+
+  const allocated = new Set();
+  (config.leasedReserve || []).forEach((setting) => {
+    const openingAmount = toNumber(setting.setBalance);
+    const driver = normalizeMetric(setting.driver);
+    if (openingAmount <= 0 || driver === "MONTH") return;
+
+    const settingRows = scheduleRows
+      .filter((row) => normalize(row.source) === "GENERATED" && scheduleRowMatchesReserveSetting(row, setting))
+      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+    for (const row of settingRows) {
+      const rowDate = parseDate(row.date);
+      if (!rowDate) continue;
+      const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, config.aircraftOnwing || []);
+      if (matchedFlights.length === 0) continue;
+
+      const key = [normalize(setting.mrAccId), normalize(setting.sn), toDayKey(rowDate)].join("|");
+      if (allocated.has(key)) break;
+      allocated.add(key);
+      distributePool(
+        matchedFlights,
+        "maintenanceReserveContribution",
+        openingAmount,
+        setting.ccy || row.ccy,
+        config.reportingCurrency,
+        driver,
+        setting.costRCCY,
+        config.fxRates || [],
+        rowDate
+      );
+      break;
+    }
   });
 };
 
@@ -2903,6 +3031,7 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
   flights.forEach((flight) => applySnContext(flight, config));
   enrichDirectCosts(flights, config);
   enrichAllocatedCosts(flights, config);
+  allocateGeneratedReserveOpeningBalances(flights, config);
   flights.forEach((flight) => {
     applyCompatibilityAliases(flight);
     applyTotals(flight, config.reportingCurrency);
@@ -2933,6 +3062,7 @@ module.exports = {
   normalizeAircraftOnwing,
   normalizeMaintenanceReserveSchedule,
   generateMaintenanceReserveSchedule,
+  generateMaintenanceReserveScheduleWithContributions,
   normalizeNavMtowTiers,
   serializeNavigationCostRows,
   serializeAirportMtowCostRows,

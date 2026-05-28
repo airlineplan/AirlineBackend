@@ -6,6 +6,7 @@ const {
   computeFlightCosts,
   computeFlightCostsBatch,
   generateMaintenanceReserveSchedule,
+  generateMaintenanceReserveScheduleWithContributions,
   serializeNavigationCostRows,
   getFlightSnContext,
 } = require("../utils/costLogic");
@@ -1580,4 +1581,42 @@ test("maintenance reserve supports BH, departure, and APUHR drivers", () => {
   });
 
   assert.equal(enriched.maintenanceReserveContribution, 65);
+});
+
+test("generated maintenance reserve schedule uses prior-month BH and opening balance expense once", () => {
+  const mayFlights = Array.from({ length: 31 }, (_, index) => ({
+    date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+    flight: `MR${index + 1}`,
+    acftRegn: "VT-AAB",
+    bh: 2.5,
+    fh: 2,
+    variant: "A320",
+  }));
+  const leasedReserve = [{
+    mrAccId: "2",
+    schMxEvent: "6YCI",
+    acftRegn: "VT-AAB",
+    setBalance: 50000,
+    setRate: 6000,
+    asOnDate: "2026-03-01",
+    ccy: "INR",
+    driver: "BH",
+    annualEscalation: 3,
+    anniversaryDate: "2026-06-30",
+    endDate: "2026-06-30",
+  }];
+  const schedule = generateMaintenanceReserveScheduleWithContributions(leasedReserve, [], mayFlights);
+  const juneRow = schedule.find((row) => row.date === "2026-06-01" && row.mrAccId === "2");
+
+  assert.equal(juneRow.driverValue, 77.5);
+  assert.equal(juneRow.contribution, 465000);
+  assert.equal(juneRow.openingBalance, 50000);
+  assert.equal(juneRow.closingBalance, 515000);
+
+  const enriched = computeFlightCostsBatch(mayFlights, {
+    reportingCurrency: "INR",
+    leasedReserve,
+    maintenanceReserveSchedule: schedule,
+  });
+  approx(enriched.reduce((sum, row) => sum + row.maintenanceReserveContribution, 0), 515000);
 });
