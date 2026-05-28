@@ -502,6 +502,7 @@ const getDashboardDataLegacy = async (req, res) => {
       try {
         // Initialize an array to store the result data
         const resultData = [];
+        const currencyExposureBuckets = {};
 
         for (const periodEndDate of periods) {
           let periodStartDate;
@@ -770,6 +771,13 @@ const getDashboardDataLegacy = async (req, res) => {
             const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
             return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
           });
+          revenueInPeriod.forEach((row) => {
+            const localCcy = normalizeCurrencyCode(row.pooCcy || revenueConfig.reportingCurrency || costConfig.reportingCurrency);
+            if (!localCcy) return;
+            const localRevenue = row.applySSPricing ? toNumericValue(row.legTotalRev) : toNumericValue(row.odTotalRev);
+            addCurrencyExposure(currencyExposureBuckets, localCcy, row.date, localRevenue, 0);
+          });
+          flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight));
           const fnlRccyPaxRev = revenueInPeriod.reduce((total, row) => total + (Number(row.fnlRccyPaxRev) || 0), 0);
           const fnlRccyCargoRev = revenueInPeriod.reduce((total, row) => total + (Number(row.fnlRccyCargoRev) || 0), 0);
           const fnlRccyTotalRev = fnlRccyPaxRev + fnlRccyCargoRev;
@@ -946,7 +954,7 @@ const getDashboardDataLegacy = async (req, res) => {
 
         const flightsForFxDates = await Flights.find({ userId: id }).select("date").lean();
         const riskExposureData = {
-          currencies: {},
+          currencies: serializeCurrencyExposure(currencyExposureBuckets),
           fuel: resultData.map((period) => ({
             dateKey: moment.utc(period.endDate).format("YYYY-MM-DD"),
             engineFuelKg: toNumericValue(period.engineFuelConsumptionKg),
@@ -954,17 +962,6 @@ const getDashboardDataLegacy = async (req, res) => {
             totalFuelKg: toNumericValue(period.engineFuelConsumptionKg) + toNumericValue(period.apuFuelConsumptionKg),
           })),
         };
-
-        revenueRows.forEach((row) => {
-          const ccy = String(row.pooCcy || revenueConfig.reportingCurrency || "").trim().toUpperCase();
-          if (!ccy || ccy === String(revenueConfig.reportingCurrency || "").trim().toUpperCase()) return;
-          if (!riskExposureData.currencies[ccy]) riskExposureData.currencies[ccy] = { periods: [] };
-          riskExposureData.currencies[ccy].periods.push({
-            dateKey: moment.utc(row.date).format("YYYY-MM-DD"),
-            revenue: toNumericValue(row.odTotalRev || row.legTotalRev),
-            cost: 0,
-          });
-        });
 
         res.status(200).json({
           data: resultData,
@@ -1097,7 +1094,7 @@ const addCurrencyExposure = (container, ccy, date, revenue = 0, cost = 0) => {
   container[code][dateKey].net = container[code][dateKey].revenue + container[code][dateKey].cost;
 };
 
-const addLocalCostExposures = (currencyBuckets, flight, reportingCurrency) => {
+const addLocalCostExposures = (currencyBuckets, flight) => {
   const fields = [
     "engineFuelCost",
     "apuFuelCost",
@@ -1117,7 +1114,7 @@ const addLocalCostExposures = (currencyBuckets, flight, reportingCurrency) => {
   ];
   fields.forEach((field) => {
     const ccy = normalizeCurrencyCode(flight?.[`${field}CCY`]);
-    if (!ccy || ccy === normalizeCurrencyCode(reportingCurrency)) return;
+    if (!ccy) return;
     addCurrencyExposure(currencyBuckets, ccy, flight.date, 0, flight[field]);
   });
 };
@@ -1221,7 +1218,7 @@ const getDashboardData = async (req, res) => {
 
     allRevenueRows.forEach((row) => {
       const localCcy = normalizeCurrencyCode(row.pooCcy || reportingCurrency);
-      if (localCcy && localCcy !== reportingCurrency) {
+      if (localCcy) {
         const localRevenue = row.applySSPricing ? toNumericValue(row.legTotalRev) : toNumericValue(row.odTotalRev);
         addCurrencyExposure(currencyExposureBuckets, localCcy, row.date, localRevenue, 0);
       }
@@ -1248,7 +1245,7 @@ const getDashboardData = async (req, res) => {
         return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
       });
 
-      flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight, reportingCurrency));
+      flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight));
 
       const departures = flightsInPeriod.length;
       const stationSet = new Set();

@@ -292,6 +292,8 @@ test("monthly dashboard combines operational, POO revenue, costs, filters, and r
   assert.equal(april.pax, 160);
   assert.equal(april.fnlRccyTotalRev, 83000);
   assert.ok(body.riskExposure.fuel[0].totalFuelKg > 0);
+  assert.equal(body.riskExposure.currencies.INR[0].revenue, 144010);
+  assert.ok(body.riskExposure.currencies.INR[0].cost < 0);
   assert.equal(body.riskExposure.currencies.USD[0].revenue, 1000);
   assert.ok(body.riskExposure.currencies.USD[0].cost < 0);
 });
