@@ -126,6 +126,33 @@ test("APU fuel requires matching Stn fuel price and does not use quantity as cos
   assert.equal(row.apuFuelCostRCCY, 0);
 });
 
+test("APU fuel ignores stale cost values when Stn fuel price is missing", () => {
+  const row = computeFlightCosts({
+    ...baseFlight,
+    date: "2026-05-01",
+    sector: "DEL-BOM",
+    depStn: "DEL",
+    arrStn: "BOM",
+    aircraft: { registration: "VT-AAB" },
+  }, {
+    reportingCurrency: "INR",
+    apuUsage: [{
+      stn: "BOM",
+      acftRegn: "VT-AAB",
+      fromDate: "2026-05-01",
+      toDate: "2026-05-31",
+      apuHrPerDay: 0.75,
+      kgPerApuHr: 400,
+      costRCCY: 9300,
+    }],
+    ccyFuel: [{ station: "DEL", month: "05/26", kgPerLtr: 0.79, intoPlaneRate: 72000, ccy: "INR" }],
+  });
+
+  assert.equal(row.apuFuelConsumptionKg, 0);
+  assert.equal(row.apuFuelCost, 0);
+  assert.equal(row.apuFuelCostRCCY, 0);
+});
+
 test("APU fuel pool is aircraft-month scoped and allocated by selected driver", () => {
   const flights = [
     {
