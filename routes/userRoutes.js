@@ -50,7 +50,7 @@ user.get("/get-data", verifyToken, dataController.getData);
 user.get("/downloadFLGTs", verifyToken, dataController.downloadExpenses);
 user.get("/products/:id", dataController.singleData);
 user.delete("/delete", jsonParser, verifyToken, dataController.deleteFlightsAndUpdateSectors);
-user.delete("/delete-sector/:ids", sectorController.deleteSectors);
+user.delete("/delete-sector/:ids", verifyToken, sectorController.deleteSectors);
 user.put(
   "/update-data/:id",
   jsonParser,

@@ -23,6 +23,7 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const { scopedUserQuery } = require("./accessScope");
 
 const createConnections = require('../helper/createConnections');
 
@@ -67,8 +68,7 @@ const {
 
 const getSecors = async (req, res) => {
   try {
-    const id = req.user.id;
-    const data = await Sector.find({ userId: id });
+    const data = await Sector.find(scopedUserQuery(req));
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: "Internal server error" });
@@ -174,7 +174,7 @@ const deleteSectors = async (req, res) => {
     const ids = req.params.ids.split(",");
 
     // Use find() to retrieve sectors by their IDs
-    const sectors = await Sector.find({ _id: { $in: ids } });
+    const sectors = await Sector.find(scopedUserQuery(req, { _id: { $in: ids } }));
 
 
     if (sectors.length === 0) {
@@ -204,12 +204,12 @@ const deleteSectors = async (req, res) => {
     }
 
     // Delete associated Flights records
-    const deletedFlightData = await Flights.deleteMany({
+    const deletedFlightData = await Flights.deleteMany(scopedUserQuery(req, {
       sectorId: { $in: ids },
-    });
+    }));
 
     // Delete sectors
-    const deletedSectorData = await Sector.deleteMany({ _id: { $in: ids } });
+    const deletedSectorData = await Sector.deleteMany(scopedUserQuery(req, { _id: { $in: ids } }));
 
     // await createConnections(userId);
 

@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const Tenant = require("../model/tenantSchema");
 const User = require("../model/userSchema");
 const { requireTenantAdmin } = require("../middlware/auth");
+const { scopedUserQuery } = require("../controller/accessScope");
 const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
@@ -136,6 +137,18 @@ test("tenant admin guard accepts current and legacy admin roles", () => {
 
   assert.equal(nextCalled, false);
   assert.equal(res.statusCode, 403);
+});
+
+test("tenant admin data scope can see instance records while users stay self-scoped", () => {
+  assert.deepEqual(
+    scopedUserQuery({ user: { id: "regular-user", role: "user" } }, { isComplete: true }),
+    { isComplete: true, userId: "regular-user" }
+  );
+
+  assert.deepEqual(
+    scopedUserQuery({ user: { id: "tenant-admin", role: "tenant_admin" } }, { isComplete: true }),
+    { isComplete: true }
+  );
 });
 
 test("tenant admin bootstrap requires the provisioning secret", () => {

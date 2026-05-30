@@ -28,6 +28,7 @@ const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
+const { scopedUserQuery } = require("./accessScope");
 
 const createConnections = require('../helper/createConnections');
 
@@ -282,8 +283,7 @@ const AddDataFromRotations = async (req, res, rotationDetailsId) => {
 };
 const getData = async (req, res) => {
   try {
-    const id = req.user.id;
-    const data = await Data.find({ userId: id });
+    const data = await Data.find(scopedUserQuery(req));
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: "Internal server error" });
@@ -300,7 +300,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     }
 
     // Fetch the documents being deleted
-    const documentsToDelete = await Data.find({ _id: { $in: ids } });
+    const documentsToDelete = await Data.find(scopedUserQuery(req, { _id: { $in: ids } }));
 
     // Construct an array of unique station names to delete
     const stationNamesToDelete = [...documentsToDelete.flatMap(doc => [doc.arrStn, doc.depStn])];
@@ -324,16 +324,16 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
       }
     }
 
-    const result = await Data.deleteMany({ _id: { $in: ids } });
+    const result = await Data.deleteMany(scopedUserQuery(req, { _id: { $in: ids } }));
 
-    const flightsToDelete = await Flights.find({ networkId: { $in: ids } });
+    const flightsToDelete = await Flights.find(scopedUserQuery(req, { networkId: { $in: ids } }));
 
     const rotationNumbersToDelete = [...new Set(flightsToDelete
       .filter(flight => flight.rotationNumber !== undefined) // Exclude undefined values
       .map(flight => flight.rotationNumber)
     )];
 
-    const flgtDelCount = await Flights.deleteMany({ networkId: { $in: ids } });
+    const flgtDelCount = await Flights.deleteMany(scopedUserQuery(req, { networkId: { $in: ids } }));
     const flightNumbersToDelete = [...new Set(flightsToDelete
       .map(flight => String(flight.flight || "").trim().toUpperCase())
       .filter(Boolean)
@@ -358,9 +358,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
       return res.status(404).json({ error: "Data not found" });
     }
 
-    await Sector.deleteMany({
-      networkId: { $in: ids }
-    });
+    await Sector.deleteMany(scopedUserQuery(req, { networkId: { $in: ids } }));
 
     // await createConnections(userId);
 
@@ -634,10 +632,10 @@ const updateData = async (req, res) => {
       // -------------------------------
       // 1️⃣ Handle rotation deletion
       // -------------------------------
-      const flightsWithRotation = await Flights.find({
+      const flightsWithRotation = await Flights.find(scopedUserQuery(req, {
         networkId: dataId,
         rotationNumber: { $exists: true, $ne: null }
-      });
+      }));
 
       if (flightsWithRotation.length > 0) {
 
@@ -680,7 +678,7 @@ const updateData = async (req, res) => {
       // 3️⃣ Atomic Safe Update
       // -------------------------------
       const updatedData = await Data.findOneAndUpdate(
-        { _id: dataId, userId },
+        scopedUserQuery(req, { _id: dataId }),
         { $set: updatePayload },
         { new: true, runValidators: true, skipAssignmentResync: shouldControllerRevalidateAssignments }
       );

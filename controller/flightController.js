@@ -26,6 +26,7 @@ const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
+const { scopedUserQuery } = require("./accessScope");
 
 const createConnections = require('../helper/createConnections');
 
@@ -70,17 +71,16 @@ const {
 
 const getFlights = async (req, res) => {
   try {
-    const id = req.user.id;
-
     // Get pagination parameters from the query (default to page 1, 10 rows per page)
     const { page = 1, limit = 10 } = req.query;
+    const query = scopedUserQuery(req, { isComplete: true });
 
-    const data = await Flights.find({ userId: id, isComplete: true })
+    const data = await Flights.find(query)
       .skip((page - 1) * limit) // Skip documents for previous pages
       .limit(Number(limit)); // Limit results to `limit`
 
     // Get the total count for pagination
-    const total = await Flights.countDocuments({ userId: id, isComplete: true });
+    const total = await Flights.countDocuments(query);
 
     console.log("Query finished, page : " + page + " data length : " + data.length);
 
@@ -153,7 +153,7 @@ const searchFlights = async (req, res) => {
     }
 
     // Add user ID and isComplete filters
-    query.userId = req.user.id;
+    query = scopedUserQuery(req, query);
     query.isComplete = true;
 
     // Pagination
