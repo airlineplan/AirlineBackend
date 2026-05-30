@@ -354,7 +354,7 @@ function isValidStationConnection(firstSnapshot, secondSnapshot, stationRuleMap)
 }
 
 function normalizeRevenueConfig(config = {}) {
-    const reportingCurrency = normalizeCurrencyCode(config.reportingCurrency) || "USD";
+    const reportingCurrency = normalizeCurrencyCode(config.reportingCurrency) || "INR";
     const currencyCodes = [
         reportingCurrency,
         ...(Array.isArray(config.currencyCodes) ? config.currencyCodes : []),
@@ -432,7 +432,7 @@ async function collectRevenueConfigCurrencyCodes(userId, current = {}) {
 }
 
 function buildResetFxRates(currencyCodes = [], reportingCurrency = "", dateKeys = []) {
-    const reporting = normalizeCurrencyCode(reportingCurrency) || "USD";
+    const reporting = normalizeCurrencyCode(reportingCurrency) || "INR";
     const pairs = currencyCodes
         .map(normalizeCurrencyCode)
         .filter((code) => code && code !== reporting)
@@ -451,7 +451,7 @@ function buildFxRateMap(fxRates = []) {
 
 function resolveCurrencyContext({ stationCurrencyMap, revenueConfig, fxRateMap, poo, date }) {
     const normalizedPoo = normalizeStation(poo);
-    const reportingCurrency = revenueConfig.reportingCurrency || "USD";
+    const reportingCurrency = revenueConfig.reportingCurrency || "INR";
     const pooCcy = stationCurrencyMap.get(normalizedPoo) || reportingCurrency;
     const dateKey = formatDateKey(date);
     const pair = `${pooCcy}/${reportingCurrency}`;
@@ -695,15 +695,20 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
     next.legCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, next.legRate));
     next.legTotalRev = roundToTwo(next.legPaxRev + next.legCargoRev);
 
-    const odFare = parseNumber(row.odFare) || (row.trafficType === TRAFFIC_TYPES.LEG ? parseNumber(next.legFare) : 0);
-    const odRate = parseNumber(row.odRate) || (row.trafficType === TRAFFIC_TYPES.LEG ? parseNumber(next.legRate) : 0);
+    const isDirectLegTraffic = row.trafficType === TRAFFIC_TYPES.LEG;
+    const odFare = isDirectLegTraffic && parseNumber(next.legFare) > 0
+        ? parseNumber(next.legFare)
+        : parseNumber(row.odFare);
+    const odRate = isDirectLegTraffic && parseNumber(next.legRate) > 0
+        ? parseNumber(next.legRate)
+        : parseNumber(row.odRate);
     next.odFare = odFare;
     next.odRate = odRate;
     next.odPaxRev = roundToTwo(parseNumber(next.pax) * odFare);
     next.odCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, odRate));
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
-    const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "USD";
+    const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "INR";
     const localCcy = normalizeCurrencyCode(row.pooCcy) || reportingCurrency;
     const dateKey = normalizeDateKey(row.date);
     const rate = config
@@ -1683,6 +1688,14 @@ function applyFieldEdits(row, requested, revenueConfig = null) {
             next[field] = roundToTwo(requested[field]);
         }
     });
+
+    if (next.trafficType === TRAFFIC_TYPES.LEG) {
+        if (requested.legFare !== undefined) next.odFare = next.legFare;
+        else if (requested.odFare !== undefined) next.legFare = next.odFare;
+
+        if (requested.legRate !== undefined) next.odRate = next.legRate;
+        else if (requested.odRate !== undefined) next.legRate = next.odRate;
+    }
 
     STRING_FIELDS.forEach((field) => {
         if (requested[field] !== undefined) {
@@ -2873,7 +2886,7 @@ exports.getRevenueConfig = async (req, res) => {
         const collected = await collectRevenueConfigCurrencyCodes(userId, rawConfig ? config : { currencyCodes: [], reportingCurrency: "" });
         const reportingCurrency = rawConfig?.reportingCurrency
             ? config.reportingCurrency
-            : (collected.currencyCodes.find(Boolean) || config.reportingCurrency || "USD");
+            : (collected.currencyCodes.find(Boolean) || config.reportingCurrency || "INR");
         res.status(200).json({
             success: true,
             data: normalizeRevenueConfig({
@@ -2909,7 +2922,7 @@ exports.saveReportingCurrency = async (req, res) => {
     try {
         const userId = req.user.id;
         const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
-        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "USD";
+        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "INR";
         const collected = await collectRevenueConfigCurrencyCodes(userId, {
             ...current,
             reportingCurrency,
@@ -2934,7 +2947,7 @@ exports.saveFxRates = async (req, res) => {
     try {
         const userId = req.user.id;
         const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
-        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "USD";
+        const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "INR";
         const collected = await collectRevenueConfigCurrencyCodes(userId, {
             ...current,
             reportingCurrency,

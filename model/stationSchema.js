@@ -39,7 +39,7 @@ const stationSchema = new mongoose.Schema({
     },
     currencyCode: {
         type: String,
-        default: "",
+        default: "INR",
         trim: true,
         uppercase: true,
     },

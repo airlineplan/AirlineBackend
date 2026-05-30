@@ -1214,7 +1214,7 @@ const getDashboardData = async (req, res) => {
       fxRates: revenueConfig.fxRates || rawCostConfig?.fxRates,
       fleet: fleetRows,
     });
-    const reportingCurrency = normalizeCurrencyCode(baseCostConfig.reportingCurrency || revenueConfig.reportingCurrency || "USD");
+    const reportingCurrency = normalizeCurrencyCode(baseCostConfig.reportingCurrency || revenueConfig.reportingCurrency || "INR");
     const resultData = [];
     const periodPayloads = [];
     const currencyExposureBuckets = {};

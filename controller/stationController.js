@@ -91,7 +91,10 @@ const getStationsTableData = async (req, res) => {
     const hometimeZone = user ? user.hometimeZone : '';
 
     // Retrieve station data
-    const data = await Stations.find({ userId });
+    const data = (await Stations.find({ userId }).lean()).map((station) => ({
+      ...station,
+      currencyCode: station.currencyCode || "INR",
+    }));
 
     // Return response with station data and home timezone
     res.json({ data, hometimeZone });
@@ -126,7 +129,7 @@ const saveStation = async (req, res) => {
         updateFields.avgTaxiInTime = normalizeHHMM(updateFields.avgTaxiInTime);
       }
       if (Object.prototype.hasOwnProperty.call(updateFields, "currencyCode")) {
-        updateFields.currencyCode = normalizeCurrencyCode(updateFields.currencyCode);
+        updateFields.currencyCode = normalizeCurrencyCode(updateFields.currencyCode) || "INR";
       }
 
       const existingStation = await Stations.findById(_id);

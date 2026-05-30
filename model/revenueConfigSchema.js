@@ -30,13 +30,13 @@ const RevenueConfigSchema = new mongoose.Schema(
     },
     reportingCurrency: {
       type: String,
-      default: "USD",
+      default: "INR",
       trim: true,
       uppercase: true,
     },
     currencyCodes: {
       type: [String],
-      default: [],
+      default: ["INR"],
     },
     fxRates: {
       type: [RevenueFxRateSchema],

@@ -34,7 +34,7 @@ const CostConfigSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  reportingCurrency: { type: String, default: "USD" },
+  reportingCurrency: { type: String, default: "INR" },
   fxRates: { type: Array, default: [] },
   allocationTable: { type: Array, default: [] },
   fuelConsum: { type: Array, default: [] },

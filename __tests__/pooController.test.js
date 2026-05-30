@@ -773,6 +773,29 @@ test("direct leg revenue uses leg fare and rate when OD fare and rate are blank"
     assert.equal(row.fnlRccyTotalRev, 14380000);
 });
 
+test("direct leg revenue ignores stale OD fare and rate after leg fare edits", () => {
+    const row = recalculateRevenueForPooRow({
+        date: new Date("2026-05-02T00:00:00.000Z"),
+        stops: 0,
+        trafficType: "leg",
+        identifier: "Leg",
+        pax: 73,
+        cargoT: 0.4,
+        legFare: 2000,
+        legRate: 40,
+        odFare: 4000,
+        odRate: 80,
+        pooCcy: "USD",
+        reportingCurrency: "USD",
+        applySSPricing: false,
+    });
+
+    assert.equal(row.odFare, 2000);
+    assert.equal(row.odRate, 40);
+    assert.equal(row.legPaxRev, 146000);
+    assert.equal(row.fnlRccyPaxRev, 146000);
+});
+
 test("direct leg revenue accepts comma-formatted fare and rate values", () => {
     const row = recalculateRevenueForPooRow({
         date: new Date("2026-05-01T00:00:00.000Z"),

@@ -1592,7 +1592,7 @@ const normalizeCostConfig = (config = {}) => {
   );
   return {
     __normalized: true,
-    reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "USD",
+    reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "INR",
     fxRates: Array.isArray(config.fxRates) ? config.fxRates : [],
     allocationTable: normalizeAllocationTable(config.allocationTable || config.costAllocation || []),
     fuelConsum: normalizeFuelConsum(config.fuelConsum || []),

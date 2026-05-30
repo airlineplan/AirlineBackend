@@ -54,7 +54,7 @@ function getCarriedForwardFxRate(fxRates = [], pair, dateKey) {
 function convertLocalToReporting(amount, localCcy, reportingCurrency, dateKey, fxRates = []) {
   const numeric = parseNumber(amount);
   const local = normalizeCurrencyCode(localCcy);
-  const reporting = normalizeCurrencyCode(reportingCurrency) || "USD";
+  const reporting = normalizeCurrencyCode(reportingCurrency) || "INR";
   if (!local || local === reporting) return roundToTwo(numeric);
 
   // FX direction is LOCAL/REPORTING. Local-to-reporting is multiplication only.

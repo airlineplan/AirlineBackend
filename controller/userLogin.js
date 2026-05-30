@@ -1,6 +1,8 @@
 const nodemailer = require("nodemailer");
 const { google } = require('googleapis');
 const User = require("../model/userSchema");
+const RevenueConfig = require("../model/revenueConfigSchema");
+const CostConfig = require("../model/costConfigSchema");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const config = require("../config/config");
@@ -26,6 +28,32 @@ exports.createUser = async (req, res) => {
 
   try {
     const savedUser = await user.save();
+    const userId = savedUser._id.toString();
+    await Promise.all([
+      RevenueConfig.findOneAndUpdate(
+        { userId },
+        {
+          $setOnInsert: {
+            userId,
+            reportingCurrency: "INR",
+            currencyCodes: ["INR"],
+            fxRates: [],
+          },
+        },
+        { upsert: true, new: true }
+      ),
+      CostConfig.findOneAndUpdate(
+        { userId },
+        {
+          $setOnInsert: {
+            userId,
+            reportingCurrency: "INR",
+            fxRates: [],
+          },
+        },
+        { upsert: true, new: true }
+      ),
+    ]);
     res.send(savedUser);
   } catch (err) {
     res.status(400).send(err);
@@ -191,4 +219,3 @@ exports.sendContactEmail = async (req, res) => {
   }
 
 };
-
