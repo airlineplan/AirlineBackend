@@ -7,14 +7,40 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const config = require("../config/config");
 const Otp = require("../model/otp");
-const { text } = require("body-parser");
-exports.createUser = async (req, res) => {
-  const { firstName, lastName, email, password } = req.body;
+const { USER_TOKEN_AUDIENCE } = require("../middlware/auth");
 
-  const existingUser = await User.findOne({ email: email });
+const MANAGED_ROLES = new Set(["tenant_admin", "user"]);
+
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+
+const buildUserPayload = (user) => ({
+  id: user._id?.toString?.() || user.id,
+  email: user.email,
+  role: user.role || "user",
+  firstName: user.firstName,
+  lastName: user.lastName,
+});
+
+exports.createUser = async (req, res) => {
+  const { firstName, lastName, password } = req.body;
+  const email = normalizeEmail(req.body?.email);
+  const requestedRole = MANAGED_ROLES.has(req.body?.role) ? req.body.role : "user";
+
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+
+  const isTenantAdmin = req.user?.role === "tenant_admin";
+  const role = requestedRole;
+
+  if (!isTenantAdmin) {
+    return res.status(403).json({ error: "Only a tenant admin can create users for this instance" });
+  }
+
+  const existingUser = await User.findOne({ email });
 
   if (existingUser) {
-    return res.status(400).send("User already exists");
+    return res.status(400).json({ error: "User already exists" });
   }
   const salt = await bcrypt.genSalt(10);
   const hashedPassword = await bcrypt.hash(password, salt);
@@ -24,6 +50,8 @@ exports.createUser = async (req, res) => {
     lastName,
     email,
     password: hashedPassword,
+    role,
+    createdBy: req.user?.id || null,
   });
 
   try {
@@ -54,20 +82,24 @@ exports.createUser = async (req, res) => {
         { upsert: true, new: true }
       ),
     ]);
-    res.send(savedUser);
+    res.status(201).json({ user: buildUserPayload(savedUser) });
   } catch (err) {
-    res.status(400).send(err);
+    if (err.code === 11000) return res.status(400).json({ error: "User already exists" });
+    res.status(400).json({ error: err.message || "User could not be created" });
   }
 };
 
 exports.loginUser = async (req, res) => {
   try {
-    console.log(req.body);
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = normalizeEmail(req.body?.email);
 
-    const user = await User.findOne({ email: email });
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ error: "Invalid credentials" });
+    }
+    if (user.isActive === false) {
+      return res.status(403).json({ error: "This user has been deactivated" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -78,12 +110,21 @@ exports.loginUser = async (req, res) => {
     const payload = {
       id: user.id,
       email: user.email,
+      role: user.role || "user",
+      aud: USER_TOKEN_AUDIENCE,
+      tokenType: "tenant_user",
     };
 
-    jwt.sign(payload, config.secret, { expiresIn: "7h" }, (err, token) => {
+    if (!config.secret) {
+      return res.status(500).json({ error: "JWT secret is not configured" });
+    }
+
+    user.lastLoginAt = new Date();
+    await user.save();
+
+    jwt.sign(payload, config.secret, { expiresIn: process.env.JWT_EXPIRES_IN || "7h" }, (err, token) => {
       if (err) throw err;
-      console.log(token, "token ");
-      res.json({ message: "Login successful", token });
+      res.json({ message: "Login successful", token, user: buildUserPayload(user) });
     });
   } catch (error) {
     console.error(error.message);

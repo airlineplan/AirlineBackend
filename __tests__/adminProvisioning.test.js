@@ -4,6 +4,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const Tenant = require("../model/tenantSchema");
+const User = require("../model/userSchema");
+const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
 
@@ -36,7 +38,7 @@ test("admin auth uses env credentials and emits admin-scoped JWT", async () => {
 
     const token = signAdminToken("admin@airlineplan.com");
     const decoded = verifyAdminToken(token);
-    assert.equal(decoded.role, "admin");
+    assert.equal(decoded.role, "super_admin");
     assert.equal(decoded.aud, "airlineplan-admin");
     assert.equal(decoded.email, "admin@airlineplan.com");
 
@@ -79,4 +81,44 @@ test("tenant model stores provisioning state and cloud identifiers", () => {
 
   tenant.status = "unknown";
   assert.match(tenant.validateSync().message, /`unknown` is not a valid enum value/);
+});
+
+test("tenant users have scoped roles and active access state", () => {
+  const user = new User({
+    firstName: "Ops",
+    lastName: "Planner",
+    email: "OPS@STAR.EXAMPLE",
+    password: "hashed-password",
+  });
+
+  assert.equal(user.role, "user");
+  assert.equal(user.isActive, true);
+  assert.equal(user.validateSync(), undefined);
+
+  user.role = "tenant_admin";
+  assert.equal(user.validateSync(), undefined);
+
+  user.role = "super_admin";
+  assert.match(user.validateSync().message, /`super_admin` is not a valid enum value/);
+});
+
+test("tenant admin bootstrap requires the provisioning secret", () => {
+  const previous = process.env.TENANT_BOOTSTRAP_SECRET;
+  process.env.TENANT_BOOTSTRAP_SECRET = "tenant-bootstrap-test-secret";
+
+  try {
+    assert.doesNotThrow(() => verifyBootstrapToken({
+      headers: { "x-tenant-bootstrap-token": "tenant-bootstrap-test-secret" },
+    }));
+    assert.doesNotThrow(() => verifyBootstrapToken({
+      headers: { authorization: "Bearer tenant-bootstrap-test-secret" },
+    }));
+    assert.throws(
+      () => verifyBootstrapToken({ headers: { "x-tenant-bootstrap-token": "wrong" } }),
+      /Invalid tenant bootstrap token/
+    );
+  } finally {
+    if (previous === undefined) delete process.env.TENANT_BOOTSTRAP_SECRET;
+    else process.env.TENANT_BOOTSTRAP_SECRET = previous;
+  }
 });

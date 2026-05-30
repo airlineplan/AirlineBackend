@@ -51,6 +51,56 @@ const checkHttps = (domain) =>
     req.on("error", () => resolve(false));
   });
 
+const bootstrapTenantAdmin = ({ domain, bootstrapSecret, initialAdmin }) =>
+  new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      firstName: initialAdmin.firstName,
+      lastName: initialAdmin.lastName,
+      email: initialAdmin.email,
+      password: initialAdmin.password,
+    });
+
+    const req = https.request(
+      {
+        hostname: domain,
+        path: "/tenant/bootstrap-admin",
+        method: "POST",
+        timeout: Number(process.env.TENANT_BOOTSTRAP_TIMEOUT_MS || 15000),
+        rejectUnauthorized: true,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "x-tenant-bootstrap-token": bootstrapSecret,
+        },
+      },
+      (res) => {
+        let responseBody = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          responseBody += chunk;
+        });
+        res.on("end", () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve();
+            return;
+          }
+
+          const error = new Error(`Tenant admin bootstrap failed with status ${res.statusCode}`);
+          error.response = responseBody;
+          error.statusCode = res.statusCode;
+          reject(error);
+        });
+      }
+    );
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Tenant admin bootstrap timed out"));
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+
 const waitForDns = async ({ domain, expectedIp, tenantId }) => {
   const attempts = Number(process.env.DNS_POLL_ATTEMPTS || 60);
   const interval = Number(process.env.DNS_POLL_INTERVAL_MS || 30000);
@@ -83,7 +133,7 @@ const waitForHttps = async ({ domain, tenantId }) => {
   return false;
 };
 
-const provisionTenant = async (tenantId) => {
+const provisionTenant = async (tenantId, options = {}) => {
   const tenant = await Tenant.findById(tenantId);
   if (!tenant) return;
 
@@ -101,6 +151,7 @@ const provisionTenant = async (tenantId) => {
     const atlasUsername = `tenant_${tenant.subdomain.replace(/-/g, "_")}`.slice(0, 64);
     const atlasPassword = generateSecret();
     const tenantJwtSecret = generateSecret();
+    const tenantBootstrapSecret = generateSecret();
     const clusterName = `airlineplan-${tenant.subdomain}`;
 
     const atlas = await createAtlasCluster({
@@ -135,6 +186,7 @@ const provisionTenant = async (tenantId) => {
       tenant,
       mongoUri: atlas.mongoUri,
       tenantJwtSecret,
+      tenantBootstrapSecret,
       log,
     });
     await Tenant.findByIdAndUpdate(tenantId, {
@@ -163,6 +215,15 @@ const provisionTenant = async (tenantId) => {
     const httpsReady = await waitForHttps({ domain: tenant.fullDomain, tenantId });
     if (!httpsReady) throw new Error("HTTPS health check did not pass in time");
 
+    if (options.initialAdmin?.email && options.initialAdmin?.password) {
+      await log("info", "Creating initial tenant admin", { email: options.initialAdmin.email });
+      await bootstrapTenantAdmin({
+        domain: tenant.fullDomain,
+        bootstrapSecret: tenantBootstrapSecret,
+        initialAdmin: options.initialAdmin,
+      });
+    }
+
     await setStatus(tenantId, "active", {
       lastProvisioningFinishedAt: new Date(),
     });
@@ -181,9 +242,9 @@ const provisionTenant = async (tenantId) => {
   }
 };
 
-const startProvisioning = (tenantId) => {
+const startProvisioning = (tenantId, options = {}) => {
   setImmediate(() => {
-    provisionTenant(tenantId).catch((error) => {
+    provisionTenant(tenantId, options).catch((error) => {
       appendLog(tenantId, "error", "Unhandled provisioning error", { message: error.message }).catch(() => {});
     });
   });

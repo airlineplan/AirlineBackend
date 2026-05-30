@@ -1,5 +1,18 @@
 const { verifyAdminToken } = require("../utils/adminAuth");
 
+const rootDomain = () => String(process.env.ROOT_DOMAIN || "airlineplan.com").toLowerCase();
+
+const isLocalHost = (hostname = "") => ["localhost", "127.0.0.1", "::1"].includes(hostname);
+
+const requireRootAdminHost = (req, res, next) => {
+  const hostname = String(req.hostname || "").toLowerCase();
+  if (isLocalHost(hostname) || hostname === rootDomain()) {
+    return next();
+  }
+
+  return res.status(404).json({ error: "Super admin is only available on the root domain" });
+};
+
 const verifyAdmin = (req, res, next) => {
   const header = req.headers.authorization || "";
   const bearerToken = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -18,3 +31,4 @@ const verifyAdmin = (req, res, next) => {
 };
 
 module.exports = verifyAdmin;
+module.exports.requireRootAdminHost = requireRootAdminHost;

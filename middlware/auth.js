@@ -1,19 +1,76 @@
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
-const verifyToken = (req, res, next) => {
+const User = require("../model/userSchema");
+
+const USER_TOKEN_AUDIENCE = "airlineplan-tenant";
+
+const getTokenFromRequest = (req) => {
   const token =
-    req.body.token || req.query.token || req.headers["x-access-token"];
+    req.body?.token || req.query?.token || req.headers["x-access-token"];
+
+  return token;
+};
+
+const attachUserFromToken = async (req, token) => {
+  const decoded = jwt.verify(token, config.secret);
+  if (decoded?.aud !== USER_TOKEN_AUDIENCE || decoded?.tokenType !== "tenant_user") {
+    const error = new Error("Invalid Token");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const user = await User.findById(decoded.id).select("_id email role isActive firstName lastName").lean();
+  if (!user || user.isActive === false) {
+    const error = new Error("User is inactive or no longer exists");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  req.user = {
+    id: user._id.toString(),
+    email: user.email,
+    role: user.role,
+    firstName: user.firstName,
+    lastName: user.lastName,
+  };
+  return req.user;
+};
+
+const verifyToken = async (req, res, next) => {
+  const token = getTokenFromRequest(req);
 
   if (!token) {
     return res.status(403).send("A token is required for authentication");
   }
   try {
-    const decoded = jwt.verify(token, config.secret);
-    req.user = decoded;
+    await attachUserFromToken(req, token);
   } catch (err) {
-    return res.status(401).send("Invalid Token");
+    return res.status(err.statusCode || 401).send(err.message || "Invalid Token");
+  }
+  return next();
+};
+
+const optionalToken = async (req, res, next) => {
+  const token = getTokenFromRequest(req);
+  if (!token) return next();
+
+  try {
+    await attachUserFromToken(req, token);
+    return next();
+  } catch (err) {
+    return res.status(err.statusCode || 401).send(err.message || "Invalid Token");
+  }
+};
+
+const requireTenantAdmin = (req, res, next) => {
+  if (req.user?.role !== "tenant_admin") {
+    return res.status(403).json({ error: "Tenant admin access is required" });
   }
   return next();
 };
 
 module.exports = verifyToken;
+module.exports.USER_TOKEN_AUDIENCE = USER_TOKEN_AUDIENCE;
+module.exports.getTokenFromRequest = getTokenFromRequest;
+module.exports.optionalToken = optionalToken;
+module.exports.requireTenantAdmin = requireTenantAdmin;

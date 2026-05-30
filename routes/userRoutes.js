@@ -3,6 +3,7 @@ const user = express();
 const multer = require("multer");
 const path = require("path");
 const verifyToken = require("../middlware/auth.js");
+const { requireTenantAdmin } = require("../middlware/auth.js");
 const userLogin = require("../controller/userLogin");
 var bodyParser = require("body-parser");
 const { verify } = require("crypto");
@@ -28,12 +29,12 @@ const rotationController = require("../controller/rotationController");
 const stationController = require("../controller/stationController");
 const dashboardController = require("../controller/dashboardController");
 const masterController = require("../controller/masterController");
-const authController = require("../controller/authController");
 const maintenanceController = require("../controller/maintenanceController");
 const assignmentController = require("../controller/assignmentController");
 const fleetController = require("../controller/fleetController");
 const costController = require("../controller/costController");
 const apuFuelController = require("../controller/apuFuelController");
+const tenantUserController = require("../controller/tenantUserController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -65,8 +66,8 @@ user.put(
   sectorController.updateSector
 );
 user.get("/sectorsbyid/:id", sectorController.singleSector);
-user.post("/admin-login", jsonParser, authController.AdminLogin);
-user.post("/user-signup", jsonParser, userLogin.createUser);
+user.post("/tenant/bootstrap-admin", jsonParser, tenantUserController.bootstrapTenantAdmin);
+user.post("/user-signup", jsonParser, verifyToken, requireTenantAdmin, userLogin.createUser);
 user.post("/user-login", jsonParser, userLogin.loginUser);
 user.get("/auth/verify", verifyToken, (req, res) => {
   return res.status(200).json({
@@ -74,6 +75,11 @@ user.get("/auth/verify", verifyToken, (req, res) => {
     user: req.user,
   });
 });
+user.get("/tenant/users", verifyToken, requireTenantAdmin, tenantUserController.listTenantUsers);
+user.post("/tenant/users", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.createTenantUser);
+user.patch("/tenant/users/:id/role", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.updateTenantUserRole);
+user.patch("/tenant/users/:id/access", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.setTenantUserActive);
+user.delete("/tenant/users/:id", verifyToken, requireTenantAdmin, tenantUserController.deleteTenantUser);
 user.post("/send-email", jsonParser, userLogin.sendEmail);
 user.post("/send-contactEmail", jsonParser, userLogin.sendContactEmail);
 user.post("/change-passowrd", jsonParser, userLogin.changePassword);

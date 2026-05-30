@@ -34,7 +34,7 @@ const signAdminToken = (email) =>
   jwt.sign(
     {
       email: String(email).trim().toLowerCase(),
-      role: "admin",
+      role: "super_admin",
       aud: ADMIN_TOKEN_AUDIENCE,
     },
     getAdminJwtSecret(),
@@ -43,7 +43,7 @@ const signAdminToken = (email) =>
 
 const verifyAdminToken = (token) => {
   const decoded = jwt.verify(token, getAdminJwtSecret());
-  if (decoded?.role !== "admin" || decoded?.aud !== ADMIN_TOKEN_AUDIENCE) {
+  if (decoded?.role !== "super_admin" || decoded?.aud !== ADMIN_TOKEN_AUDIENCE) {
     const error = new Error("Invalid admin token");
     error.statusCode = 401;
     throw error;

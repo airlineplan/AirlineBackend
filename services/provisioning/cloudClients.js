@@ -204,10 +204,10 @@ const createGoDaddyRecord = async ({ subdomain, ipAddress }) => {
   });
 };
 
-const launchTenantInstance = async ({ tenant, mongoUri, tenantJwtSecret, log }) => {
+const launchTenantInstance = async ({ tenant, mongoUri, tenantJwtSecret, tenantBootstrapSecret, log }) => {
   const region = tenant.aws.region || process.env.AWS_REGION || "ap-south-1";
   const client = new EC2Client({ region });
-  const userData = Buffer.from(buildTenantUserData({ tenant, mongoUri, tenantJwtSecret })).toString("base64");
+  const userData = Buffer.from(buildTenantUserData({ tenant, mongoUri, tenantJwtSecret, tenantBootstrapSecret })).toString("base64");
 
   const command = new RunInstancesCommand({
     ImageId: requireEnv("AWS_AMI_ID"),
@@ -249,7 +249,7 @@ const launchTenantInstance = async ({ tenant, mongoUri, tenantJwtSecret, log }) 
   throw new Error("EC2 instance did not become ready within the polling window");
 };
 
-const buildTenantUserData = ({ tenant, mongoUri, tenantJwtSecret }) => {
+const buildTenantUserData = ({ tenant, mongoUri, tenantJwtSecret, tenantBootstrapSecret }) => {
   const repoUrl = requireEnv("APP_REPO_URL");
   const repoBranch = process.env.APP_REPO_BRANCH || "main";
   const appDir = "/opt/airlineplan";
@@ -268,6 +268,7 @@ git clone --branch ${repoBranch} ${repoUrl} ${appDir}
 cat > ${appDir}/AirlineBackend/.env <<'ENV'
 MONGO_URI=${mongoUri}
 JWT_SECRET=${tenantJwtSecret}
+TENANT_BOOTSTRAP_SECRET=${tenantBootstrapSecret}
 SCHEDULE_UPLOAD_LIMIT=${process.env.SCHEDULE_UPLOAD_LIMIT || ""}
 FLIGHT_LIMIT=${process.env.FLIGHT_LIMIT || ""}
 TENANT_SUBDOMAIN=${tenant.subdomain}

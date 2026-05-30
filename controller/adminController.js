@@ -43,12 +43,24 @@ const getTenant = async (req, res) => {
 
 const createTenant = async (req, res) => {
   try {
-    const { tenantName, subdomain, adminEmail, instanceType = "t3.small", region } = req.body || {};
+    const {
+      tenantName,
+      subdomain,
+      adminEmail,
+      adminFirstName,
+      adminLastName,
+      adminPassword,
+      instanceType = "t3.small",
+      region,
+    } = req.body || {};
     const validation = validateSubdomain(subdomain);
     if (!validation.valid) return res.status(400).json({ error: validation.error });
     if (!tenantName || !String(tenantName).trim()) return res.status(400).json({ error: "Tenant name is required" });
     if (!adminEmail || !/.+@.+\..+/.test(String(adminEmail))) {
       return res.status(400).json({ error: "Valid admin email is required" });
+    }
+    if (!adminPassword || String(adminPassword).length < 8) {
+      return res.status(400).json({ error: "Tenant admin temporary password must be at least 8 characters" });
     }
     if (!["t3.small", "t3.medium"].includes(instanceType)) {
       return res.status(400).json({ error: "Instance type must be t3.small or t3.medium" });
@@ -84,7 +96,14 @@ const createTenant = async (req, res) => {
       ],
     });
 
-    startProvisioning(tenant._id.toString());
+    startProvisioning(tenant._id.toString(), {
+      initialAdmin: {
+        firstName: adminFirstName,
+        lastName: adminLastName,
+        email: adminEmail,
+        password: adminPassword,
+      },
+    });
     return res.status(202).json({ tenant: sanitizeTenant(tenant) });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: "Subdomain already exists" });
@@ -125,10 +144,28 @@ const deactivateTenant = async (req, res) => {
   return res.status(200).json({ tenant: sanitizeTenant(tenant) });
 };
 
+const deleteTenant = async (req, res) => {
+  const tenant = await Tenant.findById(req.params.id);
+  if (!tenant) return res.status(404).json({ error: "Tenant not found" });
+
+  if (!["deactivated", "failed", "pending"].includes(tenant.status)) {
+    return res.status(409).json({
+      error: "Only pending, failed, or deactivated tenants can be deleted. Deactivate the tenant first.",
+    });
+  }
+
+  await Tenant.deleteOne({ _id: tenant._id });
+  return res.status(200).json({
+    message: "Tenant record deleted. Cloud resources must be terminated separately.",
+    tenantId: tenant._id.toString(),
+  });
+};
+
 module.exports = {
   adminLogin,
   createTenant,
   deactivateTenant,
+  deleteTenant,
   getTenant,
   listTenants,
   retryTenant,

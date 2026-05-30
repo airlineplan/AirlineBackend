@@ -11,10 +11,31 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
+    lowercase: true,
+    trim: true,
   },
   password: {
     type: String,
     required: true,
+  },
+  role: {
+    type: String,
+    enum: ["tenant_admin", "user"],
+    default: "user",
+    index: true,
+  },
+  isActive: {
+    type: Boolean,
+    default: true,
+    index: true,
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  lastLoginAt: {
+    type: Date,
   },
   hometimeZone: {
     type: String,
@@ -24,6 +45,8 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   }
-});
+}, { timestamps: true });
+
+userSchema.index({ email: 1 }, { unique: true });
 
 module.exports = mongoose.model("User", userSchema);
