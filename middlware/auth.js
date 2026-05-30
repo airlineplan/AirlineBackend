@@ -3,6 +3,7 @@ const config = require("../config/config");
 const User = require("../model/userSchema");
 
 const USER_TOKEN_AUDIENCE = "airlineplan-tenant";
+const TENANT_ADMIN_ROLES = new Set(["tenant_admin", "admin"]);
 
 const getTokenFromRequest = (req) => {
   const token =
@@ -63,7 +64,7 @@ const optionalToken = async (req, res, next) => {
 };
 
 const requireTenantAdmin = (req, res, next) => {
-  if (req.user?.role !== "tenant_admin") {
+  if (!TENANT_ADMIN_ROLES.has(req.user?.role)) {
     return res.status(403).json({ error: "Tenant admin access is required" });
   }
   return next();
@@ -71,6 +72,7 @@ const requireTenantAdmin = (req, res, next) => {
 
 module.exports = verifyToken;
 module.exports.USER_TOKEN_AUDIENCE = USER_TOKEN_AUDIENCE;
+module.exports.TENANT_ADMIN_ROLES = TENANT_ADMIN_ROLES;
 module.exports.getTokenFromRequest = getTokenFromRequest;
 module.exports.optionalToken = optionalToken;
 module.exports.requireTenantAdmin = requireTenantAdmin;

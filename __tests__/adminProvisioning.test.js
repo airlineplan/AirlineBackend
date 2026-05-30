@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 
 const Tenant = require("../model/tenantSchema");
 const User = require("../model/userSchema");
+const { requireTenantAdmin } = require("../middlware/auth");
 const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
@@ -100,6 +101,41 @@ test("tenant users have scoped roles and active access state", () => {
 
   user.role = "super_admin";
   assert.match(user.validateSync().message, /`super_admin` is not a valid enum value/);
+});
+
+test("tenant admin guard accepts current and legacy admin roles", () => {
+  const createResponse = () => ({
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  });
+
+  ["tenant_admin", "admin"].forEach((role) => {
+    const res = createResponse();
+    let nextCalled = false;
+    requireTenantAdmin({ user: { role } }, res, () => {
+      nextCalled = true;
+    });
+
+    assert.equal(nextCalled, true);
+    assert.equal(res.statusCode, 200);
+  });
+
+  const res = createResponse();
+  let nextCalled = false;
+  requireTenantAdmin({ user: { role: "user" } }, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 403);
 });
 
 test("tenant admin bootstrap requires the provisioning secret", () => {

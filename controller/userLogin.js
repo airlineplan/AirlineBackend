@@ -7,16 +7,17 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const config = require("../config/config");
 const Otp = require("../model/otp");
-const { USER_TOKEN_AUDIENCE } = require("../middlware/auth");
+const { TENANT_ADMIN_ROLES, USER_TOKEN_AUDIENCE } = require("../middlware/auth");
 
 const MANAGED_ROLES = new Set(["tenant_admin", "user"]);
 
 const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+const normalizeRole = (role) => (TENANT_ADMIN_ROLES.has(role) ? "tenant_admin" : "user");
 
 const buildUserPayload = (user) => ({
   id: user._id?.toString?.() || user.id,
   email: user.email,
-  role: user.role || "user",
+  role: normalizeRole(user.role),
   firstName: user.firstName,
   lastName: user.lastName,
 });
@@ -30,7 +31,7 @@ exports.createUser = async (req, res) => {
     return res.status(400).json({ error: "Email and password are required" });
   }
 
-  const isTenantAdmin = req.user?.role === "tenant_admin";
+  const isTenantAdmin = TENANT_ADMIN_ROLES.has(req.user?.role);
   const role = requestedRole;
 
   if (!isTenantAdmin) {
@@ -107,10 +108,11 @@ exports.loginUser = async (req, res) => {
       return res.status(400).json({ error: "Invalid credentials" });
     }
 
+    const normalizedRole = normalizeRole(user.role);
     const payload = {
       id: user.id,
       email: user.email,
-      role: user.role || "user",
+      role: normalizedRole,
       aud: USER_TOKEN_AUDIENCE,
       tokenType: "tenant_user",
     };
@@ -119,6 +121,7 @@ exports.loginUser = async (req, res) => {
       return res.status(500).json({ error: "JWT secret is not configured" });
     }
 
+    user.role = normalizedRole;
     user.lastLoginAt = new Date();
     await user.save();
 
