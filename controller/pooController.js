@@ -49,6 +49,7 @@ const STRING_FIELDS = [
 
 const BOOLEAN_FIELDS = ["applySSPricing"];
 const BLANK_OPTION_VALUE = "__BLANK__";
+const KG_PER_TONNE = 1000;
 
 function normalizeStation(value) {
     return String(value || "").trim().toUpperCase();
@@ -89,6 +90,10 @@ function roundToOne(value) {
 
 function roundToWhole(value) {
     return Math.round(parseNumber(value));
+}
+
+function calculateCargoRevenue(cargoT, ratePerKg) {
+    return parseNumber(cargoT) * KG_PER_TONNE * parseNumber(ratePerKg);
 }
 
 function splitPaxValue(total) {
@@ -687,7 +692,7 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
     }
 
     next.legPaxRev = roundToTwo(parseNumber(next.pax) * parseNumber(next.legFare));
-    next.legCargoRev = roundToTwo(parseNumber(next.cargoT) * parseNumber(next.legRate));
+    next.legCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, next.legRate));
     next.legTotalRev = roundToTwo(next.legPaxRev + next.legCargoRev);
 
     const odFare = parseNumber(row.odFare) || (row.trafficType === TRAFFIC_TYPES.LEG ? parseNumber(next.legFare) : 0);
@@ -695,7 +700,7 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
     next.odFare = odFare;
     next.odRate = odRate;
     next.odPaxRev = roundToTwo(parseNumber(next.pax) * odFare);
-    next.odCargoRev = roundToTwo(parseNumber(next.cargoT) * odRate);
+    next.odCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, odRate));
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
     const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "USD";

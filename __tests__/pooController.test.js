@@ -698,10 +698,10 @@ test("keeps OD revenue local and uses leg revenue only for final RCCY when apply
     });
 
     assert.equal(row.odPaxRev, 90);
-    assert.equal(row.odCargoRev, 40);
-    assert.equal(row.odTotalRev, 130);
-    assert.equal(row.rccyLegTotalRev, 25);
-    assert.equal(row.fnlRccyTotalRev, 25);
+    assert.equal(row.odCargoRev, 40000);
+    assert.equal(row.odTotalRev, 40090);
+    assert.equal(row.rccyLegTotalRev, 10015);
+    assert.equal(row.fnlRccyTotalRev, 10015);
 });
 
 test("uses OD RCCY as final revenue when applySSPricing is disabled", () => {
@@ -720,8 +720,8 @@ test("uses OD RCCY as final revenue when applySSPricing is disabled", () => {
     });
 
     assert.equal(row.odPaxRev, 144000);
-    assert.equal(row.odCargoRev, 10);
-    assert.equal(row.fnlRccyTotalRev, 144010);
+    assert.equal(row.odCargoRev, 10000);
+    assert.equal(row.fnlRccyTotalRev, 154000);
 });
 
 test("direct leg revenue calculates leg, cargo, and final INR totals", () => {
@@ -741,10 +741,10 @@ test("direct leg revenue calculates leg, cargo, and final INR totals", () => {
     }, { reportingCurrency: "INR", fxRates: [] });
 
     assert.equal(row.legPaxRev, 144000);
-    assert.equal(row.legCargoRev, 10);
+    assert.equal(row.legCargoRev, 10000);
     assert.equal(row.fnlRccyPaxRev, 144000);
-    assert.equal(row.fnlRccyCargoRev, 10);
-    assert.equal(row.fnlRccyTotalRev, 144010);
+    assert.equal(row.fnlRccyCargoRev, 10000);
+    assert.equal(row.fnlRccyTotalRev, 154000);
 });
 
 test("direct leg revenue uses leg fare and rate when OD fare and rate are blank", () => {
@@ -769,8 +769,8 @@ test("direct leg revenue uses leg fare and rate when OD fare and rate are blank"
     assert.equal(row.odFare, 5000);
     assert.equal(row.odRate, 35000);
     assert.equal(row.fnlRccyPaxRev, 380000);
-    assert.equal(row.fnlRccyCargoRev, 14000);
-    assert.equal(row.fnlRccyTotalRev, 394000);
+    assert.equal(row.fnlRccyCargoRev, 14000000);
+    assert.equal(row.fnlRccyTotalRev, 14380000);
 });
 
 test("direct leg revenue accepts comma-formatted fare and rate values", () => {
@@ -791,8 +791,8 @@ test("direct leg revenue accepts comma-formatted fare and rate values", () => {
     });
 
     assert.equal(row.fnlRccyPaxRev, 500000);
-    assert.equal(row.fnlRccyCargoRev, 4000);
-    assert.equal(row.fnlRccyTotalRev, 504000);
+    assert.equal(row.fnlRccyCargoRev, 4000000);
+    assert.equal(row.fnlRccyTotalRev, 4500000);
 });
 
 test("reporting rows repair stale final revenue from saved OD inputs", () => {
@@ -821,8 +821,8 @@ test("reporting rows repair stale final revenue from saved OD inputs", () => {
     ], { reportingCurrency: "INR", fxRates: [] });
 
     assert.equal(row.fnlRccyPaxRev, 380000);
-    assert.equal(row.fnlRccyCargoRev, 14000);
-    assert.equal(row.fnlRccyTotalRev, 394000);
+    assert.equal(row.fnlRccyCargoRev, 14000000);
+    assert.equal(row.fnlRccyTotalRev, 14380000);
 });
 
 test("reporting rows recalculate stale non-zero final revenue with current FX config", () => {
@@ -855,8 +855,8 @@ test("reporting rows recalculate stale non-zero final revenue with current FX co
 
     assert.equal(row.pooCcyToRccy, 83);
     assert.equal(row.fnlRccyPaxRev, 31540000);
-    assert.equal(row.fnlRccyCargoRev, 1162000);
-    assert.equal(row.fnlRccyTotalRev, 32702000);
+    assert.equal(row.fnlRccyCargoRev, 1162000000);
+    assert.equal(row.fnlRccyTotalRev, 1193540000);
 });
 
 test("multiplies local OD revenue by FX into final reporting currency", () => {

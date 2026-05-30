@@ -9,8 +9,8 @@ Use this checklist after seeding representative Master, POO, and RevenueConfig d
 5. Traffic Class = Leg returns only `trafficType = leg`.
 6. Traffic Class = Transit returns only `trafficType` in `transit_fl/transit_sl`.
 7. Direct leg pax revenue: 48 pax x 3000 = 144000.
-8. Direct leg cargo revenue: 0.2 cargoT x 50 = 10.
-9. Direct leg final total revenue: 144000 + 10 = 144010.
+8. Direct leg cargo revenue: 0.2 cargoT x 1000 x 50 = 10,000.
+9. Direct leg final total revenue: 144000 + 10,000 = 154,000.
 10. Collapsed DEL-HYD edit updates both behind and beyond rows.
 11. USD/INR exact-date FX rate is used when present.
 12. USD/INR carry-forward rate is used when no exact date exists.
