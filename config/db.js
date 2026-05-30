@@ -5,7 +5,10 @@ const mongoose = require("mongoose");
 // const DB = "mongodb+srv://hhimanshu030:C00!buddy@cluster0.qondpde.mongodb.net/?retryWrites=true&w=majority";
 // const DB = "mongodb://https://airlineplan.com/airlines"
 
-const DB = process.env.MONGO_URI || "mongodb+srv://neeladrinathsarangi:kBhaZHXuGOIUgt9y@cluster0.n0cx0yj.mongodb.net/?retryWrites=true&w=majority";
+const DB = process.env.MONGO_URI;
+if (!DB) {
+  throw new Error("MONGO_URI is required");
+}
 
 // Client - Neelandri link
 // const DB = "mongodb+srv://neeladrinathsarangi:kBhaZHXuGOIUgt9y@cluster0.n0cx0yj.mongodb.net/?retryWrites=true&w=majority"

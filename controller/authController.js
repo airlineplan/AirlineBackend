@@ -23,6 +23,7 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const { signAdminToken, verifyAdminCredentials } = require("../utils/adminAuth");
 
 const createConnections = require('../helper/createConnections');
 
@@ -65,15 +66,14 @@ const {
   isValidDepStn
 } = require('./controllerUtils');
 
-const AdminLogin = (req, res) => {
-  const { email, password } = req.body;
-
-  if (email === "admin@airline.com" && password === "12345") {
-    const token = jwt.sign({ email }, secretKey, { expiresIn: "1h" });
-    return res.status(200).json({ token, message: "Login Successful" });
-  } else {
-    console.error("Invalid credentials:", email, password);
-    res.status(401).json({ error: "Invalid credentials" });
+const AdminLogin = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const ok = await verifyAdminCredentials({ email, password });
+    if (!ok) return res.status(401).json({ error: "Invalid admin credentials" });
+    return res.status(200).json({ token: signAdminToken(email), message: "Login Successful" });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ error: error.message || "Admin login failed" });
   }
 };
 

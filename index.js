@@ -2,6 +2,7 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const userRoutes = require("./routes/userRoutes");
+const adminRoutes = require("./routes/adminRoutes");
 const exceljs = require("exceljs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -39,7 +40,15 @@ mongoose.connection.once("open", async () => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    tenant: process.env.TENANT_DOMAIN || null,
+  });
+});
+
 app.use("/", userRoutes);
+app.use("/admin", adminRoutes);
 
 // app.use(express.static("dist"));
 

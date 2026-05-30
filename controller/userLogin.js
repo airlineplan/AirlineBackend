@@ -170,8 +170,8 @@ const sendEmail = async (email, otp) => {
     const transporter = nodemailer.createTransport({
       service: 'Gmail', // Change this to your email service provider
       auth: {
-        user: 'admin@airlineplan.com', // Replace with your email address
-        pass: 'pfns kyja srcb rxwj', // Replace with your email password
+        user: process.env.EMAIL_USER || 'admin@airlineplan.com',
+        pass: process.env.EMAIL_PASS,
       },
     });
 
@@ -197,8 +197,8 @@ exports.sendContactEmail = async (req, res) => {
     const transporter = nodemailer.createTransport({
       service: 'Gmail', // Change this to your email service provider
       auth: {
-        user: 'admin@airlineplan.com', // Replace with your email address
-        pass: 'pfns kyja srcb rxwj', // Replace with your email password
+        user: process.env.EMAIL_USER || 'admin@airlineplan.com',
+        pass: process.env.EMAIL_PASS,
       },
     });
 
