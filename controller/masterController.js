@@ -111,7 +111,7 @@ const getMasterWeeks = async (req, res) => {
     ]);
 
     if (!result.length || !result[0].minDate || !result[0].maxDate) {
-      return res.json({ weeks: [] });
+      return res.json({ weeks: [], minDate: "", maxDate: "" });
     }
 
     const { minDate, maxDate } = result[0];
@@ -137,7 +137,11 @@ const getMasterWeeks = async (req, res) => {
       current.add(7, 'days');
     }
 
-    return res.json({ weeks });
+    return res.json({
+      weeks,
+      minDate: moment.utc(minDate).format('YYYY-MM-DD'),
+      maxDate: moment.utc(maxDate).format('YYYY-MM-DD')
+    });
 
   } catch (error) {
     console.error("Error fetching master weeks:", error);
