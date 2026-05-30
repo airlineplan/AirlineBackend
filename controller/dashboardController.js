@@ -309,7 +309,10 @@ const populateDashboardDropDowns = async (req, res) => {
     const rawStopValues = distinctPooValues?.[0]?.stops ?? [];
     const stopOptions = normalizeDropdownValueList(
       rawStopValues
-        .filter((value) => value !== null && value !== undefined && String(value).trim() !== "")
+        .filter((value) => {
+          const normalized = String(value ?? "").trim();
+          return normalized !== "" && Number(normalized) !== 0;
+        })
         .map((value) => String(value))
     ).map((value) => ({
       value,

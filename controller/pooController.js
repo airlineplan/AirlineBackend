@@ -3054,6 +3054,7 @@ exports.getRevenueData = async (req, res) => {
             andClauses.push({
                 $or: [
                     { stops: { $in: normalizedStops } },
+                    { stops: 0 },
                     { stops: null },
                     { stops: { $exists: false } },
                     { stops: "" },
@@ -3062,6 +3063,7 @@ exports.getRevenueData = async (req, res) => {
         } else if (requestedBlankStop) {
             andClauses.push({
                 $or: [
+                    { stops: 0 },
                     { stops: null },
                     { stops: { $exists: false } },
                     { stops: "" },
