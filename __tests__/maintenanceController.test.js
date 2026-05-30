@@ -379,10 +379,10 @@ test("maintenance target deltas include aircraft and on-wing utilisation through
   assert.equal(computeRes.statusCode, 200);
   assert.equal(forecast?.tsn, 3017);
   assert.equal(forecast?.csn, 1507);
-  assert.equal(forecast?.dsn, 307);
+  assert.equal(forecast?.dsn, 321);
   assert.equal(forecast?.tsRplmt, 2767);
   assert.equal(forecast?.csRplmt, 1407);
-  assert.equal(forecast?.dsRplmt, 282);
+  assert.equal(forecast?.dsRplmt, 296);
 
   const targetReq = { user: { id: USER_ID }, query: { date: "2026-05-10", msnEsn: "635799" } };
   const targetRes = createMockResponse();
@@ -391,10 +391,10 @@ test("maintenance target deltas include aircraft and on-wing utilisation through
   assert.equal(targetRes.statusCode, 200);
   assert.equal(targetRes.body.data[0].fTsn, 83);
   assert.equal(targetRes.body.data[0].fCsn, 93);
-  assert.equal(targetRes.body.data[0].fDsn, 43);
+  assert.equal(targetRes.body.data[0].fDsn, 29);
   assert.equal(targetRes.body.data[0].fTsr, 33);
   assert.equal(targetRes.body.data[0].fCsr, 43);
-  assert.equal(targetRes.body.data[0].fDsr, 51);
+  assert.equal(targetRes.body.data[0].fDsr, 37);
 });
 
 test("maintenance compute uses utilisation assumptions only when assignments are absent", async () => {
@@ -746,7 +746,7 @@ test("saving reset status on a new date replaces the prior anchor and recomputes
   assert.equal(afterReset?.dsn, 1001);
 });
 
-test("maintenance compute freezes default utilisation counters outside assumption dates", async () => {
+test("maintenance compute advances day counters outside assumption dates", async () => {
   const days = Array.from({ length: 15 }, (_, index) => utcDate(2026, 5, 7 + index));
   const resetDate = days[0];
   const idleDate = utcDate(2026, 5, 10);
@@ -817,16 +817,16 @@ test("maintenance compute freezes default utilisation counters outside assumptio
   assert.equal(res.statusCode, 200);
   assert.equal(idleUtil?.tsn, 150);
   assert.equal(idleUtil?.csn, 150);
-  assert.equal(idleUtil?.dsn, 150);
-  assert.equal(idleUtil?.dsoDsr, 100);
+  assert.equal(idleUtil?.dsn, 153);
+  assert.equal(idleUtil?.dsoDsr, 103);
   assert.equal(penultimateUtil?.tsn, 195);
   assert.equal(penultimateUtil?.csn, 170);
-  assert.equal(penultimateUtil?.dsn, 160);
-  assert.equal(penultimateUtil?.dsoDsr, 110);
+  assert.equal(penultimateUtil?.dsn, 163);
+  assert.equal(penultimateUtil?.dsoDsr, 113);
   assert.equal(endUtil?.tsn, 199.5);
   assert.equal(endUtil?.csn, 172);
-  assert.equal(endUtil?.dsn, 161);
-  assert.equal(endUtil?.dsoDsr, 111);
+  assert.equal(endUtil?.dsn, 164);
+  assert.equal(endUtil?.dsoDsr, 114);
 });
 
 test("deleting the only reset setting removes all computed maintenance status for that part", async () => {
@@ -1370,7 +1370,7 @@ test("maintenance compute uses network effective dates when dated flights are no
   assert.match(computeRes.body.message, /Maintenance logic computed/i);
   assert.equal(viewDayUtil?.tsn, 2000);
   assert.equal(viewDayUtil?.csn, 1001);
-  assert.equal(viewDayUtil?.dsn, 201);
+  assert.equal(viewDayUtil?.dsn, 191);
 
   const dashboardRes = createMockResponse();
   await maintenanceController.getMaintenanceDashboard({
@@ -1381,7 +1381,7 @@ test("maintenance compute uses network effective dates when dated flights are no
   assert.equal(dashboardRes.statusCode, 200);
   assert.equal(dashboardRes.body.data.maintenanceData.length, 1);
   assert.equal(dashboardRes.body.data.maintenanceData[0].msnEsn, "5340");
-  assert.equal(dashboardRes.body.data.maintenanceData[0].dsn, 201);
+  assert.equal(dashboardRes.body.data.maintenanceData[0].dsn, 191);
 });
 
 test("maintenance forward fill stops at a later reset and resumes from that reset", async () => {
@@ -1939,7 +1939,7 @@ test("maintenance dashboard shows backfilled status before the reset date", asyn
   assert.equal(res.body.data.maintenanceData[0].asOnDate, "2026-04-10");
   assert.equal(res.body.data.maintenanceData[0].savedResetDate, "2026-04-20");
   assert.equal(res.body.data.maintenanceData[0].tsn, 2000);
-  assert.equal(res.body.data.maintenanceData[0].dsn, 201);
+  assert.equal(res.body.data.maintenanceData[0].dsn, 191);
 });
 
 test("maintenance dashboard can seed a pre-reset row from a future reset inside the planning window", async () => {

@@ -421,14 +421,14 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         date: backfillCursor
                     });
 
-                    const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
+                    const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
                         userId,
                         effectiveMsn: backfillUtilizationContext.effectiveMsn || msnEsn,
                         date: backfillCursor,
                         metric: currentReset.timeMetric,
                         assumptions: utilisationAssumptions
                     });
-                    const dayUsage = hasUsage ? 1 : 0;
+                    const dayUsage = 1;
 
                     if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
                     if (currentCsn !== null) currentCsn -= cycleUsage;
@@ -554,14 +554,14 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     continue;
                 }
 
-                const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
+                const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
                     userId,
                     effectiveMsn: currentEffectiveMsn,
                     date: currDate,
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
                 });
-                const dayUsage = hasUsage ? 1 : 0;
+                const dayUsage = 1;
 
                 const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
                 const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
@@ -827,14 +827,14 @@ const buildMaintenanceStatusFromReset = async ({ userId, reset, selectedDate, as
             msnEsn: reset.msnEsn,
             date
         });
-        const { timeUsage, cycleUsage, hasUsage } = await getEffectiveUsageForDate({
+        const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
             userId,
             effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
             date,
             metric: reset.timeMetric,
             assumptions
         });
-        const dayUsage = hasUsage ? 1 : 0;
+        const dayUsage = 1;
 
         if (currentTsn !== null) currentTsn = Number((currentTsn + (direction * timeUsage)).toFixed(2));
         if (currentCsn !== null) currentCsn += direction * cycleUsage;
