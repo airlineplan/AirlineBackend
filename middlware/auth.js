@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
 const User = require("../model/userSchema");
+const { getEffectivePageAccess } = require("../config/pageAccess");
 
 const USER_TOKEN_AUDIENCE = "airlineplan-tenant";
 const TENANT_ADMIN_ROLES = new Set(["tenant_admin", "admin"]);
@@ -20,7 +21,7 @@ const attachUserFromToken = async (req, token) => {
     throw error;
   }
 
-  const user = await User.findById(decoded.id).select("_id email role isActive firstName lastName").lean();
+  const user = await User.findById(decoded.id).select("_id email role isActive firstName lastName pageAccess pageAccessConfigured").lean();
   if (!user || user.isActive === false) {
     const error = new Error("User is inactive or no longer exists");
     error.statusCode = 401;
@@ -33,6 +34,8 @@ const attachUserFromToken = async (req, token) => {
     role: user.role,
     firstName: user.firstName,
     lastName: user.lastName,
+    pageAccess: getEffectivePageAccess(user),
+    pageAccessConfigured: user.pageAccessConfigured === true,
   };
   return req.user;
 };

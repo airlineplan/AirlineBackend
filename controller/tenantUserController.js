@@ -2,6 +2,11 @@ const bcrypt = require("bcryptjs");
 const User = require("../model/userSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
 const CostConfig = require("../model/costConfigSchema");
+const {
+  ASSIGNABLE_PAGE_FEATURES,
+  getEffectivePageAccess,
+  normalizePageAccessInput,
+} = require("../config/pageAccess");
 
 const MANAGED_ROLES = new Set(["tenant_admin", "user"]);
 
@@ -37,6 +42,8 @@ const serializeUser = (user) => ({
   updatedAt: user.updatedAt,
   lastLoginAt: user.lastLoginAt,
   createdBy: user.createdBy,
+  pageAccess: getEffectivePageAccess(user),
+  pageAccessConfigured: user.pageAccessConfigured === true,
 });
 
 const ensureAnotherActiveTenantAdmin = async (userId) => {
@@ -74,7 +81,7 @@ const seedUserDefaults = async (userId) => Promise.all([
   ),
 ]);
 
-const createUserRecord = async ({ firstName, lastName, email, password, role, createdBy = null }) => {
+const createUserRecord = async ({ firstName, lastName, email, password, role, pageAccess, createdBy = null }) => {
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail || !password) {
     const error = new Error("Email and password are required");
@@ -101,6 +108,8 @@ const createUserRecord = async ({ firstName, lastName, email, password, role, cr
     email: normalizedEmail,
     password: await bcrypt.hash(password, salt),
     role,
+    pageAccess: normalizePageAccessInput(pageAccess),
+    pageAccessConfigured: true,
     createdBy,
   });
 
@@ -137,12 +146,15 @@ const listTenantUsers = async (_req, res) => {
     .sort({ role: 1, createdAt: -1 })
     .lean();
 
-  return res.status(200).json({ users: users.map(serializeUser) });
+  return res.status(200).json({
+    users: users.map(serializeUser),
+    pageAccessFeatures: ASSIGNABLE_PAGE_FEATURES,
+  });
 };
 
 const createTenantUser = async (req, res) => {
   try {
-    const { firstName, lastName, email, password } = req.body || {};
+    const { firstName, lastName, email, password, pageAccess } = req.body || {};
     const role = MANAGED_ROLES.has(req.body?.role) ? req.body.role : "user";
     const user = await createUserRecord({
       firstName,
@@ -150,6 +162,7 @@ const createTenantUser = async (req, res) => {
       email,
       password,
       role,
+      pageAccess,
       createdBy: req.user.id,
     });
 
@@ -157,6 +170,23 @@ const createTenantUser = async (req, res) => {
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: "User already exists" });
     return res.status(error.statusCode || 500).json({ error: error.message || "User could not be created" });
+  }
+};
+
+const updateTenantUserPageAccess = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pageAccess = normalizePageAccessInput(req.body?.pageAccess);
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    user.pageAccess = pageAccess;
+    user.pageAccessConfigured = true;
+    await user.save();
+
+    return res.status(200).json({ user: serializeUser(user) });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ error: error.message || "Could not update page access" });
   }
 };
 
@@ -223,6 +253,7 @@ module.exports = {
   getBootstrapToken,
   listTenantUsers,
   setTenantUserActive,
+  updateTenantUserPageAccess,
   updateTenantUserRole,
   verifyBootstrapToken,
 };

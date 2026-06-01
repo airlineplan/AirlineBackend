@@ -7,7 +7,12 @@ const Tenant = require("../model/tenantSchema");
 const User = require("../model/userSchema");
 const { requireTenantAdmin } = require("../middlware/auth");
 const { scopedUserQuery } = require("../controller/accessScope");
-const { isFeatureAllowedForTenantAdmin, requireTenantFeatureAccess } = require("../middlware/tenantFeatureAccess");
+const { isFeatureAllowedForTenantAdmin, requireFeatureAccess, requireTenantFeatureAccess } = require("../middlware/tenantFeatureAccess");
+const {
+  createDefaultPageAccess,
+  getEffectivePageAccess,
+  normalizePageAccessInput,
+} = require("../config/pageAccess");
 const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
@@ -105,6 +110,43 @@ test("tenant users have scoped roles and active access state", () => {
   assert.match(user.validateSync().message, /`super_admin` is not a valid enum value/);
 });
 
+test("tenant users validate page access maps", () => {
+  const user = new User({
+    email: "planner@star.example",
+    password: "hashed-password",
+    pageAccess: {
+      network: "edit",
+      stations: "read",
+      sectors: "none",
+    },
+  });
+
+  assert.equal(user.validateSync(), undefined);
+
+  user.pageAccess.set("network", "manage");
+  assert.match(user.validateSync().message, /`manage` is not a valid enum value/);
+
+  user.pageAccess.set("network", "edit");
+  user.pageAccess.set("unknown", "read");
+  assert.match(user.validateSync().message, /Invalid page access feature/);
+});
+
+test("page access defaults preserve legacy users and lock down new defaults", () => {
+  const legacyUser = new User({
+    email: "legacy@star.example",
+    password: "hashed-password",
+  });
+
+  assert.equal(getEffectivePageAccess(legacyUser).network, "edit");
+  assert.equal(getEffectivePageAccess({ pageAccess: {} }).network, "edit");
+  assert.equal(getEffectivePageAccess({ pageAccess: createDefaultPageAccess() }).network, "edit");
+  assert.equal(getEffectivePageAccess({ pageAccess: createDefaultPageAccess(), pageAccessConfigured: true }).network, "none");
+  assert.equal(normalizePageAccessInput({ network: "read" }).network, "read");
+  assert.equal(normalizePageAccessInput({ network: "read" }).stations, "none");
+  assert.throws(() => normalizePageAccessInput({ network: "delete" }), /Invalid access level/);
+  assert.throws(() => normalizePageAccessInput({ unknown: "read" }), /Unknown page access feature/);
+});
+
 test("tenant admin guard accepts current and legacy admin roles", () => {
   const createResponse = () => ({
     statusCode: 200,
@@ -195,6 +237,58 @@ test("tenant admin feature access is driven by config flags", () => {
 
   assert.equal(allowedNextCalled, true);
   assert.equal(allowed.statusCode, 200);
+});
+
+test("regular user page access enforces read and edit levels", () => {
+  const createResponse = () => ({
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  });
+
+  const readAllowed = createResponse();
+  let readNextCalled = false;
+  requireFeatureAccess("network", "read")(
+    { user: { role: "user", pageAccess: { ...createDefaultPageAccess(), network: "read" } } },
+    readAllowed,
+    () => {
+      readNextCalled = true;
+    }
+  );
+  assert.equal(readNextCalled, true);
+  assert.equal(readAllowed.statusCode, 200);
+
+  const editBlocked = createResponse();
+  let editNextCalled = false;
+  requireFeatureAccess("network", "edit")(
+    { user: { role: "user", pageAccess: { ...createDefaultPageAccess(), network: "read" } } },
+    editBlocked,
+    () => {
+      editNextCalled = true;
+    }
+  );
+  assert.equal(editNextCalled, false);
+  assert.equal(editBlocked.statusCode, 403);
+  assert.match(editBlocked.body.error, /read-only access/);
+
+  const noAccess = createResponse();
+  let noAccessNextCalled = false;
+  requireFeatureAccess("stations", "read")(
+    { user: { role: "user", pageAccess: createDefaultPageAccess(), pageAccessConfigured: true } },
+    noAccess,
+    () => {
+      noAccessNextCalled = true;
+    }
+  );
+  assert.equal(noAccessNextCalled, false);
+  assert.equal(noAccess.statusCode, 403);
 });
 
 test("tenant admin bootstrap requires the provisioning secret", () => {

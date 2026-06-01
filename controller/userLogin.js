@@ -8,6 +8,7 @@ const bcrypt = require("bcryptjs");
 const config = require("../config/config");
 const Otp = require("../model/otp");
 const { TENANT_ADMIN_ROLES, USER_TOKEN_AUDIENCE } = require("../middlware/auth");
+const { getEffectivePageAccess, normalizePageAccessInput } = require("../config/pageAccess");
 
 const MANAGED_ROLES = new Set(["tenant_admin", "user"]);
 
@@ -20,6 +21,8 @@ const buildUserPayload = (user) => ({
   role: normalizeRole(user.role),
   firstName: user.firstName,
   lastName: user.lastName,
+  pageAccess: getEffectivePageAccess(user),
+  pageAccessConfigured: user.pageAccessConfigured === true,
 });
 
 exports.createUser = async (req, res) => {
@@ -45,6 +48,12 @@ exports.createUser = async (req, res) => {
   }
   const salt = await bcrypt.genSalt(10);
   const hashedPassword = await bcrypt.hash(password, salt);
+  let pageAccess;
+  try {
+    pageAccess = normalizePageAccessInput(req.body?.pageAccess);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
 
   const user = new User({
     firstName,
@@ -52,6 +61,8 @@ exports.createUser = async (req, res) => {
     email,
     password: hashedPassword,
     role,
+    pageAccess,
+    pageAccessConfigured: true,
     createdBy: req.user?.id || null,
   });
 

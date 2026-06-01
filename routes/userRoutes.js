@@ -4,7 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const verifyToken = require("../middlware/auth.js");
 const { requireTenantAdmin } = require("../middlware/auth.js");
-const { requireTenantFeatureAccess, getTenantAdminFeatures } = require("../middlware/tenantFeatureAccess");
+const { requireFeatureAccess, getTenantAdminFeatures } = require("../middlware/tenantFeatureAccess");
 const userLogin = require("../controller/userLogin");
 var bodyParser = require("body-parser");
 const { verify } = require("crypto");
@@ -39,31 +39,31 @@ const tenantUserController = require("../controller/tenantUserController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
-const featureAccess = (featureId) => [verifyToken, requireTenantFeatureAccess(featureId)];
+const featureAccess = (featureId, requiredAccess = "read") => [verifyToken, requireFeatureAccess(featureId, requiredAccess)];
 
 user.post(
   "/importUser",
-  ...featureAccess("network"),
+  ...featureAccess("network", "edit"),
   upload.single("file"),
   importUser
 );
-user.post("/add-Data", jsonParser, ...featureAccess("network"), dataController.AddData);
+user.post("/add-Data", jsonParser, ...featureAccess("network", "edit"), dataController.AddData);
 user.get("/get-data", ...featureAccess("network"), dataController.getData);
 user.get("/downloadFLGTs", ...featureAccess("flgts"), dataController.downloadExpenses);
 user.get("/products/:id", ...featureAccess("network"), dataController.singleData);
-user.delete("/delete", jsonParser, ...featureAccess("network"), dataController.deleteFlightsAndUpdateSectors);
-user.delete("/delete-sector/:ids", ...featureAccess("sectors"), sectorController.deleteSectors);
+user.delete("/delete", jsonParser, ...featureAccess("network", "edit"), dataController.deleteFlightsAndUpdateSectors);
+user.delete("/delete-sector/:ids", ...featureAccess("sectors", "edit"), sectorController.deleteSectors);
 user.put(
   "/update-data/:id",
   jsonParser,
-  ...featureAccess("network"),
+  ...featureAccess("network", "edit"),
   dataController.updateData
 );
 user.get("/sectors", ...featureAccess("sectors"), sectorController.getSecors);
-user.post("/add-sector", jsonParser, ...featureAccess("sectors"), sectorController.AddSectors);
+user.post("/add-sector", jsonParser, ...featureAccess("sectors", "edit"), sectorController.AddSectors);
 user.put(
   "/update-sectore/:id",
-  ...featureAccess("sectors"),
+  ...featureAccess("sectors", "edit"),
   jsonParser,
   sectorController.updateSector
 );
@@ -81,6 +81,7 @@ user.get("/tenant/users", verifyToken, requireTenantAdmin, tenantUserController.
 user.post("/tenant/users", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.createTenantUser);
 user.patch("/tenant/users/:id/role", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.updateTenantUserRole);
 user.patch("/tenant/users/:id/access", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.setTenantUserActive);
+user.patch("/tenant/users/:id/page-access", verifyToken, requireTenantAdmin, jsonParser, tenantUserController.updateTenantUserPageAccess);
 user.delete("/tenant/users/:id", verifyToken, requireTenantAdmin, tenantUserController.deleteTenantUser);
 user.get("/tenant-admin/features", verifyToken, requireTenantAdmin, (req, res) => {
   return res.status(200).json({ features: getTenantAdminFeatures() });
@@ -91,43 +92,43 @@ user.post("/change-passowrd", jsonParser, userLogin.changePassword);
 user.get("/flight", ...featureAccess("flgts"), flightController.getFlights);
 user.post("/searchflights", ...featureAccess("flgts"), flightController.searchFlights);
 user.post("/flightsWoRotations", ...featureAccess("rotations"), jsonParser, flightController.getFlightsWoRotations);
-user.get("/listVariants", ...featureAccess("flgts"), masterController.getVariants);
+user.get("/listVariants", ...featureAccess(["flgts", "rotations"]), masterController.getVariants);
 user.get("/listRotations", ...featureAccess("rotations"), rotationController.getRotations);
 user.get("/dashboard", ...featureAccess("dashboard"), dashboardController.getDashboardData);
 
 // 🔥 USE THE IMPORTED HELPER DIRECTLY FOR THIS ROUTE
-user.get("/createConnections", ...featureAccess("connections"), createConnections);
+user.get("/createConnections", ...featureAccess(["connections", "view", "dashboard"], "edit"), createConnections);
 user.get("/getConnections", ...featureAccess("connections"), dataController.getConnections);
-user.get("/dashboard/populateDropDowns", ...featureAccess("dashboard"), dashboardController.populateDashboardDropDowns);
-user.get("/get-stationData", ...featureAccess("stations"), stationController.getStationsTableData);
-user.get("/getNextRotationNumber", ...featureAccess("rotations"), rotationController.getNextRotationNumber);
+user.get("/dashboard/populateDropDowns", ...featureAccess(["dashboard", "cost", "revenue", "network"]), dashboardController.populateDashboardDropDowns);
+user.get("/get-stationData", ...featureAccess(["stations", "network", "sectors", "poo"]), stationController.getStationsTableData);
+user.get("/getNextRotationNumber", ...featureAccess("rotations", "edit"), rotationController.getNextRotationNumber);
 user.get("/rotationbyid/:id", ...featureAccess("rotations"), rotationController.singleRotationDetail);
-user.post("/updateRotationSummary", ...featureAccess("rotations"), jsonParser, rotationController.updateRotationSummary);
-user.post("/addRotationDetailsFlgtChange", ...featureAccess("rotations"), jsonParser, rotationController.addRotationDetailsFlgtChange);
-user.post("/saveStation", ...featureAccess("stations"), jsonParser, stationController.saveStation);
-user.post("/deleteCompleteRotation/", ...featureAccess("rotations"), jsonParser, rotationController.deleteCompleteRotation);
-user.post("/deletePrevInRotation/", ...featureAccess("rotations"), jsonParser, rotationController.deletePrevInRotation);
+user.post("/updateRotationSummary", ...featureAccess("rotations", "edit"), jsonParser, rotationController.updateRotationSummary);
+user.post("/addRotationDetailsFlgtChange", ...featureAccess("rotations", "edit"), jsonParser, rotationController.addRotationDetailsFlgtChange);
+user.post("/saveStation", ...featureAccess("stations", "edit"), jsonParser, stationController.saveStation);
+user.post("/deleteCompleteRotation/", ...featureAccess("rotations", "edit"), jsonParser, rotationController.deleteCompleteRotation);
+user.post("/deletePrevInRotation/", ...featureAccess("rotations", "edit"), jsonParser, rotationController.deletePrevInRotation);
 user.post("/list-page-data", ...featureAccess("list"), dataController.getListPageData);
 user.get("/view-page-data", ...featureAccess("view"), dataController.getViewData);
-user.get("/master-weeks", ...featureAccess("view"), masterController.getMasterWeeks);
+user.get("/master-weeks", ...featureAccess(["view", "assignment", "revenue", "cost"]), masterController.getMasterWeeks);
 
 // --- COST ENDPOINTS ---
 user.get("/cost-config", ...featureAccess("cost"), costController.getCostConfig);
-user.post("/cost-config", ...featureAccess("cost"), jsonParser, costController.saveCostConfig);
+user.post("/cost-config", ...featureAccess("cost", "edit"), jsonParser, costController.saveCostConfig);
 user.post("/cost-config/maintenance-reserve-schedule/generate", ...featureAccess("cost"), jsonParser, costController.generateMaintenanceReserveSchedulePreview);
 user.post("/cost-page-data", ...featureAccess("cost"), jsonParser, costController.getCostPageData);
-user.post("/cost-page-data/recalculate-and-save", ...featureAccess("cost"), jsonParser, costController.recalculateAndSaveCostPageData);
+user.post("/cost-page-data/recalculate-and-save", ...featureAccess("cost", "edit"), jsonParser, costController.recalculateAndSaveCostPageData);
 
 user.get("/apu-fuel-costs", ...featureAccess("cost"), apuFuelController.getApuFuelCosts);
-user.post("/apu-fuel-costs", ...featureAccess("cost"), jsonParser, apuFuelController.bulkSaveApuFuelCosts);
-user.post("/apu-fuel-costs/rebuild", ...featureAccess("cost"), jsonParser, apuFuelController.rebuildApuFuelCosts);
+user.post("/apu-fuel-costs", ...featureAccess("cost", "edit"), jsonParser, apuFuelController.bulkSaveApuFuelCosts);
+user.post("/apu-fuel-costs/rebuild", ...featureAccess("cost", "edit"), jsonParser, apuFuelController.rebuildApuFuelCosts);
 
 // Add this alongside your existing routes
 user.get("/maintenance-dashboard", ...featureAccess("maintenance"), maintenanceController.getMaintenanceDashboard);
 
 user.post(
   "/uploadAssignments",
-  ...featureAccess("assignment"),
+  ...featureAccess("assignment", "edit"),
   upload.single("file"),
   assignmentController.uploadAssignments
 );
@@ -147,7 +148,7 @@ user.get(
 // Bulk save/update the fleet table
 user.post(
   "/fleet/bulk-save",
-  ...featureAccess("fleet"),
+  ...featureAccess("fleet", "edit"),
   jsonParser, // Parses the incoming JSON body from React
   fleetController.bulkUpsertFleet
 );
@@ -155,7 +156,7 @@ user.post(
 // Delete a single asset row
 user.delete(
   "/fleet/:id",
-  ...featureAccess("fleet"),
+  ...featureAccess("fleet", "edit"),
   fleetController.deleteFleetAsset
 );
 
@@ -188,21 +189,21 @@ user.get(
 // 3. Save/Update records from the Modal
 user.post(
   "/maintenance/reset-records",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.bulkSaveResetRecords
 );
 
 user.delete(
   "/maintenance/reset-records/:id",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   maintenanceController.deleteResetRecord
 );
 
 // 4. Trigger Compute Button
 user.post(
   "/maintenance/compute",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.computeMaintenanceLogic
 );
@@ -217,14 +218,14 @@ user.get(
 // 6. Bulk Save/Update Rotable Movements
 user.post(
   "/maintenance/rotables",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.bulkSaveRotables
 );
 
 user.delete(
   "/maintenance/rotables/:id",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   maintenanceController.deleteRotable
 );
 
@@ -238,14 +239,14 @@ user.get(
 // 8. Bulk Save Target Maintenance Status
 user.post(
   "/maintenance/targets",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.bulkSaveTargets
 );
 
 user.delete(
   "/maintenance/targets/:id",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   maintenanceController.deleteTarget
 );
 
@@ -259,14 +260,14 @@ user.get(
 // 10. Bulk Save Utilisation Assumptions
 user.post(
   "/maintenance/utilisation-assumptions",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.bulkSaveUtilisationAssumptions
 );
 
 user.delete(
   "/maintenance/utilisation-assumptions/:id",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   maintenanceController.deleteUtilisationAssumption
 );
 
@@ -280,14 +281,14 @@ user.get(
 // 12. Bulk Save Calendar Inputs
 user.post(
   "/maintenance/calendar",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   jsonParser,
   maintenanceController.bulkSaveCalendar
 );
 
 user.delete(
   "/maintenance/calendar/:id",
-  ...featureAccess("maintenance"),
+  ...featureAccess("maintenance", "edit"),
   maintenanceController.deleteCalendar
 );
 
@@ -295,18 +296,18 @@ user.delete(
 const pooController = require("../controller/pooController");
 
 user.get("/poo", ...featureAccess("poo"), pooController.getPooData);
-user.post("/poo/populate", ...featureAccess("poo"), jsonParser, pooController.populatePoo);
-user.post("/poo/update", ...featureAccess("poo"), jsonParser, pooController.updatePooRecords);
-user.post("/poo/transit", ...featureAccess("poo"), jsonParser, pooController.upsertTransit);
-user.delete("/poo/transit/:odGroupKey", ...featureAccess("poo"), pooController.deleteTransit);
-user.delete("/poo", ...featureAccess("poo"), jsonParser, pooController.deletePooRecords);
+user.post("/poo/populate", ...featureAccess("poo", "edit"), jsonParser, pooController.populatePoo);
+user.post("/poo/update", ...featureAccess("poo", "edit"), jsonParser, pooController.updatePooRecords);
+user.post("/poo/transit", ...featureAccess("poo", "edit"), jsonParser, pooController.upsertTransit);
+user.delete("/poo/transit/:odGroupKey", ...featureAccess("poo", "edit"), pooController.deleteTransit);
+user.delete("/poo", ...featureAccess("poo", "edit"), jsonParser, pooController.deletePooRecords);
 user.get("/revenue/config", ...featureAccess("revenue"), pooController.getRevenueConfig);
-user.post("/revenue/config", ...featureAccess("revenue"), jsonParser, pooController.saveRevenueConfig);
+user.post("/revenue/config", ...featureAccess("revenue", "edit"), jsonParser, pooController.saveRevenueConfig);
 user.get("/revenue-config", ...featureAccess("revenue"), pooController.getRevenueConfig);
-user.post("/revenue-config", ...featureAccess("revenue"), jsonParser, pooController.saveRevenueConfig);
-user.post("/revenue-config/reporting-currency", ...featureAccess("revenue"), jsonParser, pooController.saveReportingCurrency);
-user.post("/revenue-config/fx-rates", ...featureAccess("revenue"), jsonParser, pooController.saveFxRates);
+user.post("/revenue-config", ...featureAccess("revenue", "edit"), jsonParser, pooController.saveRevenueConfig);
+user.post("/revenue-config/reporting-currency", ...featureAccess(["revenue", "dashboard"], "edit"), jsonParser, pooController.saveReportingCurrency);
+user.post("/revenue-config/fx-rates", ...featureAccess(["revenue", "dashboard"], "edit"), jsonParser, pooController.saveFxRates);
 user.get("/revenue", ...featureAccess("revenue"), pooController.getRevenueData);
-user.post("/revenue/backfill-master-fields-to-poo", ...featureAccess("revenue"), jsonParser, pooController.backfillMasterFieldsToPoo);
+user.post("/revenue/backfill-master-fields-to-poo", ...featureAccess("revenue", "edit"), jsonParser, pooController.backfillMasterFieldsToPoo);
 
 module.exports = user;

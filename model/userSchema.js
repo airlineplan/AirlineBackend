@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { ASSIGNABLE_PAGE_IDS, PAGE_ACCESS_LEVELS } = require("../config/pageAccess");
 
 const userSchema = new mongoose.Schema({
   firstName: {
@@ -29,6 +30,18 @@ const userSchema = new mongoose.Schema({
     default: true,
     index: true,
   },
+  pageAccess: {
+    type: Map,
+    of: {
+      type: String,
+      enum: PAGE_ACCESS_LEVELS,
+    },
+    default: undefined,
+  },
+  pageAccessConfigured: {
+    type: Boolean,
+    default: false,
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
@@ -46,6 +59,12 @@ const userSchema = new mongoose.Schema({
     default: false
   }
 }, { timestamps: true });
+
+userSchema.path("pageAccess").validate(function validatePageAccessFeatures(pageAccess) {
+  if (pageAccess === undefined || pageAccess === null) return true;
+  const keys = pageAccess instanceof Map ? [...pageAccess.keys()] : Object.keys(pageAccess);
+  return keys.every((key) => ASSIGNABLE_PAGE_IDS.has(key));
+}, "Invalid page access feature");
 
 userSchema.index({ email: 1 }, { unique: true });
 
