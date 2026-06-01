@@ -22,6 +22,12 @@ const maintenanceCalendarSchema = new Schema({
     lastOccurre: { type: Date },
     nextEstima: { type: Date },
     occurrence: { type: Number, default: 0 },
+    postTso: { type: Number },
+    postCso: { type: Number },
+    postDso: { type: Number },
+    postTsr: { type: Number },
+    postCsr: { type: Number },
+    postDsr: { type: Number },
     soTsr: { type: Number },
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true }
 }, { timestamps: true });

@@ -1221,6 +1221,70 @@ test("maintenance calendar replacement intervals reset replacement counters", as
   assert.equal(calendar?.soTsr, 10);
 });
 
+test("saving calendar inputs recomputes next estimated date and occurrence count", async () => {
+  const may1 = utcDate(2026, 5, 1);
+  const may31 = utcDate(2026, 5, 31);
+
+  await seedFlightDays([may1, may31]);
+  await seedFleetAsset({
+    msn: 4000,
+    regn: "VT-AAB",
+    entry: may1,
+    exit: may31,
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: may1,
+    msnEsn: "4000",
+    pn: "A320",
+    snBn: "4000",
+    tsn: 3000,
+    csn: 3000,
+    dsn: 3000,
+    timeMetric: "BH",
+  });
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "4000",
+    fromDate: may1,
+    toDate: may31,
+    hours: 5,
+    cycles: 1,
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.bulkSaveCalendar({
+    user: { id: USER_ID },
+    body: {
+      calendarData: [
+        {
+          calLabel: "C check",
+          lineBase: "DEL",
+          calMsn: "4000",
+          schEvent: "C check",
+          calPn: "A320",
+          snBn: "4000",
+          eTsn: 3025,
+          nextEstima: "2026-06-15",
+          occurrence: 99,
+        },
+      ],
+    },
+  }, res);
+
+  const calendar = await MaintenanceCalendar.findOne({
+    userId: USER_ID,
+    calMsn: "4000",
+    calPn: "A320",
+    snBn: "4000",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calendar?.occurrence, 1);
+  assert.equal(calendar?.nextEstima.toISOString().slice(0, 10), "2026-05-06");
+  assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-05-06");
+});
+
 test("utilisation assumptions persist avg downdays", async () => {
   const req = {
     user: { id: USER_ID },

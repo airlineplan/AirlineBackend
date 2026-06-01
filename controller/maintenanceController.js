@@ -77,6 +77,11 @@ const getCalendarDowntimeDays = (cal) => {
     return 0;
 };
 
+const getPlannedPostEventValue = (cal, key, fallback = 0) => {
+    const value = Number(cal?.[key]);
+    return Number.isFinite(value) ? value : fallback;
+};
+
 const formatCalendarDate = (value) => value ? moment.utc(value).format("YYYY-MM-DD") : "";
 
 const normalizeResetGroup = ({ msnEsn, pn, snBn } = {}) => ({
@@ -640,15 +645,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         });
 
                         if (triggeredGroups.includes("restoration")) {
-                            currentTso = 0;
-                            currentCso = 0;
-                            currentDso = 0;
+                            currentTso = getPlannedPostEventValue(cal, "postTso");
+                            currentCso = getPlannedPostEventValue(cal, "postCso");
+                            currentDso = getPlannedPostEventValue(cal, "postDso");
                         }
 
                         if (triggeredGroups.includes("replacement")) {
-                            currentTsr = 0;
-                            currentCsr = 0;
-                            currentDsr = 0;
+                            currentTsr = getPlannedPostEventValue(cal, "postTsr");
+                            currentCsr = getPlannedPostEventValue(cal, "postCsr");
+                            currentDsr = getPlannedPostEventValue(cal, "postDsr");
                         }
                     }
 
@@ -1950,6 +1955,12 @@ exports.getCalendar = async (req, res) => {
             lastOccurre: formatCalendarDate(record.lastOccurre),
             nextEstima: formatCalendarDate(record.nextEstima),
             occurrence: record.occurrence || "",
+            postTso: record.postTso ?? record.soTsr ?? "",
+            postCso: record.postCso ?? "",
+            postDso: record.postDso ?? "",
+            postTsr: record.postTsr ?? "",
+            postCsr: record.postCsr ?? "",
+            postDsr: record.postDsr ?? "",
             soTsr: record.soTsr ?? ""
         }));
         res.status(200).json({ success: true, data: formattedRecords });
@@ -1972,9 +1983,19 @@ exports.bulkSaveCalendar = async (req, res) => {
         }
 
         const bulkOperations = [];
+        const affectedResetGroups = new Map();
 
         for (const record of calendarData) {
             const parseNum = (val) => (val === "" || val === undefined) ? null : Number(val);
+            const resetGroup = normalizeResetGroup({
+                msnEsn: record.calMsn,
+                pn: record.calPn,
+                snBn: record.snBn
+            });
+
+            if (resetGroup.msnEsn && resetGroup.pn && resetGroup.snBn) {
+                affectedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
+            }
 
             bulkOperations.push({
                 updateOne: {
@@ -2003,9 +2024,15 @@ exports.bulkSaveCalendar = async (req, res) => {
                             eDsr: parseNum(record.eDsr),
                             downDays: parseNum(record.downDays),
                             avgDownda: parseNum(record.avgDownda),
-                            lastOccurre: record.lastOccurre ? moment.utc(record.lastOccurre, moment.ISO_8601, true).startOf("day").toDate() : null,
-                            nextEstima: record.nextEstima ? moment.utc(record.nextEstima, moment.ISO_8601, true).startOf("day").toDate() : null,
-                            occurrence: parseNum(record.occurrence),
+                            lastOccurre: null,
+                            nextEstima: null,
+                            occurrence: 0,
+                            postTso: parseNum(record.postTso),
+                            postCso: parseNum(record.postCso),
+                            postDso: parseNum(record.postDso),
+                            postTsr: parseNum(record.postTsr),
+                            postCsr: parseNum(record.postCsr),
+                            postDsr: parseNum(record.postDsr),
                             soTsr: parseNum(record.soTsr),
                             userId: userId
                         }
@@ -2017,6 +2044,13 @@ exports.bulkSaveCalendar = async (req, res) => {
 
         if (bulkOperations.length > 0) {
             await MaintenanceCalendar.bulkWrite(bulkOperations);
+        }
+
+        if (affectedResetGroups.size > 0) {
+            await recomputeMaintenanceTimeline({
+                userId,
+                resetGroups: [...affectedResetGroups.values()]
+            });
         }
 
         res.status(200).json({ success: true, message: "Calendar inputs updated successfully." });
