@@ -23,11 +23,20 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const { syncAllPooForUser } = require("./pooController");
 
 const createConnections = require('../helper/createConnections');
 
 
 moment.tz.setDefault("America/New_York");
+
+async function syncPooAfterStationChange(userId) {
+  try {
+    await syncAllPooForUser({ userId });
+  } catch (error) {
+    console.error("Failed to sync POO after station update:", error);
+  }
+}
 
 
 
@@ -171,6 +180,8 @@ const saveStation = async (req, res) => {
         console.log(`✅ Updated FH for ${affectedSectors.length} sectors and their associated flights.`);
       }
     }
+
+    await syncPooAfterStationChange(userId);
 
     res.status(200).json(updatedStations);
 

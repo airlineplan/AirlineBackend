@@ -24,11 +24,24 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const { scopedUserQuery } = require("./accessScope");
+const { syncAllPooForUser, syncPooForUserDates } = require("./pooController");
 
 const createConnections = require('../helper/createConnections');
 
 
 moment.tz.setDefault("America/New_York");
+
+async function syncPooAfterSectorChange(userId, dates, context) {
+  try {
+    if (dates && dates.length) {
+      await syncPooForUserDates({ userId, dates });
+      return;
+    }
+    await syncAllPooForUser({ userId });
+  } catch (error) {
+    console.error(`Failed to sync POO after ${context}:`, error);
+  }
+}
 
 
 
@@ -123,6 +136,7 @@ const AddSectors = async (req, res) => {
     });
 
     await newSectors.save();
+    await syncPooAfterSectorChange(userId, [], "sector create");
     res.status(201).json({ message: "Data created successfully" });
   } catch (error) {
     console.log(error);
@@ -187,6 +201,9 @@ const deleteSectors = async (req, res) => {
 
     //userId should be same for all
     const userId = sectors[0].userId;
+    const flightsToDelete = await Flights.find(scopedUserQuery(req, {
+      sectorId: { $in: ids },
+    })).select("date").lean();
 
     for (const sector of sectors) {
       const toDt = sector.toDt;
@@ -216,6 +233,11 @@ const deleteSectors = async (req, res) => {
     const deletedSectorData = await Sector.deleteMany(scopedUserQuery(req, { _id: { $in: ids } }));
 
     // await createConnections(userId);
+    await syncPooAfterSectorChange(
+      userId,
+      flightsToDelete.map((flight) => flight.date),
+      "sector delete"
+    );
 
     res.json({
       message: "Data deleted successfully",
@@ -301,6 +323,7 @@ const updateSector = async (req, res) => {
     const idArray = id.split(',').map((id) => id.trim());
 
     const updatedSectors = [];
+    const affectedDates = [];
 
     for (const sectorId of idArray) {
       console.log('Updating sector with ID:', sectorId);
@@ -311,6 +334,10 @@ const updateSector = async (req, res) => {
       }
 
       const sectorObjectId = new Types.ObjectId(sectorId);
+      const existingFlightsForSector = await Flights.find(scopedUserQuery(req, { sectorId }))
+        .select("date")
+        .lean();
+      affectedDates.push(...existingFlightsForSector.map((flight) => flight.date));
 
       const updatedSector = await Sector.findByIdAndUpdate(
         sectorObjectId,
@@ -336,6 +363,7 @@ const updateSector = async (req, res) => {
     }
 
     //  Assuming you want to send a response after updating all sectors
+    await syncPooAfterSectorChange(req.user.id, affectedDates, "sector update");
     res.json({ updatedSectors, message: "Sectors updated successfully" });
   } catch (error) {
     console.error(error);

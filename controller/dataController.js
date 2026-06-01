@@ -29,11 +29,20 @@ const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costL
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const { scopedUserQuery } = require("./accessScope");
+const { syncPooForUserDates } = require("./pooController");
 
 const createConnections = require('../helper/createConnections');
 
 
 moment.tz.setDefault("America/New_York");
+
+async function syncPooAfterSourceChange(userId, dates, context) {
+  try {
+    await syncPooForUserDates({ userId, dates });
+  } catch (error) {
+    console.error(`Failed to sync POO after ${context}:`, error);
+  }
+}
 
 
 
@@ -167,6 +176,8 @@ const AddData = async (req, res) => {
     await newSector.save();
 
     // await createConnections(req.user.id);
+    const generatedFlights = await Flights.find({ userId, networkId: String(data._id) }).select("date").lean();
+    await syncPooAfterSourceChange(userId, generatedFlights.map((flight) => flight.date), "network create");
 
     res.status(201).json({ message: "Data created successfully" });
   } catch (error) {
@@ -275,6 +286,8 @@ const AddDataFromRotations = async (req, res, rotationDetailsId) => {
     });
 
     await newSector.save();
+    const generatedFlights = await Flights.find({ userId, networkId: String(data._id) }).select("date").lean();
+    await syncPooAfterSourceChange(userId, generatedFlights.map((flight) => flight.date), "rotation network create");
     return { success: true };
   } catch (error) {
     console.error("Error while saving data:", error);
@@ -327,6 +340,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     const result = await Data.deleteMany(scopedUserQuery(req, { _id: { $in: ids } }));
 
     const flightsToDelete = await Flights.find(scopedUserQuery(req, { networkId: { $in: ids } }));
+    const deletedFlightDates = flightsToDelete.map((flight) => flight.date);
 
     const rotationNumbersToDelete = [...new Set(flightsToDelete
       .filter(flight => flight.rotationNumber !== undefined) // Exclude undefined values
@@ -361,6 +375,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     await Sector.deleteMany(scopedUserQuery(req, { networkId: { $in: ids } }));
 
     // await createConnections(userId);
+    await syncPooAfterSourceChange(userId, deletedFlightDates, "network delete");
 
     res.json({
       message: "Data deleted successfully",
@@ -596,6 +611,7 @@ const updateData = async (req, res) => {
     const idArray = id.split(",").map((item) => item.trim());
 
     const updatedFlights = [];
+    const datesToSync = [];
 
     const updatePayloadFromBody = {};
     Object.entries(req.body).forEach(([key, value]) => {
@@ -628,6 +644,10 @@ const updateData = async (req, res) => {
     const shouldControllerRevalidateAssignments = shouldRevalidateAssignments && !hasScheduleUpdate;
 
     for (const dataId of idArray) {
+      const existingFlightsForNetwork = await Flights.find(scopedUserQuery(req, { networkId: dataId }))
+        .select("date")
+        .lean();
+      datesToSync.push(...existingFlightsForNetwork.map((flight) => flight.date));
 
       // -------------------------------
       // 1️⃣ Handle rotation deletion
@@ -690,6 +710,11 @@ const updateData = async (req, res) => {
       updatedFlights.push(updatedData);
     }
 
+    const currentFlightsForNetworks = await Flights.find(scopedUserQuery(req, { networkId: { $in: idArray } }))
+      .select("date")
+      .lean();
+    datesToSync.push(...currentFlightsForNetworks.map((flight) => flight.date));
+
     if (shouldControllerRevalidateAssignments) {
       try {
         await revalidateAssignmentsForUser({ userId: req.user.id });
@@ -697,6 +722,8 @@ const updateData = async (req, res) => {
         console.error("Assignment revalidation failed after master update:", revalidationError);
       }
     }
+
+    await syncPooAfterSourceChange(userId, datesToSync, "network update");
 
     return res.json({
       updatedFlights,

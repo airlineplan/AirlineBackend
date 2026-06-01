@@ -27,6 +27,7 @@ const {
     applyTrafficUpdates,
     applyUpdatesForDate,
     assignSerialNumbers,
+    persistPooDatasetForDate,
 } = pooController.__testables__;
 
 function makeConnectionSnapshot(overrides = {}) {
@@ -172,6 +173,47 @@ test("selected POO date range uses the exact selected date", () => {
 
     assert.equal(range.$gte.toISOString(), "2026-03-04T00:00:00.000Z");
     assert.equal(range.$lte.toISOString(), "2026-03-04T23:59:59.999Z");
+});
+
+test("persisted POO refresh deletes rows not present in the regenerated date set", async () => {
+    const originalBulkWrite = PooTable.bulkWrite;
+    const originalDeleteMany = PooTable.deleteMany;
+    let bulkOpsSeen = null;
+    let deleteFilterSeen = null;
+
+    PooTable.bulkWrite = async (ops) => {
+        bulkOpsSeen = ops;
+        return { modifiedCount: ops.length };
+    };
+    PooTable.deleteMany = async (filter) => {
+        deleteFilterSeen = filter;
+        return { deletedCount: 1 };
+    };
+
+    try {
+        await persistPooDatasetForDate({
+            userId: "user-1",
+            dataset: {
+                rows: [{ userId: "user-1", rowKey: "keep-row", sNo: 1 }],
+                keepRowKeys: new Set(["keep-row"]),
+                dayStart: new Date("2026-03-04T00:00:00.000Z"),
+                dayEnd: new Date("2026-03-04T23:59:59.999Z"),
+            },
+        });
+
+        assert.equal(bulkOpsSeen.length, 1);
+        assert.deepEqual(deleteFilterSeen, {
+            userId: "user-1",
+            date: {
+                $gte: new Date("2026-03-04T00:00:00.000Z"),
+                $lte: new Date("2026-03-04T23:59:59.999Z"),
+            },
+            rowKey: { $nin: ["keep-row"] },
+        });
+    } finally {
+        PooTable.bulkWrite = originalBulkWrite;
+        PooTable.deleteMany = originalDeleteMany;
+    }
 });
 
 test("backfills POO master fields including updated variant", async () => {

@@ -1722,6 +1722,76 @@ async function buildPooDataset({ userId, poo, date, includeAllPoos = false }) {
     };
 }
 
+function normalizeSyncDateKeys(dates = []) {
+    return [...new Set(
+        dates
+            .map(normalizeDateKey)
+            .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
+}
+
+async function persistPooDatasetForDate({ userId, dataset }) {
+    const keepRowKeys = [...dataset.keepRowKeys];
+
+    if (dataset.rows.length) {
+        await PooTable.bulkWrite(
+            dataset.rows.map((row) => ({
+                updateOne: {
+                    filter: { userId, rowKey: row.rowKey },
+                    update: { $set: row },
+                    upsert: true,
+                },
+            })),
+            { ordered: true }
+        );
+    }
+
+    await PooTable.deleteMany({
+        userId,
+        date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
+        rowKey: { $nin: keepRowKeys },
+    });
+}
+
+async function syncPooForUserDates({ userId, dates = [] }) {
+    const normalizedUserId = normalizeUserId(userId);
+    const dateKeys = normalizeSyncDateKeys(dates);
+
+    if (!normalizedUserId || dateKeys.length === 0) {
+        return { dateCount: 0, rowCount: 0 };
+    }
+
+    let rowCount = 0;
+    for (const dateKey of dateKeys) {
+        const dataset = await buildPooDataset({
+            userId: normalizedUserId,
+            date: dateKey,
+            includeAllPoos: true,
+        });
+        await persistPooDatasetForDate({ userId: normalizedUserId, dataset });
+        rowCount += dataset.rows.length;
+    }
+
+    await backfillMasterFieldsToPooRows(normalizedUserId);
+
+    return { dateCount: dateKeys.length, rowCount };
+}
+
+async function syncAllPooForUser({ userId }) {
+    const normalizedUserId = normalizeUserId(userId);
+    if (!normalizedUserId) return { dateCount: 0, rowCount: 0 };
+
+    const [flightDates, pooDates] = await Promise.all([
+        Flight.distinct("date", { userId: normalizedUserId }),
+        PooTable.distinct("date", { userId: normalizedUserId }),
+    ]);
+
+    return syncPooForUserDates({
+        userId: normalizedUserId,
+        dates: [...flightDates, ...pooDates],
+    });
+}
+
 function applyFieldEdits(row, requested, revenueConfig = null) {
     let next = { ...row };
 
@@ -2526,46 +2596,16 @@ exports.populatePoo = async (req, res) => {
         const dataset = await buildPooDataset({ userId, poo, date, includeAllPoos: true });
 
         if (!dataset.rows.length) {
-            await PooTable.deleteMany({
-                userId,
-                date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
-            });
+            await persistPooDatasetForDate({ userId, dataset });
             return res.status(200).json({
                 data: [],
                 message: "No POO rows found for this date",
             });
         }
 
-        await PooTable.bulkWrite(
-            dataset.rows.map((row) => ({
-                updateOne: {
-                    filter: { userId, rowKey: row.rowKey },
-                    update: { $set: row },
-                    upsert: true,
-                },
-            })),
-            { ordered: true }
-        );
+        await persistPooDatasetForDate({ userId, dataset });
 
         await backfillMasterFieldsToPooRows(userId);
-
-        await PooTable.deleteMany({
-            userId,
-            date: { $gte: dataset.dayStart, $lte: dataset.dayEnd },
-            rowKey: { $nin: [...dataset.keepRowKeys] },
-            source: "system",
-            trafficType: { $in: [TRAFFIC_TYPES.BEHIND, TRAFFIC_TYPES.BEYOND] },
-            pax: 0,
-            cargoT: 0,
-            legFare: 0,
-            legRate: 0,
-            odFare: 0,
-            odRate: 0,
-            $or: [
-                { flightId: { $in: dataset.touchedFlightIds } },
-                { connectedFlightId: { $in: dataset.touchedFlightIds } },
-            ],
-        });
 
         const savedRows = await PooTable.find({
             userId,
@@ -3246,4 +3286,10 @@ exports.__testables__ = {
     applyTrafficUpdates,
     applyUpdatesForDate,
     assignSerialNumbers,
+    persistPooDatasetForDate,
+    syncPooForUserDates,
+    syncAllPooForUser,
 };
+
+exports.syncPooForUserDates = syncPooForUserDates;
+exports.syncAllPooForUser = syncAllPooForUser;
