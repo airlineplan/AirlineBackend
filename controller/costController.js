@@ -128,6 +128,24 @@ const validateApuUsageRows = (apuUsage = []) => {
   return { valid: true };
 };
 
+const getMasterStartDateKey = (flights = []) => {
+  const validDates = (Array.isArray(flights) ? flights : [])
+    .map((flight) => moment.utc(flight?.date))
+    .filter((date) => date.isValid());
+
+  if (validDates.length === 0) return "";
+
+  return moment.min(validDates).format("YYYY-MM-DD");
+};
+
+const applyMasterStartDateToLeasedReserve = (rows = [], masterStartDate = "") => {
+  if (!masterStartDate) return rows;
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    asOnDate: masterStartDate,
+  }));
+};
+
 // Save or Update user's Cost Configuration
 exports.saveCostConfig = async (req, res) => {
   try {
@@ -138,9 +156,13 @@ exports.saveCostConfig = async (req, res) => {
       return res.status(400).json({ success: false, message: apuValidation.message });
     }
 
-    const normalizedLeasedReserve = normalizeCostConfig({ leasedReserve: configData.leasedReserve || [] }).leasedReserve;
     const normalizedAircraftOnwing = normalizeAircraftOnwing(configData.aircraftOnwing || []);
     const flightsForSchedule = await Flights.find({ userId }).lean();
+    const masterStartDate = getMasterStartDateKey(flightsForSchedule);
+    const normalizedLeasedReserve = applyMasterStartDateToLeasedReserve(
+      normalizeCostConfig({ leasedReserve: configData.leasedReserve || [] }).leasedReserve,
+      masterStartDate
+    );
     const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
     const normalizedMaintenanceReserveSchedule = generateMaintenanceReserveScheduleWithContributions(
       normalizedLeasedReserve,
@@ -216,9 +238,13 @@ exports.getCostConfig = async (req, res) => {
       config.otherMx = normalizeOtherMx(config.otherMx || []);
       config.otherDoc = normalizeOtherDoc(config.otherDoc || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);
-      config.leasedReserve = normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve;
-      config.aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
       const flightsForSchedule = await Flights.find({ userId }).lean();
+      const masterStartDate = getMasterStartDateKey(flightsForSchedule);
+      config.leasedReserve = applyMasterStartDateToLeasedReserve(
+        normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve,
+        masterStartDate
+      );
+      config.aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
       const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
       config.maintenanceReserveSchedule = generateMaintenanceReserveScheduleWithContributions(
         config.leasedReserve || [],
@@ -248,9 +274,13 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
   try {
     const userId = req.user.id;
     const body = req.body || {};
-    const normalizedLeasedReserve = normalizeCostConfig({ leasedReserve: body.leasedReserve || [] }).leasedReserve;
     const normalizedAircraftOnwing = normalizeAircraftOnwing(body.aircraftOnwing || []);
     const flightsForSchedule = await Flights.find({ userId }).lean();
+    const masterStartDate = getMasterStartDateKey(flightsForSchedule);
+    const normalizedLeasedReserve = applyMasterStartDateToLeasedReserve(
+      normalizeCostConfig({ leasedReserve: body.leasedReserve || [] }).leasedReserve,
+      masterStartDate
+    );
     const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
     const schedule = generateMaintenanceReserveScheduleWithContributions(
       normalizedLeasedReserve,

@@ -1428,6 +1428,21 @@ test("maintenance reserve schedule generation dedupes, preserves manual rows, an
   assert.equal(generated.find((row) => row.date === "2027-04-01").rate, 999);
   approx(generated.find((row) => row.date === "2028-04-01").rate, 335.13);
 
+  const midMonthAnniversary = generateMaintenanceReserveSchedule([
+    {
+      mrAccId: "MR-ENG-02",
+      sn: "740812",
+      setRate: 5,
+      asOnDate: "2026-05-01",
+      endDate: "2026-07-31",
+      driver: "DEPARTURES",
+      annualEscalation: 5,
+      anniversaryDate: "2026-05-15",
+    },
+  ]);
+  assert.equal(midMonthAnniversary.find((row) => row.date === "2026-05-01").rate, 5);
+  assert.equal(midMonthAnniversary.find((row) => row.date === "2026-06-01").rate, 5.25);
+
   const regenerated = generateMaintenanceReserveSchedule([
     {
       mrAccId: "MR-ENG-01",
@@ -1437,8 +1452,29 @@ test("maintenance reserve schedule generation dedupes, preserves manual rows, an
       endDate: "2026-06-30",
       driver: "FH",
     },
-  ], generated);
+  ], [
+    ...generated,
+    {
+      date: "2026-05-01",
+      mrAccId: "MR-DELETED",
+      sn: "740811",
+      rate: 1,
+      source: "generated",
+    },
+  ]);
   assert.equal(regenerated.filter((row) => row.mrAccId === "MR-ENG-01" && row.sn === "740811" && row.date === "2026-05-01").length, 1);
+  assert.equal(regenerated.some((row) => row.mrAccId === "MR-DELETED"), false);
+
+  const deletedSettingPruned = generateMaintenanceReserveSchedule([], [
+    {
+      date: "2026-05-01",
+      mrAccId: "MR-DELETED",
+      sn: "740811",
+      rate: 1,
+      source: "generated",
+    },
+  ]);
+  assert.deepEqual(deletedSettingPruned, []);
 });
 
 test("maintenance reserve schedule drives on-wing SN mapping, next-month lookup, FX, and monthly allocation", () => {

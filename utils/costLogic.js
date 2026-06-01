@@ -84,7 +84,7 @@ const parseDate = (value) => {
       if (!Number.isNaN(parsed.getTime())) return parsed;
     }
 
-    const ddMonYY = value.match(/^(\d{1,2})\s+([A-Z]{3})\s+(\d{2,4})$/i);
+    const ddMonYY = value.match(/^(\d{1,2})[-\s/]([A-Z]{3})[-\s/](\d{2,4})$/i);
     if (ddMonYY) {
       const [, dd, mon, yy] = ddMonYY;
       const monthMap = {
@@ -1137,7 +1137,7 @@ const getEscalatedReserveRate = (setting = {}, scheduleDateValue) => {
     anniversary.getUTCMonth(),
     anniversary.getUTCDate()
   ));
-  if (scheduleDate < anniversaryThisYear) anniversaries -= 1;
+  if (scheduleDate > anniversaryThisYear) anniversaries += 1;
   if (anniversaries <= 0) return round2(baseRate);
   return round2(baseRate * ((1 + escalation / 100) ** anniversaries));
 };
@@ -1146,11 +1146,17 @@ const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingSche
   const settings = normalizeLeasedReserve(leasedReserveRows);
   const existing = normalizeMaintenanceReserveSchedule(existingScheduleRows);
   const byKey = new Map();
+  const activeSettingKeys = new Set(settings.map((setting) => [
+    normalize(setting.mrAccId),
+    normalize(setting.sn),
+  ].join("|")));
 
   existing.forEach((row) => {
     const normalized = { ...row, date: toMonthStartKey(row.date) || row.date };
     const key = getScheduleIdentity(normalized);
     if (!key.replace(/\|/g, "")) return;
+    const settingKey = [normalize(normalized.mrAccId), normalize(normalized.sn || normalized.msn)].join("|");
+    if (!activeSettingKeys.has(settingKey)) return;
     byKey.set(key, normalized);
   });
 
@@ -1586,10 +1592,9 @@ const normalizeAllocationTable = (rows = []) => rows.map((row) => ({
 const normalizeCostConfig = (config = {}) => {
   const navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
   const leasedReserve = normalizeLeasedReserve(config.leasedReserve || []);
-  const maintenanceReserveSchedule = generateMaintenanceReserveSchedule(
-    leasedReserve,
-    config.maintenanceReserveSchedule || []
-  );
+  const maintenanceReserveSchedule = leasedReserve.length > 0
+    ? generateMaintenanceReserveSchedule(leasedReserve, config.maintenanceReserveSchedule || [])
+    : normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []);
   return {
     __normalized: true,
     reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "INR",
