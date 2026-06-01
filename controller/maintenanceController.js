@@ -143,16 +143,291 @@ const getFlightDateBounds = async ({ userId } = {}) => {
 };
 
 const onwingFields = ["pos1Esn", "pos2Esn", "apun"];
+const normalizeAssetIdentity = (value) => String(value || "").trim().toUpperCase();
 
 const onwingRowHasAsset = (row, assetKey) => {
-    const normalizedAssetKey = String(assetKey || "").trim();
+    const normalizedAssetKey = normalizeAssetIdentity(assetKey);
     if (!row || !normalizedAssetKey) return false;
-    return onwingFields.some(field => String(row[field] || "").trim() === normalizedAssetKey);
+    return onwingFields.some(field => normalizeAssetIdentity(row[field]) === normalizedAssetKey);
+};
+
+const getRotablePositionField = (position) => {
+    const normalizedPosition = String(position || "").trim();
+    if (normalizedPosition === "#1") return "pos1Esn";
+    if (normalizedPosition === "#2") return "pos2Esn";
+    return null;
+};
+
+const getRotableEffectiveMoment = (record) => {
+    const movementDate = moment.utc(record?.date, moment.ISO_8601, true);
+    return movementDate.isValid() ? movementDate.add(1, "day").startOf("day") : null;
+};
+
+const compareRotableEvents = (left, right) => {
+    const leftEffective = left?.effectiveMoment?.valueOf() || 0;
+    const rightEffective = right?.effectiveMoment?.valueOf() || 0;
+    if (leftEffective !== rightEffective) return leftEffective - rightEffective;
+
+    const leftCreated = moment.utc(left?.record?.createdAt).isValid()
+        ? moment.utc(left.record.createdAt).valueOf()
+        : 0;
+    const rightCreated = moment.utc(right?.record?.createdAt).isValid()
+        ? moment.utc(right.record.createdAt).valueOf()
+        : 0;
+    if (leftCreated !== rightCreated) return leftCreated - rightCreated;
+
+    return String(left?.record?._id || "").localeCompare(String(right?.record?._id || ""));
+};
+
+const getRotableOwnershipContextForDate = async ({ userId, assetKey, date }) => {
+    const normalizedAssetKey = String(assetKey || "").trim();
+    const normalizedAssetIdentity = normalizeAssetIdentity(assetKey);
+    const targetDay = date ? moment.utc(date).startOf("day") : null;
+    if (!normalizedAssetKey || !targetDay?.isValid()) return null;
+
+    const movementDateLimit = targetDay.clone().subtract(1, "day").endOf("day").toDate();
+    const assetRegex = new RegExp(`^${escapeRegex(normalizedAssetKey)}$`, "i");
+    const movementFilter = {
+        $or: [
+            { installedSN: assetRegex },
+            { removedSN: assetRegex }
+        ],
+        date: { $lte: movementDateLimit }
+    };
+    if (userId) movementFilter.userId = String(userId);
+
+    const movementRecords = await RotableMovement.find(movementFilter)
+        .sort({ date: -1, createdAt: -1, _id: -1 })
+        .lean();
+
+    const events = [];
+    movementRecords.forEach((record) => {
+        const effectiveMoment = getRotableEffectiveMoment(record);
+        if (!effectiveMoment || effectiveMoment.isAfter(targetDay, "day")) return;
+
+        if (normalizeAssetIdentity(record.installedSN) === normalizedAssetIdentity) {
+            events.push({ record, effectiveMoment, type: "installed" });
+        }
+        if (normalizeAssetIdentity(record.removedSN) === normalizedAssetIdentity) {
+            events.push({ record, effectiveMoment, type: "removed" });
+        }
+    });
+
+    events.sort((left, right) => compareRotableEvents(right, left));
+    const latestAssetEvent = events[0];
+    if (!latestAssetEvent) return null;
+
+    if (latestAssetEvent.type === "removed") {
+        return { effectiveMsn: normalizedAssetKey, isExplicitSpare: true };
+    }
+
+    const latestInstalledMsn = String(latestAssetEvent.record?.msn || "").trim();
+    const latestInstalledPosition = String(latestAssetEvent.record?.position || "").trim();
+    if (!latestInstalledMsn || !latestInstalledPosition) {
+        return { effectiveMsn: normalizedAssetKey, isExplicitSpare: true };
+    }
+
+    const slotFilter = {
+        msn: latestInstalledMsn,
+        position: latestInstalledPosition,
+        date: {
+            $gte: moment.utc(latestAssetEvent.record.date).startOf("day").toDate(),
+            $lte: movementDateLimit
+        }
+    };
+    if (userId) slotFilter.userId = String(userId);
+
+    const slotEvents = (await RotableMovement.find(slotFilter)
+        .sort({ date: -1, createdAt: -1, _id: -1 })
+        .lean())
+        .map((record) => ({ record, effectiveMoment: getRotableEffectiveMoment(record) }))
+        .filter(({ effectiveMoment }) => effectiveMoment && effectiveMoment.isSameOrBefore(targetDay, "day"));
+
+    slotEvents.sort((left, right) => compareRotableEvents(right, left));
+    const latestSlotEvent = slotEvents[0];
+    const isStillInstalled = latestSlotEvent &&
+        normalizeAssetIdentity(latestSlotEvent.record?.installedSN) === normalizedAssetIdentity;
+
+    return isStillInstalled
+        ? { effectiveMsn: latestInstalledMsn, isExplicitSpare: false }
+        : { effectiveMsn: normalizedAssetKey, isExplicitSpare: true };
+};
+
+const buildOnwingSnapshot = ({ userId, msn, date, priorConfig, updateField, value }) => ({
+    userId: String(userId),
+    msn: String(msn || "").trim(),
+    date,
+    pos1Esn: priorConfig?.pos1Esn || "",
+    pos2Esn: priorConfig?.pos2Esn || "",
+    apun: priorConfig?.apun || "",
+    [updateField]: value
+});
+
+const getOnwingSnapshotBase = async ({ userId, msn, date, fallbackConfig }) => {
+    const existingConfig = await AircraftOnwing.findOne({
+        userId: String(userId),
+        msn: String(msn || "").trim(),
+        date
+    }).lean();
+
+    return existingConfig || fallbackConfig || {};
+};
+
+const rebuildOnwingTimelineForRotableMovement = async ({ userId, movement }) => {
+    const updateField = getRotablePositionField(movement?.position);
+    const effectiveMoment = getRotableEffectiveMoment(movement);
+    const msn = String(movement?.msn || "").trim();
+
+    if (!userId || !updateField || !effectiveMoment || !msn) return;
+
+    const userKey = String(userId);
+    const effectiveDate = effectiveMoment.toDate();
+    const priorConfig = await AircraftOnwing.findOne({
+        userId: userKey,
+        msn,
+        date: { $lt: effectiveDate }
+    }).sort({ date: -1 }).lean();
+
+    const restoredValue = String(movement?.removedSN || priorConfig?.[updateField] || "").trim();
+    const remainingMovements = await RotableMovement.find({
+        userId: userKey,
+        msn,
+        position: movement.position,
+        date: { $gte: moment.utc(movement.date).startOf("day").toDate() }
+    }).sort({ date: 1, createdAt: 1, _id: 1 }).lean();
+
+    const futureEvents = remainingMovements
+        .map(record => ({
+            record,
+            effectiveMoment: getRotableEffectiveMoment(record)
+        }))
+        .filter(({ effectiveMoment: eventMoment }) => eventMoment && eventMoment.isSameOrAfter(effectiveMoment, "day"));
+
+    let segmentStart = effectiveMoment.clone();
+    let currentValue = restoredValue;
+    let currentPriorConfig = {
+        ...(priorConfig || {}),
+        [updateField]: restoredValue
+    };
+
+    const effectiveSnapshotBase = await getOnwingSnapshotBase({
+        userId: userKey,
+        msn,
+        date: effectiveDate,
+        fallbackConfig: priorConfig
+    });
+
+    await AircraftOnwing.updateOne(
+        { userId: userKey, msn, date: effectiveDate },
+        {
+            $set: buildOnwingSnapshot({
+                userId: userKey,
+                msn,
+                date: effectiveDate,
+                priorConfig: effectiveSnapshotBase,
+                updateField,
+                value: restoredValue
+            })
+        },
+        { upsert: true }
+    );
+
+    for (const { record, effectiveMoment: eventMoment } of futureEvents) {
+        const eventDate = eventMoment.toDate();
+        if (eventMoment.isAfter(segmentStart, "day")) {
+            await AircraftOnwing.updateMany(
+                {
+                    userId: userKey,
+                    msn,
+                    date: {
+                        $gte: segmentStart.toDate(),
+                        $lt: eventDate
+                    }
+                },
+                { $set: { [updateField]: currentValue } }
+            );
+        }
+
+        currentValue = String(record.installedSN || "").trim();
+        const eventPriorConfig = await AircraftOnwing.findOne({
+            userId: userKey,
+            msn,
+            date: { $lt: eventDate }
+        }).sort({ date: -1 }).lean();
+        const eventSnapshotBase = await getOnwingSnapshotBase({
+            userId: userKey,
+            msn,
+            date: eventDate,
+            fallbackConfig: eventPriorConfig || currentPriorConfig
+        });
+        currentPriorConfig = {
+            ...(eventSnapshotBase || currentPriorConfig || {}),
+            [updateField]: currentValue
+        };
+
+        await AircraftOnwing.updateOne(
+            { userId: userKey, msn, date: eventDate },
+            {
+                $set: buildOnwingSnapshot({
+                    userId: userKey,
+                    msn,
+                    date: eventDate,
+                    priorConfig: eventSnapshotBase,
+                    updateField,
+                    value: currentValue
+                })
+            },
+            { upsert: true }
+        );
+
+        segmentStart = eventMoment.clone();
+    }
+
+    await AircraftOnwing.updateMany(
+        {
+            userId: userKey,
+            msn,
+            date: { $gte: segmentStart.toDate() }
+        },
+        { $set: { [updateField]: currentValue } }
+    );
 };
 
 const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     const assetKey = String(msnEsn || "").trim();
     const lookupDate = date ? moment.utc(date).endOf("day").toDate() : null;
+    const rotableOwnership = await getRotableOwnershipContextForDate({
+        userId,
+        assetKey,
+        date
+    });
+
+    if (rotableOwnership?.isExplicitSpare) {
+        const fleetFilter = assetKey ? { sn: assetKey } : {};
+        if (userId) {
+            fleetFilter.userId = String(userId);
+        }
+
+        return {
+            assetKey,
+            effectiveMsn: assetKey,
+            fleet: assetKey ? await Fleet.findOne(fleetFilter).lean() : null,
+        };
+    }
+
+    if (rotableOwnership?.effectiveMsn) {
+        const fleetFilter = { sn: rotableOwnership.effectiveMsn };
+        if (userId) {
+            fleetFilter.userId = String(userId);
+        }
+
+        return {
+            assetKey,
+            effectiveMsn: rotableOwnership.effectiveMsn,
+            fleet: await Fleet.findOne(fleetFilter).lean(),
+        };
+    }
+
     const historicalOwnershipFilter = {
         $or: [
             { pos1Esn: assetKey },
@@ -1482,30 +1757,37 @@ exports.bulkSaveRotables = async (req, res) => {
 
         const bulkOperations = [];
         const onwingOps = [];
+        const affectedOnwingRebuilds = new Map();
 
         for (const record of rotablesData) {
+            const msn = String(record.msn || "").trim();
+            const pn = String(record.pn || "").trim();
+            const position = String(record.position || "").trim();
             const movementDate = record.date
                 ? moment.utc(record.date, moment.ISO_8601, true).startOf("day")
                 : moment.utc().startOf("day");
             const persistedMovementDate = movementDate.isValid() ? movementDate.toDate() : moment.utc().startOf("day").toDate();
+            const movementFilter = isValidObjectId(record.id)
+                ? { _id: record.id, userId: String(userId) }
+                : {
+                    userId: String(userId),
+                    msn,
+                    pn,
+                    position,
+                    date: persistedMovementDate
+                };
 
             bulkOperations.push({
                 updateOne: {
-                    filter: {
-                        userId: String(userId),
-                        msn: record.msn,
-                        pn: record.pn,
-                        position: record.position,
-                        date: persistedMovementDate
-                    },
+                    filter: movementFilter,
                     update: {
                         $set: {
                             label: record.label,
                             date: persistedMovementDate,
-                            pn: record.pn,
-                            msn: record.msn,
+                            pn,
+                            msn,
                             acftReg: record.acftRegn,
-                            position: record.position,
+                            position,
                             removedSN: record.removedSN,
                             installedSN: record.installedSN,
                             userId: userId
@@ -1516,19 +1798,19 @@ exports.bulkSaveRotables = async (req, res) => {
             });
 
             // Update AircraftOnwing if an Engine is assigned to Position #1 or #2
-            if ((record.position === "#1" || record.position === "#2") && record.date) {
+            if ((position === "#1" || position === "#2") && record.date) {
                 const effectiveDate = moment.utc(record.date, moment.ISO_8601, true).add(1, "day").startOf("day").toDate();
                 if (!isNaN(effectiveDate.getTime())) {
 
-                    const updateField = record.position === "#1" ? "pos1Esn" : "pos2Esn";
+                    const updateField = position === "#1" ? "pos1Esn" : "pos2Esn";
                     const priorConfig = await AircraftOnwing.findOne({
                         userId: String(userId),
-                        msn: record.msn,
+                        msn,
                         date: { $lt: effectiveDate }
                     }).sort({ date: -1 }).lean();
                     const effectiveSnapshot = {
                         userId: String(userId),
-                        msn: record.msn,
+                        msn,
                         date: effectiveDate,
                         pos1Esn: priorConfig?.pos1Esn || "",
                         pos2Esn: priorConfig?.pos2Esn || "",
@@ -1539,7 +1821,7 @@ exports.bulkSaveRotables = async (req, res) => {
                     // 1. Update all future chronological configurations for this MSN
                     onwingOps.push({
                         updateMany: {
-                            filter: { userId: String(userId), msn: record.msn, date: { $gte: effectiveDate } },
+                            filter: { userId: String(userId), msn, date: { $gte: effectiveDate } },
                             update: {
                                 $set: {
                                     [updateField]: record.installedSN
@@ -1551,13 +1833,25 @@ exports.bulkSaveRotables = async (req, res) => {
                     // 2. Explicitly log the new configuration timeline starting on the effective date
                     onwingOps.push({
                         updateOne: {
-                            filter: { userId: String(userId), msn: record.msn, date: effectiveDate },
+                            filter: { userId: String(userId), msn, date: effectiveDate },
                             update: {
                                 $set: effectiveSnapshot
                             },
                             upsert: true
                         }
                     });
+
+                    const rebuildKey = `${msn}|${position}`;
+                    const currentRebuild = affectedOnwingRebuilds.get(rebuildKey);
+                    if (!currentRebuild || movementDate.isBefore(moment.utc(currentRebuild.date), "day")) {
+                        affectedOnwingRebuilds.set(rebuildKey, {
+                            ...record,
+                            msn,
+                            pn,
+                            position,
+                            date: persistedMovementDate
+                        });
+                    }
                 }
             }
         }
@@ -1568,6 +1862,14 @@ exports.bulkSaveRotables = async (req, res) => {
 
         if (onwingOps.length > 0) {
             await AircraftOnwing.bulkWrite(onwingOps, { ordered: false });
+        }
+
+        for (const movement of affectedOnwingRebuilds.values()) {
+            await rebuildOnwingTimelineForRotableMovement({ userId, movement });
+        }
+
+        if (bulkOperations.length > 0 || affectedOnwingRebuilds.size > 0) {
+            await recomputeMaintenanceTimeline({ userId });
         }
 
         res.status(200).json({ success: true, message: "Rotable movements and Aircraft configurations updated successfully." });
@@ -1590,6 +1892,9 @@ exports.deleteRotable = async (req, res) => {
         if (!deletedRecord) {
             return res.status(404).json({ message: "Rotable movement not found." });
         }
+
+        await rebuildOnwingTimelineForRotableMovement({ userId, movement: deletedRecord });
+        await recomputeMaintenanceTimeline({ userId });
 
         res.status(200).json({ success: true, message: "Rotable movement deleted successfully." });
     } catch (error) {

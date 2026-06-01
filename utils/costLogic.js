@@ -2248,45 +2248,6 @@ const distributePool = (eligibleFlights, field, totalAmount, currency, reporting
   });
 };
 
-const allocateGeneratedReserveOpeningBalances = (flights = [], config = {}) => {
-  const scheduleRows = Array.isArray(config.maintenanceReserveSchedule) ? config.maintenanceReserveSchedule : [];
-  if (!scheduleRows.length) return;
-
-  const allocated = new Set();
-  (config.leasedReserve || []).forEach((setting) => {
-    const openingAmount = toNumber(setting.setBalance);
-    const driver = normalizeMetric(setting.driver);
-    if (openingAmount <= 0 || driver === "MONTH") return;
-
-    const settingRows = scheduleRows
-      .filter((row) => normalize(row.source) === "GENERATED" && scheduleRowMatchesReserveSetting(row, setting))
-      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
-
-    for (const row of settingRows) {
-      const rowDate = parseDate(row.date);
-      if (!rowDate) continue;
-      const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, config.aircraftOnwing || []);
-      if (matchedFlights.length === 0) continue;
-
-      const key = [normalize(setting.mrAccId), normalize(setting.sn), toDayKey(rowDate)].join("|");
-      if (allocated.has(key)) break;
-      allocated.add(key);
-      distributePool(
-        matchedFlights,
-        "maintenanceReserveContribution",
-        openingAmount,
-        setting.ccy || row.ccy,
-        config.reportingCurrency,
-        driver,
-        setting.costRCCY,
-        config.fxRates || [],
-        rowDate
-      );
-      break;
-    }
-  });
-};
-
 const distributeMonthlyPoolByBasis = (eligibleFlights, field, totalAmount, currency, reportingCurrency, basis, explicitRccy, fxRates = [], amountForMonth = null) => {
   const amount = round2(totalAmount);
   if (!eligibleFlights.length || amount === 0) return;
@@ -3036,7 +2997,6 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
   flights.forEach((flight) => applySnContext(flight, config));
   enrichDirectCosts(flights, config);
   enrichAllocatedCosts(flights, config);
-  allocateGeneratedReserveOpeningBalances(flights, config);
   flights.forEach((flight) => {
     applyCompatibilityAliases(flight);
     applyTotals(flight, config.reportingCurrency);

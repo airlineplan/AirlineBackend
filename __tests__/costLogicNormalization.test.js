@@ -1619,7 +1619,7 @@ test("maintenance reserve supports BH, departure, and APUHR drivers", () => {
   assert.equal(enriched.maintenanceReserveContribution, 65);
 });
 
-test("generated maintenance reserve schedule uses prior-month BH and opening balance expense once", () => {
+test("generated maintenance reserve schedule uses prior-month BH without expensing opening balance", () => {
   const mayFlights = Array.from({ length: 31 }, (_, index) => ({
     date: `2026-05-${String(index + 1).padStart(2, "0")}`,
     flight: `MR${index + 1}`,
@@ -1654,5 +1654,5 @@ test("generated maintenance reserve schedule uses prior-month BH and opening bal
     leasedReserve,
     maintenanceReserveSchedule: schedule,
   });
-  approx(enriched.reduce((sum, row) => sum + row.maintenanceReserveContribution, 0), 515000);
+  approx(enriched.reduce((sum, row) => sum + row.maintenanceReserveContribution, 0), 465000);
 });

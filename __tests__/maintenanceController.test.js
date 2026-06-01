@@ -16,6 +16,7 @@ const MaintenanceTarget = require("../model/maintenanceTargetSchema");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
 const Utilisation = require("../model/utilisation");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema");
+const RotableMovement = require("../model/rotableMovementSchema");
 const maintenanceController = require("../controller/maintenanceController");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
@@ -2368,4 +2369,215 @@ test("maintenance compute switches engine utilisation after rotable movement", a
   assert.equal(removedEngineUtil?.csn, 40);
   assert.equal(installedEngineUtil?.tsn, 5004);
   assert.equal(installedEngineUtil?.csn, 3001);
+});
+
+test("maintenance dashboard applies aircraft utilisation to engine installed by prior-day rotable movement", async () => {
+  const resetDate = utcDate(2026, 5, 18);
+  const movementDate = utcDate(2026, 5, 19);
+  const effectiveDate = utcDate(2026, 5, 20);
+
+  await seedFlightDays([resetDate, movementDate, effectiveDate]);
+  await seedFleetAsset({
+    msn: 4950,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 5, 1),
+    exit: utcDate(2026, 5, 31),
+  });
+  await seedFleetAsset({
+    msn: 721576,
+    regn: "",
+    entry: utcDate(2026, 5, 1),
+    exit: utcDate(2026, 5, 31),
+    titled: "Spare",
+  });
+
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 5, 1),
+    msn: "4950",
+    pos1Esn: "635799",
+    pos2Esn: "635800",
+  });
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: resetDate,
+    msnEsn: "721576",
+    pn: "CFM56",
+    snBn: "721576",
+    tsn: 2000,
+    csn: 1000,
+    dsn: 10,
+    tsoTsr: 500,
+    csoCsr: 250,
+    dsoDsr: 5,
+    tsRplmt: 400,
+    csRplmt: 200,
+    dsRplmt: 4,
+    timeMetric: "BH",
+  });
+
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "4950",
+    fromDate: effectiveDate,
+    toDate: effectiveDate,
+    hours: 3.5,
+    cycles: 1,
+  });
+
+  await RotableMovement.create({
+    userId: USER_ID,
+    label: "Engine change",
+    date: movementDate,
+    pn: "CFM56",
+    msn: "4950",
+    acftReg: "VT-AAA",
+    position: "#2",
+    removedSN: "635800",
+    installedSN: "721576",
+  });
+
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+
+  const movementDayRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-05-19", msnEsn: "721576" },
+  }, movementDayRes);
+
+  const effectiveDayRes = createMockResponse();
+  await maintenanceController.getMaintenanceDashboard({
+    user: { id: USER_ID },
+    query: { date: "2026-05-20", msnEsn: "721576" },
+  }, effectiveDayRes);
+
+  const movementDay = movementDayRes.body.data.maintenanceData[0];
+  const effectiveDay = effectiveDayRes.body.data.maintenanceData[0];
+
+  assert.equal(movementDayRes.statusCode, 200);
+  assert.equal(effectiveDayRes.statusCode, 200);
+  assert.equal(movementDay.tsn, 2000);
+  assert.equal(movementDay.csn, 1000);
+  assert.equal(effectiveDay.tsn, 2003.5);
+  assert.equal(effectiveDay.csn, 1001);
+  assert.equal(effectiveDay.tsr, 403.5);
+  assert.equal(effectiveDay.csr, 201);
+});
+
+test("deleting rotable movement restores on-wing ownership and recomputes utilisation", async () => {
+  const resetDate = utcDate(2026, 4, 15);
+  const movementDate = utcDate(2026, 5, 10);
+  const effectiveDate = utcDate(2026, 5, 11);
+
+  await seedFlightDays([resetDate, effectiveDate]);
+  await seedFleetAsset({
+    msn: 5340,
+    regn: "VT-AAA",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 12, 31),
+  });
+
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 4, 1),
+    msn: "5340",
+    pos1Esn: "635799",
+    pos2Esn: "635800",
+  });
+
+  await MaintenanceReset.insertMany([
+    {
+      userId: USER_ID,
+      date: resetDate,
+      msnEsn: "635799",
+      pn: "CFM56",
+      snBn: "635799",
+      tsn: 100,
+      csn: 40,
+      dsn: 31,
+      timeMetric: "BH",
+    },
+    {
+      userId: USER_ID,
+      date: resetDate,
+      msnEsn: "721576",
+      pn: "CFM56",
+      snBn: "721576",
+      tsn: 5000,
+      csn: 3000,
+      dsn: 1000,
+      timeMetric: "BH",
+    },
+  ]);
+
+  await seedAssignment({
+    date: effectiveDate,
+    flightNumber: "FL11",
+    msn: 5340,
+    registration: "VT-AAA",
+    bh: 4,
+  });
+
+  const saveRotableRes = createMockResponse();
+  await maintenanceController.bulkSaveRotables({
+    user: { id: USER_ID },
+    body: {
+      rotablesData: [
+        {
+          label: "Engine change",
+          date: movementDate.toISOString().slice(0, 10),
+          pn: "CFM56",
+          msn: "5340",
+          acftRegn: "VT-AAA",
+          position: "#1",
+          removedSN: "635799",
+          installedSN: "721576",
+        },
+      ],
+    },
+  }, saveRotableRes);
+
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+
+  const savedMovement = await RotableMovement.findOne({
+    userId: USER_ID,
+    msn: "5340",
+    position: "#1",
+    installedSN: "721576",
+  }).lean();
+
+  const deleteRotableRes = createMockResponse();
+  await maintenanceController.deleteRotable({
+    user: { id: USER_ID },
+    params: { id: String(savedMovement._id) },
+  }, deleteRotableRes);
+
+  const restoredOnwing = await AircraftOnwing.findOne({
+    userId: USER_ID,
+    msn: "5340",
+    date: effectiveDate,
+  }).lean();
+  const removedEngineUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: effectiveDate,
+    msnEsn: "635799",
+    pn: "CFM56",
+    snBn: "635799",
+  }).lean();
+  const deletedInstalledEngineUtil = await Utilisation.findOne({
+    userId: USER_ID,
+    date: effectiveDate,
+    msnEsn: "721576",
+    pn: "CFM56",
+    snBn: "721576",
+  }).lean();
+
+  assert.equal(saveRotableRes.statusCode, 200);
+  assert.equal(deleteRotableRes.statusCode, 200);
+  assert.equal(restoredOnwing?.pos1Esn, "635799");
+  assert.equal(removedEngineUtil?.tsn, 104);
+  assert.equal(removedEngineUtil?.csn, 41);
+  assert.equal(deletedInstalledEngineUtil?.tsn, 5000);
+  assert.equal(deletedInstalledEngineUtil?.csn, 3000);
 });
