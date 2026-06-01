@@ -174,6 +174,35 @@ const normalizeDropdownValueList = (values = []) =>
 
 const BLANK_OPTION_VALUE = "__BLANK__";
 
+const parseDashboardNumber = (value, fallback = 0) => {
+  if (value === null || value === undefined || value === "") return fallback;
+  const parsed = Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeDashboardStation = (value) => String(value || "").trim().toUpperCase();
+
+const getRevenueStopDisplayValue = (row = {}) => {
+  const stops = parseDashboardNumber(row.stops);
+  if (stops === 0 || String(row.trafficType || "").trim().toLowerCase() === "leg") return "0";
+
+  const odEndpoints = new Set([
+    normalizeDashboardStation(row.odOrigin),
+    normalizeDashboardStation(row.odDestination),
+  ].filter(Boolean));
+
+  const sectorStations = String(row.sector || "")
+    .split("-")
+    .map(normalizeDashboardStation)
+    .filter(Boolean);
+  const sectorConnection = sectorStations.find((station) => !odEndpoints.has(station));
+  if (sectorConnection) return sectorConnection;
+
+  const poo = normalizeDashboardStation(row.poo);
+  if (poo && !odEndpoints.has(poo)) return poo;
+
+  return String(stops);
+};
 
 
 const {
@@ -306,23 +335,15 @@ const populateDashboardDropDowns = async (req, res) => {
       { $project: { _id: 0, sn: 1 } },
     ]);
 
-    const rawStopValues = distinctPooValues?.[0]?.stops ?? [];
+    const stopRows = await PooTable.find({ userId })
+      .select("stops trafficType poo odOrigin odDestination sector")
+      .lean();
     const stopOptions = normalizeDropdownValueList(
-      rawStopValues
-        .filter((value) => {
-          const normalized = String(value ?? "").trim();
-          return normalized !== "" && Number(normalized) !== 0;
-        })
-        .map((value) => String(value))
+      stopRows.map(getRevenueStopDisplayValue)
     ).map((value) => ({
       value,
       label: value,
     }));
-
-    stopOptions.unshift({
-      value: BLANK_OPTION_VALUE,
-      label: "(blank)",
-    });
 
     const data = {
       flight: formatOptions(

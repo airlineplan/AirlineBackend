@@ -92,6 +92,28 @@ function roundToWhole(value) {
     return Math.round(parseNumber(value));
 }
 
+function getRevenueStopDisplayValue(row = {}) {
+    const stops = parseNumber(row.stops);
+    if (stops === 0 || row.trafficType === TRAFFIC_TYPES.LEG) return "0";
+
+    const odEndpoints = new Set([
+        normalizeStation(row.odOrigin),
+        normalizeStation(row.odDestination),
+    ].filter(Boolean));
+
+    const sectorStations = String(row.sector || "")
+        .split("-")
+        .map(normalizeStation)
+        .filter(Boolean);
+    const sectorConnection = sectorStations.find((station) => !odEndpoints.has(station));
+    if (sectorConnection) return sectorConnection;
+
+    const poo = normalizeStation(row.poo);
+    if (poo && !odEndpoints.has(poo)) return poo;
+
+    return String(stops);
+}
+
 function calculateCargoRevenue(cargoT, ratePerKg) {
     return parseNumber(cargoT) * KG_PER_TONNE * parseNumber(ratePerKg);
 }
@@ -270,6 +292,26 @@ function buildRevenueSelectionClauses(values, type) {
     }
 
     return [];
+}
+
+function parseRevenueStopFilterValues(stop, stops) {
+    return String(stop || stops || "")
+        .split(",")
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+}
+
+function rowMatchesRevenueStopFilter(row, requestedStops = []) {
+    if (!requestedStops.length) return true;
+
+    const normalizedRequested = requestedStops.map((value) => {
+        if (value === BLANK_OPTION_VALUE || value.toLowerCase() === "(blank)") return "0";
+        return normalizeStation(value) || "0";
+    });
+    const requestedSet = new Set(normalizedRequested);
+    const displayStop = normalizeStation(getRevenueStopDisplayValue(row)) || "0";
+
+    return requestedSet.has(displayStop);
 }
 
 function buildSectorMap(sectors) {
@@ -755,10 +797,17 @@ function normalizeRevenueRowsForReporting(rows, revenueConfig = null) {
         ]);
 
         if (!hasSourceRevenue) {
-            return row;
+            return {
+                ...row,
+                displayStop: getRevenueStopDisplayValue(row),
+            };
         }
 
-        return recalculateRevenue(row, revenueConfig);
+        const recalculated = recalculateRevenue(row, revenueConfig);
+        return {
+            ...recalculated,
+            displayStop: getRevenueStopDisplayValue(recalculated),
+        };
     });
 }
 
@@ -777,6 +826,7 @@ function buildEditableResponse(records) {
             return {
                 ...baseRecord,
                 displayType: DISPLAY_LABELS[record.trafficType] || record.identifier || record.trafficType,
+                displayStop: getRevenueStopDisplayValue(baseRecord),
                 rowMatchKey: buildRowMatchKey(record),
             };
         });
@@ -3059,37 +3109,7 @@ exports.getRevenueData = async (req, res) => {
             if (clause) andClauses.push(clause);
         });
 
-        const requestedStops = String(stop || stops || "")
-            .split(",")
-            .map((item) => String(item || "").trim())
-            .filter(Boolean);
-        const normalizedStops = requestedStops
-            .map((item) => Number(item))
-            .filter(Number.isFinite);
-        const requestedBlankStop = requestedStops.includes(BLANK_OPTION_VALUE) || requestedStops.includes("(blank)");
-
-        if (requestedBlankStop && normalizedStops.length > 0) {
-            andClauses.push({
-                $or: [
-                    { stops: { $in: normalizedStops } },
-                    { stops: 0 },
-                    { stops: null },
-                    { stops: { $exists: false } },
-                    { stops: "" },
-                ],
-            });
-        } else if (requestedBlankStop) {
-            andClauses.push({
-                $or: [
-                    { stops: 0 },
-                    { stops: null },
-                    { stops: { $exists: false } },
-                    { stops: "" },
-                ],
-            });
-        } else if (normalizedStops.length > 0) {
-            andClauses.push({ stops: { $in: normalizedStops } });
-        }
+        const requestedStops = parseRevenueStopFilterValues(stop, stops);
         if (timeInclLayover) andClauses.push({ timeInclLayover: String(timeInclLayover).trim() });
 
         const numericRangeFilters = [
@@ -3132,7 +3152,8 @@ exports.getRevenueData = async (req, res) => {
                 .sort({ date: 1, od: 1, sNo: 1 })
                 .lean();
             const rawRevenueConfig = await RevenueConfig.findOne({ userId }).lean();
-            const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}));
+            const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}))
+                .filter((row) => rowMatchesRevenueStopFilter(row, requestedStops));
 
             const summary = rows.reduce((acc, row) => ({
                 pax: roundToWhole(acc.pax + parseNumber(row.pax)),
@@ -3157,7 +3178,8 @@ exports.getRevenueData = async (req, res) => {
             PooTable.find(match).lean(),
             RevenueConfig.findOne({ userId }).lean(),
         ]);
-        const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}));
+        const rows = normalizeRevenueRowsForReporting(rawRows, normalizeRevenueConfig(rawRevenueConfig || {}))
+            .filter((row) => rowMatchesRevenueStopFilter(row, requestedStops));
         const aggregate = buildRevenueAggregateResponse(rows, safeGroupByFields, periodicity);
 
         res.status(200).json({
@@ -3205,6 +3227,8 @@ exports.__testables__ = {
     normalizeDateKey,
     getCarriedForwardFxRate,
     convertLocalToReporting,
+    getRevenueStopDisplayValue,
+    rowMatchesRevenueStopFilter,
     normalizeRevenueRowsForReporting,
     buildBlankAwareClause,
     backfillMasterFieldsToPooRows,

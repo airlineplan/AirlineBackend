@@ -7,6 +7,7 @@ const Tenant = require("../model/tenantSchema");
 const User = require("../model/userSchema");
 const { requireTenantAdmin } = require("../middlware/auth");
 const { scopedUserQuery } = require("../controller/accessScope");
+const { isFeatureAllowedForTenantAdmin, requireTenantFeatureAccess } = require("../middlware/tenantFeatureAccess");
 const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
@@ -149,6 +150,51 @@ test("tenant admin data scope can see instance records while users stay self-sco
     scopedUserQuery({ user: { id: "tenant-admin", role: "tenant_admin" } }, { isComplete: true }),
     { isComplete: true }
   );
+});
+
+test("tenant admin feature access is driven by config flags", () => {
+  assert.equal(isFeatureAllowedForTenantAdmin("users"), true);
+  assert.equal(isFeatureAllowedForTenantAdmin("network"), false);
+
+  const createResponse = () => ({
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  });
+
+  const blocked = createResponse();
+  let blockedNextCalled = false;
+  requireTenantFeatureAccess("network")(
+    { user: { role: "tenant_admin" } },
+    blocked,
+    () => {
+      blockedNextCalled = true;
+    }
+  );
+
+  assert.equal(blockedNextCalled, false);
+  assert.equal(blocked.statusCode, 403);
+  assert.equal(blocked.body.featureId, "network");
+
+  const allowed = createResponse();
+  let allowedNextCalled = false;
+  requireTenantFeatureAccess("users")(
+    { user: { role: "tenant_admin" } },
+    allowed,
+    () => {
+      allowedNextCalled = true;
+    }
+  );
+
+  assert.equal(allowedNextCalled, true);
+  assert.equal(allowed.statusCode, 200);
 });
 
 test("tenant admin bootstrap requires the provisioning secret", () => {

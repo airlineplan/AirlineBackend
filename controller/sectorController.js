@@ -81,7 +81,9 @@ const AddSectors = async (req, res) => {
       sector2,
       acftType,
       variant,
+      std,
       bt,
+      sta,
       gcd,
       paxCapacity,
       CargoCapT,
@@ -107,7 +109,9 @@ const AddSectors = async (req, res) => {
       sector2,
       acftType,
       variant,
+      std,
       bt,
+      sta,
       gcd,
       paxCapacity,
       CargoCapT,
@@ -284,6 +288,7 @@ const updateSector = async (req, res) => {
   const { id } = req.params;
   const {
     acftType,
+    sta,
     gcd,
     paxCapacity,
     CargoCapT,
@@ -311,6 +316,7 @@ const updateSector = async (req, res) => {
         sectorObjectId,
         {
           acftType,
+          sta,
           gcd,
           paxCapacity,
           CargoCapT,

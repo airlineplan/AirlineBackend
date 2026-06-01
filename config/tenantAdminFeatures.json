@@ -1,0 +1,22 @@
+{
+  "features": [
+    { "id": "network", "label": "Network", "isAllowed": false },
+    { "id": "sectors", "label": "Sectors", "isAllowed": false },
+    { "id": "stations", "label": "Stations", "isAllowed": false },
+    { "id": "rotations", "label": "Rotations", "isAllowed": false },
+    { "id": "flgts", "label": "FLGTs", "isAllowed": false },
+    { "id": "view", "label": "View", "isAllowed": false },
+    { "id": "dashboard", "label": "Dashboard", "isAllowed": false },
+    { "id": "list", "label": "List", "isAllowed": false },
+    { "id": "connections", "label": "Connections", "isAllowed": false },
+    { "id": "assignment", "label": "Assignment", "isAllowed": false },
+    { "id": "fleet", "label": "Fleet", "isAllowed": false },
+    { "id": "maintenance", "label": "Maintenance", "isAllowed": false },
+    { "id": "poo", "label": "POO", "isAllowed": false },
+    { "id": "revenue", "label": "Revenue", "isAllowed": false },
+    { "id": "cost", "label": "Cost", "isAllowed": false },
+    { "id": "crew", "label": "Crew", "isAllowed": false },
+    { "id": "routeEconomics", "label": "Route Economics", "isAllowed": false },
+    { "id": "users", "label": "Users", "isAllowed": true }
+  ]
+}
