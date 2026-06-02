@@ -36,6 +36,7 @@ const fleetController = require("../controller/fleetController");
 const costController = require("../controller/costController");
 const apuFuelController = require("../controller/apuFuelController");
 const tenantUserController = require("../controller/tenantUserController");
+const crewController = require("../controller/crewController");
 
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
@@ -132,6 +133,30 @@ user.post(
   upload.single("file"),
   assignmentController.uploadAssignments
 );
+
+// --- CREW ENDPOINTS ---
+user.get("/crew/bootstrap", ...featureAccess("crew"), crewController.getCrewBootstrap);
+user.get("/crew/options", ...featureAccess("crew"), crewController.getCrewOptions);
+user.get("/crew/duty-settings", ...featureAccess("crew"), crewController.getDutySettings);
+user.put("/crew/duty-settings", ...featureAccess("crew", "edit"), jsonParser, crewController.updateDutySettings);
+user.get("/crew/positioning-settings", ...featureAccess("crew"), crewController.getPositioningSettings);
+user.put("/crew/positioning-settings", ...featureAccess("crew", "edit"), jsonParser, crewController.updatePositioningSettings);
+user.get("/crew/utilisation-targets", ...featureAccess("crew"), crewController.listUtilisationTargets);
+user.post("/crew/utilisation-targets/bulk", ...featureAccess("crew", "edit"), jsonParser, crewController.bulkSaveUtilisationTargets);
+user.delete("/crew/utilisation-targets/:id", ...featureAccess("crew", "edit"), crewController.deleteUtilisationTarget);
+user.get("/crew/layover-rules", ...featureAccess("crew"), crewController.listLayoverRules);
+user.post("/crew/layover-rules/bulk", ...featureAccess("crew", "edit"), jsonParser, crewController.bulkSaveLayoverRules);
+user.delete("/crew/layover-rules/:id", ...featureAccess("crew", "edit"), crewController.deleteLayoverRule);
+user.get("/crew/positioning-cost-rules", ...featureAccess("crew"), crewController.listPositioningCostRules);
+user.post("/crew/positioning-cost-rules/bulk", ...featureAccess("crew", "edit"), jsonParser, crewController.bulkSavePositioningCostRules);
+user.delete("/crew/positioning-cost-rules/:id", ...featureAccess("crew", "edit"), crewController.deletePositioningCostRule);
+user.post("/crew/upload/members", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadCrewInformation);
+user.post("/crew/upload/flight-duties", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadFlightDuties);
+user.post("/crew/upload/other-duties", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadOtherDuties);
+user.post("/crew/update-plan", ...featureAccess("crew", "edit"), jsonParser, crewController.updatePlan);
+user.get("/crew/calculation-runs/latest", ...featureAccess("crew"), crewController.getLatestRun);
+user.get("/crew/diary", ...featureAccess("crew"), crewController.getCrewDiary);
+user.get("/crew/kpis", ...featureAccess("crew"), crewController.getCrewKpis);
 
 user.get(
   "/getWeeklyAssignments",

@@ -1,0 +1,435 @@
+const xlsx = require("xlsx");
+const moment = require("moment");
+const Flight = require("../model/flight");
+const {
+  CrewFlightAssignment,
+  CrewMember,
+  CrewOtherDuty,
+  CrewUploadBatch,
+} = require("../model/crewSchemas");
+const {
+  combineDateAndClock,
+  dateKey,
+  diffMinutes,
+  endAfterStartWithOvernight,
+  getRowValue,
+  normalizeText,
+  normalizeUpper,
+  parseDateTime,
+  parseDurationToMinutes,
+  parseExcelDate,
+  roundMoney,
+} = require("./crewTimeUtils");
+
+const readRows = (filePath) => {
+  const workbook = xlsx.readFile(filePath, { cellDates: true });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return xlsx.utils.sheet_to_json(sheet, { raw: false, defval: "" });
+};
+
+const cleanNumber = (value) => {
+  if (value === "" || value === null || value === undefined) return 0;
+  const parsed = Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const rowError = (rowNumber, message, row = {}) => ({ rowNumber, message, row });
+
+const buildBatch = async ({ userId, uploadType, fileName, uploadedBy }) => CrewUploadBatch.create({
+  userId,
+  uploadType,
+  fileName,
+  uploadedBy,
+});
+
+const finishBatch = async (batch, summary) => {
+  Object.assign(batch, {
+    rowsRead: summary.rowsRead,
+    rowsInserted: summary.rowsInserted,
+    rowsUpdated: summary.rowsUpdated,
+    invalidRows: summary.invalidRows,
+    warnings: summary.warnings,
+    validationErrors: summary.errors,
+  });
+  await batch.save();
+};
+
+const defaultSummary = (batch) => ({
+  batchId: batch?._id,
+  rowsRead: 0,
+  rowsInserted: 0,
+  rowsUpdated: 0,
+  invalidRows: 0,
+  warnings: [],
+  errors: [],
+  unresolvedCrew: [],
+  unresolvedFlights: [],
+});
+
+const importCrewMembers = async ({ userId, file, uploadedBy }) => {
+  const batch = await buildBatch({
+    userId,
+    uploadType: "CREW_INFORMATION",
+    fileName: file.originalname,
+    uploadedBy,
+  });
+  const summary = defaultSummary(batch);
+  const rows = readRows(file.path);
+  summary.rowsRead = rows.length;
+  const seenCrewCodes = new Set();
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const rowNumber = index + 2;
+    const crewCode = normalizeUpper(getRowValue(row, ["id", "crew id", "crew code", "crewid"]));
+    const name = normalizeText(getRowValue(row, ["name", "crew name", "crewname"]));
+    const crewType = normalizeUpper(getRowValue(row, ["fc/cc", "fc cc", "crew type", "crewtype"]));
+    const role = normalizeText(getRowValue(row, ["role", "rank", "position"]));
+    const baseStation = normalizeUpper(getRowValue(row, ["base", "base station", "basestation"]));
+    const dpAllowanceRate = cleanNumber(getRowValue(row, ["dp allowance", "dp allowance rate", "dpallowance"]));
+    const fdpAllowanceRate = cleanNumber(getRowValue(row, ["fdp allowance", "fdp allowance rate", "fdpallowance"]));
+    const ftAllowanceRate = cleanNumber(getRowValue(row, ["ft allowance", "ft allowance rate", "ftallowance"]));
+    const allowanceCurrency = normalizeUpper(getRowValue(row, ["allowance currency", "currency", "ccy"]));
+
+    const errors = [];
+    if (!crewCode) errors.push("Crew ID is required.");
+    if (!name) errors.push("Crew name is required.");
+    if (!role) errors.push("Role is required.");
+    if (!baseStation) errors.push("Base station is required.");
+    if (!allowanceCurrency) errors.push("Allowance currency is required.");
+    if (dpAllowanceRate === null || dpAllowanceRate < 0) errors.push("DP allowance must be numeric and non-negative.");
+    if (fdpAllowanceRate === null || fdpAllowanceRate < 0) errors.push("FDP allowance must be numeric and non-negative.");
+    if (ftAllowanceRate === null || ftAllowanceRate < 0) errors.push("FT allowance must be numeric and non-negative.");
+    if (crewCode && seenCrewCodes.has(crewCode)) errors.push("Duplicate Crew ID within this import.");
+
+    if (errors.length > 0) {
+      summary.invalidRows += 1;
+      summary.errors.push(rowError(rowNumber, errors.join(" "), row));
+      continue;
+    }
+
+    seenCrewCodes.add(crewCode);
+    const existing = await CrewMember.findOne({ userId, crewCode }).lean();
+    await CrewMember.findOneAndUpdate(
+      { userId, crewCode },
+      {
+        $set: {
+          name,
+          crewType,
+          role,
+          baseStation,
+          dpAllowanceRate,
+          fdpAllowanceRate,
+          ftAllowanceRate,
+          allowanceCurrency,
+          uploadBatchId: batch._id,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    if (existing) summary.rowsUpdated += 1;
+    else summary.rowsInserted += 1;
+  }
+
+  await finishBatch(batch, summary);
+  return summary;
+};
+
+const assignmentColumns = [
+  { role: "Captain", aliases: ["captain", "capt", "cpt"] },
+  { role: "First Officer", aliases: ["fo", "first officer", "firstofficer", "f/o"] },
+  { role: "Cabin Crew 1", aliases: ["cc1", "cabin crew 1", "cabincrew1"] },
+  { role: "Cabin Crew 2", aliases: ["cc2", "cabin crew 2", "cabincrew2"] },
+  { role: "Cabin Crew 3", aliases: ["cc3", "cabin crew 3", "cabincrew3"] },
+  { role: "Cabin Crew 4", aliases: ["cc4", "cabin crew 4", "cabincrew4"] },
+];
+
+const findScheduleFlight = async ({ userId, date, flightNumber, departureStation, arrivalStation }) => {
+  const start = moment.utc(date).startOf("day").toDate();
+  const end = moment.utc(date).endOf("day").toDate();
+  const flightRegex = new RegExp(`^${String(flightNumber).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+  const candidates = await Flight.find({
+    userId,
+    date: { $gte: start, $lte: end },
+    flight: flightRegex,
+  }).lean();
+
+  if (candidates.length === 0) return null;
+
+  return candidates.find((flight) => (
+    (!departureStation || normalizeUpper(flight.depStn) === departureStation) &&
+    (!arrivalStation || normalizeUpper(flight.arrStn) === arrivalStation)
+  )) || candidates[0];
+};
+
+const buildFlightTimes = async ({ userId, date, flightNumber, departureStation, arrivalStation, row }) => {
+  const scheduleFlight = await findScheduleFlight({ userId, date, flightNumber, departureStation, arrivalStation });
+  const stdValue = scheduleFlight?.std || getRowValue(row, ["std", "std lt", "scheduled departure"]);
+  const staValue = scheduleFlight?.sta || getRowValue(row, ["sta", "sta lt", "scheduled arrival"]);
+  const std = combineDateAndClock(date, stdValue);
+  const rawSta = combineDateAndClock(date, staValue);
+  const sta = endAfterStartWithOvernight(std, rawSta);
+
+  return {
+    scheduleFlight,
+    std,
+    sta,
+    warning: scheduleFlight ? "" : "Flight not found in master schedule; using uploaded STD/STA.",
+  };
+};
+
+const importFlightDuties = async ({ userId, file, uploadedBy }) => {
+  const batch = await buildBatch({
+    userId,
+    uploadType: "FLIGHT_DUTY",
+    fileName: file.originalname,
+    uploadedBy,
+  });
+  const summary = defaultSummary(batch);
+  const rows = readRows(file.path);
+  summary.rowsRead = rows.length;
+  const crewMembers = await CrewMember.find({ userId }).lean();
+  const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const rowNumber = index + 2;
+    const rawDate = getRowValue(row, ["date", "flight date", "flightdate"]);
+    const flightDate = parseExcelDate(rawDate);
+    const flightNumber = normalizeUpper(getRowValue(row, ["flight number", "flight no", "flight #", "flight", "flightnumber"]));
+    const departureStation = normalizeUpper(getRowValue(row, ["departure station", "dep stn", "dep", "from"]));
+    const arrivalStation = normalizeUpper(getRowValue(row, ["arrival station", "arr stn", "arr", "to"]));
+    const sector = normalizeUpper(getRowValue(row, ["sector"])) || [departureStation, arrivalStation].filter(Boolean).join("-");
+    const sourceRosterRowId = normalizeText(getRowValue(row, ["row id", "rowid", "s.no", "s no"])) || String(rowNumber - 1);
+
+    const errors = [];
+    if (!flightDate) errors.push("Date is required and must be valid.");
+    if (!flightNumber) errors.push("Flight number is required.");
+    if (!departureStation) errors.push("Departure station is required.");
+    if (!arrivalStation) errors.push("Arrival station is required.");
+
+    const crewAssignments = assignmentColumns
+      .map((column) => ({
+        role: column.role,
+        crewCode: normalizeUpper(getRowValue(row, column.aliases)),
+      }))
+      .filter((assignment) => assignment.crewCode);
+
+    if (crewAssignments.length === 0) {
+      errors.push("At least one crew assignment column is required.");
+    }
+
+    if (errors.length > 0) {
+      summary.invalidRows += 1;
+      summary.errors.push(rowError(rowNumber, errors.join(" "), row));
+      continue;
+    }
+
+    const { scheduleFlight, std, sta, warning } = await buildFlightTimes({
+      userId,
+      date: flightDate,
+      flightNumber,
+      departureStation,
+      arrivalStation,
+      row,
+    });
+
+    if (!std || !sta) {
+      summary.invalidRows += 1;
+      summary.unresolvedFlights.push({ rowNumber, flightNumber, date: dateKey(flightDate), sector });
+      summary.errors.push(rowError(rowNumber, "Could not resolve valid STD/STA from schedule or upload.", row));
+      continue;
+    }
+
+    if (warning) {
+      summary.warnings.push({ rowNumber, message: warning, flightNumber, date: dateKey(flightDate), sector });
+      summary.unresolvedFlights.push({ rowNumber, flightNumber, date: dateKey(flightDate), sector });
+    }
+
+    for (const assignment of crewAssignments) {
+      const crew = crewByCode.get(assignment.crewCode);
+      if (!crew) {
+        summary.invalidRows += 1;
+        summary.unresolvedCrew.push({ rowNumber, crewCode: assignment.crewCode, flightNumber });
+        summary.errors.push(rowError(rowNumber, `Crew ID ${assignment.crewCode} has not been imported.`, row));
+        continue;
+      }
+
+      const existing = await CrewFlightAssignment.findOne({
+        userId,
+        crewCode: crew.crewCode,
+        flightDate,
+        flightNumber,
+        assignedRole: assignment.role,
+      }).lean();
+
+      await CrewFlightAssignment.findOneAndUpdate(
+        {
+          userId,
+          crewCode: crew.crewCode,
+          flightDate,
+          flightNumber,
+          assignedRole: assignment.role,
+        },
+        {
+          $set: {
+            flightId: scheduleFlight?._id || null,
+            crewMemberId: crew._id,
+            departureStation,
+            arrivalStation,
+            sector,
+            std,
+            sta,
+            sourceRosterRowId,
+            uploadBatchId: batch._id,
+            validationWarnings: warning ? [warning] : [],
+          },
+        },
+        { upsert: true, new: true }
+      );
+
+      if (existing) summary.rowsUpdated += 1;
+      else summary.rowsInserted += 1;
+    }
+  }
+
+  await finishBatch(batch, summary);
+  return summary;
+};
+
+const parseOtherDutyTimes = (row) => {
+  const startDateTime = parseDateTime(getRowValue(row, ["start datetime", "start date time", "start"]), getRowValue(row, ["date", "start date"]));
+  let start = startDateTime;
+
+  if (!start) {
+    start = combineDateAndClock(
+      getRowValue(row, ["date", "start date", "duty date"]),
+      getRowValue(row, ["start time", "starttime"])
+    );
+  }
+
+  let end = parseDateTime(getRowValue(row, ["finish datetime", "finish date time", "end datetime", "end"]), getRowValue(row, ["date", "finish date", "end date"]));
+
+  if (!end) {
+    end = combineDateAndClock(
+      getRowValue(row, ["finish date", "end date", "date", "start date", "duty date"]),
+      getRowValue(row, ["finish time", "finishtime", "end time", "endtime"])
+    );
+  }
+
+  const duration = parseDurationToMinutes(getRowValue(row, ["duty duration", "duration", "duty time"]));
+  if (start && !end && duration !== null) {
+    end = moment.utc(start).add(duration, "minutes").toDate();
+  }
+
+  return { start, end: endAfterStartWithOvernight(start, end) };
+};
+
+const isPositioningDuty = (category, subCategory) => (
+  `${category} ${subCategory}`.toLowerCase().match(/position|deadhead|travel|return to base/) !== null
+);
+
+const importOtherDuties = async ({ userId, file, uploadedBy }) => {
+  const batch = await buildBatch({
+    userId,
+    uploadType: "OTHER_DUTY",
+    fileName: file.originalname,
+    uploadedBy,
+  });
+  const summary = defaultSummary(batch);
+  const rows = readRows(file.path);
+  summary.rowsRead = rows.length;
+  const crewMembers = await CrewMember.find({ userId }).lean();
+  const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const rowNumber = index + 2;
+    const crewCode = normalizeUpper(getRowValue(row, ["crew id", "crewid", "crew code", "id"]));
+    const crew = crewByCode.get(crewCode);
+    const { start, end } = parseOtherDutyTimes(row);
+    const location = normalizeUpper(getRowValue(row, ["location", "stn", "station"]));
+    const category = normalizeText(getRowValue(row, ["category", "duty category"]));
+    const subCategory = normalizeText(getRowValue(row, ["sub-category", "subcategory", "sub category"]));
+    const sourceRosterRowId = normalizeText(getRowValue(row, ["row id", "rowid", "s.no", "s no"])) || String(rowNumber - 1);
+    const errors = [];
+
+    if (!crewCode) errors.push("Crew ID is required.");
+    if (crewCode && !crew) errors.push(`Crew ID ${crewCode} has not been imported.`);
+    if (!start || !end) errors.push("Start and finish/duration must form a valid datetime range.");
+    if (start && end && diffMinutes(start, end) <= 0) errors.push("Finish must be after start.");
+    if (!location) errors.push("Location is required.");
+    if (!category) errors.push("Category is required.");
+    if (!subCategory) errors.push("Sub-category is required.");
+
+    if (errors.length > 0) {
+      summary.invalidRows += 1;
+      if (crewCode && !crew) summary.unresolvedCrew.push({ rowNumber, crewCode });
+      summary.errors.push(rowError(rowNumber, errors.join(" "), row));
+      continue;
+    }
+
+    const overlaps = await CrewOtherDuty.find({
+      userId,
+      crewMemberId: crew._id,
+      startDateTime: { $lt: end },
+      endDateTime: { $gt: start },
+    }).lean();
+    const validationWarnings = overlaps.length > 0
+      ? [`Overlaps ${overlaps.length} existing other duty row(s) for this crew member.`]
+      : [];
+    if (validationWarnings.length > 0) {
+      summary.warnings.push({ rowNumber, crewCode, message: validationWarnings[0] });
+    }
+
+    const existing = await CrewOtherDuty.findOne({
+      userId,
+      crewCode,
+      sourceRosterRowId,
+      startDateTime: start,
+    }).lean();
+
+    await CrewOtherDuty.findOneAndUpdate(
+      {
+        userId,
+        crewCode,
+        sourceRosterRowId,
+        startDateTime: start,
+      },
+      {
+        $set: {
+          crewMemberId: crew._id,
+          endDateTime: end,
+          location,
+          category,
+          subCategory,
+          isUserEnteredPositioning: isPositioningDuty(category, subCategory),
+          uploadBatchId: batch._id,
+          validationWarnings,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    if (existing) summary.rowsUpdated += 1;
+    else summary.rowsInserted += 1;
+  }
+
+  await finishBatch(batch, summary);
+  summary.rowsInserted = roundMoney(summary.rowsInserted);
+  return summary;
+};
+
+module.exports = {
+  importCrewMembers,
+  importFlightDuties,
+  importOtherDuties,
+  readRows,
+  __testables__: {
+    buildFlightTimes,
+    cleanNumber,
+    isPositioningDuty,
+    parseOtherDutyTimes,
+  },
+};
