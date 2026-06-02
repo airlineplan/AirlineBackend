@@ -15,6 +15,7 @@ const ASSIGNABLE_PAGE_FEATURES = [
   { id: "revenue", label: "Revenue" },
   { id: "cost", label: "Cost" },
   { id: "crew", label: "Crew" },
+  { id: "routeEconomics", label: "Route Economics" },
 ];
 
 const PAGE_ACCESS_LEVELS = ["none", "read", "edit"];
@@ -38,7 +39,7 @@ const buildPageAccess = (level) => Object.fromEntries(
   ASSIGNABLE_PAGE_FEATURES.map((feature) => [feature.id, level])
 );
 
-const createDefaultPageAccess = () => buildPageAccess("none");
+const createDefaultPageAccess = () => buildPageAccess("edit");
 const createLegacyPageAccess = () => buildPageAccess("edit");
 const isAllNonePageAccess = (pageAccess) => {
   const source = toPlainPageAccess(pageAccess);

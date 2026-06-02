@@ -131,7 +131,7 @@ test("tenant users validate page access maps", () => {
   assert.match(user.validateSync().message, /Invalid page access feature/);
 });
 
-test("page access defaults preserve legacy users and lock down new defaults", () => {
+test("page access defaults preserve legacy users and grant edit by default", () => {
   const legacyUser = new User({
     email: "legacy@star.example",
     password: "hashed-password",
@@ -140,9 +140,9 @@ test("page access defaults preserve legacy users and lock down new defaults", ()
   assert.equal(getEffectivePageAccess(legacyUser).network, "edit");
   assert.equal(getEffectivePageAccess({ pageAccess: {} }).network, "edit");
   assert.equal(getEffectivePageAccess({ pageAccess: createDefaultPageAccess() }).network, "edit");
-  assert.equal(getEffectivePageAccess({ pageAccess: createDefaultPageAccess(), pageAccessConfigured: true }).network, "none");
+  assert.equal(getEffectivePageAccess({ pageAccess: createDefaultPageAccess(), pageAccessConfigured: true }).network, "edit");
   assert.equal(normalizePageAccessInput({ network: "read" }).network, "read");
-  assert.equal(normalizePageAccessInput({ network: "read" }).stations, "none");
+  assert.equal(normalizePageAccessInput({ network: "read" }).stations, "edit");
   assert.throws(() => normalizePageAccessInput({ network: "delete" }), /Invalid access level/);
   assert.throws(() => normalizePageAccessInput({ unknown: "read" }), /Unknown page access feature/);
 });
@@ -196,7 +196,7 @@ test("tenant admin data scope can see instance records while users stay self-sco
 
 test("tenant admin feature access is driven by config flags", () => {
   assert.equal(isFeatureAllowedForTenantAdmin("users"), true);
-  assert.equal(isFeatureAllowedForTenantAdmin("network"), false);
+  assert.equal(isFeatureAllowedForTenantAdmin("network"), true);
 
   const createResponse = () => ({
     statusCode: 200,
@@ -211,19 +211,18 @@ test("tenant admin feature access is driven by config flags", () => {
     },
   });
 
-  const blocked = createResponse();
-  let blockedNextCalled = false;
+  const networkAllowed = createResponse();
+  let networkNextCalled = false;
   requireTenantFeatureAccess("network")(
     { user: { role: "tenant_admin" } },
-    blocked,
+    networkAllowed,
     () => {
-      blockedNextCalled = true;
+      networkNextCalled = true;
     }
   );
 
-  assert.equal(blockedNextCalled, false);
-  assert.equal(blocked.statusCode, 403);
-  assert.equal(blocked.body.featureId, "network");
+  assert.equal(networkNextCalled, true);
+  assert.equal(networkAllowed.statusCode, 200);
 
   const allowed = createResponse();
   let allowedNextCalled = false;
@@ -281,7 +280,7 @@ test("regular user page access enforces read and edit levels", () => {
   const noAccess = createResponse();
   let noAccessNextCalled = false;
   requireFeatureAccess("stations", "read")(
-    { user: { role: "user", pageAccess: createDefaultPageAccess(), pageAccessConfigured: true } },
+    { user: { role: "user", pageAccess: { ...createDefaultPageAccess(), stations: "none" }, pageAccessConfigured: true } },
     noAccess,
     () => {
       noAccessNextCalled = true;
