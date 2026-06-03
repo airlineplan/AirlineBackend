@@ -32,7 +32,7 @@ const maintenanceCalendarSchema = new Schema({
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true }
 }, { timestamps: true });
 
-// Ensure uniqueness per aircraft SN/BN
-maintenanceCalendarSchema.index({ userId: 1, calMsn: 1, calPn: 1, snBn: 1 }, { unique: true });
+// Allow multiple scheduled events for the same part while avoiding duplicate event rows.
+maintenanceCalendarSchema.index({ userId: 1, calMsn: 1, calPn: 1, snBn: 1, schEvent: 1 }, { unique: true });
 
 module.exports = mongoose.model("MaintenanceCalendar", maintenanceCalendarSchema);

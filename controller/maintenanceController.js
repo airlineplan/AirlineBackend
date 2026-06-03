@@ -77,9 +77,83 @@ const getCalendarDowntimeDays = (cal) => {
     return 0;
 };
 
-const getPlannedPostEventValue = (cal, key, fallback = 0) => {
-    const value = Number(cal?.[key]);
-    return Number.isFinite(value) ? value : fallback;
+const getExplicitPostEventValue = (cal, key) => {
+    if (cal?.[key] === "" || cal?.[key] === null || cal?.[key] === undefined) return null;
+    const value = Number(cal[key]);
+    return Number.isFinite(value) ? value : null;
+};
+
+const collectPostEventValues = (cal, triggeredGroups = []) => {
+    const values = {};
+
+    if (triggeredGroups.includes("restoration")) {
+        const postTso = getExplicitPostEventValue(cal, "postTso");
+        const postCso = getExplicitPostEventValue(cal, "postCso");
+        const postDso = getExplicitPostEventValue(cal, "postDso");
+
+        if (postTso !== null) values.tsoTsr = postTso;
+        if (postCso !== null) values.csoCsr = postCso;
+        if (postDso !== null) values.dsoDsr = postDso;
+    }
+
+    if (triggeredGroups.includes("replacement")) {
+        const postTsr = getExplicitPostEventValue(cal, "postTsr");
+        const postCsr = getExplicitPostEventValue(cal, "postCsr");
+        const postDsr = getExplicitPostEventValue(cal, "postDsr");
+
+        if (postTsr !== null) values.tsRplmt = postTsr;
+        if (postCsr !== null) values.csRplmt = postCsr;
+        if (postDsr !== null) values.dsRplmt = postDsr;
+    }
+
+    return values;
+};
+
+const applyPostEventValuesToCurrent = (currentValues, postEventValues = {}) => ({
+    currentTso: Object.prototype.hasOwnProperty.call(postEventValues, "tsoTsr") ? postEventValues.tsoTsr : currentValues.currentTso,
+    currentCso: Object.prototype.hasOwnProperty.call(postEventValues, "csoCsr") ? postEventValues.csoCsr : currentValues.currentCso,
+    currentDso: Object.prototype.hasOwnProperty.call(postEventValues, "dsoDsr") ? postEventValues.dsoDsr : currentValues.currentDso,
+    currentTsr: Object.prototype.hasOwnProperty.call(postEventValues, "tsRplmt") ? postEventValues.tsRplmt : currentValues.currentTsr,
+    currentCsr: Object.prototype.hasOwnProperty.call(postEventValues, "csRplmt") ? postEventValues.csRplmt : currentValues.currentCsr,
+    currentDsr: Object.prototype.hasOwnProperty.call(postEventValues, "dsRplmt") ? postEventValues.dsRplmt : currentValues.currentDsr,
+});
+
+let maintenanceCalendarIndexesEnsured = false;
+const ensureMaintenanceCalendarIndexes = async () => {
+    if (maintenanceCalendarIndexesEnsured) return;
+
+    try {
+        let indexes = [];
+        try {
+            indexes = await MaintenanceCalendar.collection.indexes();
+        } catch (error) {
+            const namespaceMissing = error?.codeName === "NamespaceNotFound" ||
+                /ns does not exist/i.test(error?.message || "");
+            if (!namespaceMissing) throw error;
+        }
+
+        const legacyIndex = indexes.find((index) => {
+            const keys = Object.keys(index.key || {});
+            return index.unique === true &&
+                keys.length === 4 &&
+                index.key.userId === 1 &&
+                index.key.calMsn === 1 &&
+                index.key.calPn === 1 &&
+                index.key.snBn === 1;
+        });
+
+        if (legacyIndex?.name) {
+            await MaintenanceCalendar.collection.dropIndex(legacyIndex.name);
+        }
+
+        await MaintenanceCalendar.collection.createIndex(
+            { userId: 1, calMsn: 1, calPn: 1, snBn: 1, schEvent: 1 },
+            { unique: true }
+        );
+        maintenanceCalendarIndexesEnsured = true;
+    } catch (error) {
+        console.warn("Could not ensure maintenance calendar indexes:", error.message);
+    }
 };
 
 const formatCalendarDate = (value) => value ? moment.utc(value).format("YYYY-MM-DD") : "";
@@ -787,6 +861,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             );
             assetCalendars.forEach(c => calendarIdsTouched.add(String(c._id)));
             let inMaintenanceUntil = null;
+            let pendingPostEvent = null;
 
             while (currDate.isSameOrBefore(segmentEnd)) {
                 const currentUtilizationContext = await getEffectiveUtilisationContext({
@@ -810,6 +885,18 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     if (currentDsn !== null) currentDsn += 1;
                     if (currentDso !== null) currentDso += 1;
                     if (currentDsr !== null) currentDsr += 1;
+
+                    if (pendingPostEvent && currDate.isSame(pendingPostEvent.date, "day")) {
+                        ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
+                            currentTso,
+                            currentCso,
+                            currentDso,
+                            currentTsr,
+                            currentCsr,
+                            currentDsr
+                        }, pendingPostEvent.values));
+                        pendingPostEvent = null;
+                    }
 
                     totalOps.push({
                         updateOne: {
@@ -911,6 +998,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     if (currentDso !== null) currentDso += 1;
                     if (currentDsr !== null) currentDsr += 1;
 
+                    const postEventValues = {};
                     for (const { cal, triggeredGroups } of triggeredCalendars) {
                         recordCalendarEvent({
                             cal,
@@ -919,16 +1007,28 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             projectedValues
                         });
 
-                        if (triggeredGroups.includes("restoration")) {
-                            currentTso = getPlannedPostEventValue(cal, "postTso");
-                            currentCso = getPlannedPostEventValue(cal, "postCso");
-                            currentDso = getPlannedPostEventValue(cal, "postDso");
-                        }
+                        Object.assign(postEventValues, collectPostEventValues(cal, triggeredGroups));
+                    }
 
-                        if (triggeredGroups.includes("replacement")) {
-                            currentTsr = getPlannedPostEventValue(cal, "postTsr");
-                            currentCsr = getPlannedPostEventValue(cal, "postCsr");
-                            currentDsr = getPlannedPostEventValue(cal, "postDsr");
+                    if (Object.keys(postEventValues).length > 0) {
+                        const postEventApplyDate = moment.utc(currDate)
+                            .add(Math.max(1, downDaysToApply) - 1, "days")
+                            .startOf("day");
+
+                        if (postEventApplyDate.isSame(currDate, "day")) {
+                            ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
+                                currentTso,
+                                currentCso,
+                                currentDso,
+                                currentTsr,
+                                currentCsr,
+                                currentDsr
+                            }, postEventValues));
+                        } else {
+                            pendingPostEvent = {
+                                date: postEventApplyDate,
+                                values: postEventValues
+                            };
                         }
                     }
 
@@ -2260,7 +2360,7 @@ exports.getCalendar = async (req, res) => {
             lastOccurre: formatCalendarDate(record.lastOccurre),
             nextEstima: formatCalendarDate(record.nextEstima),
             occurrence: record.occurrence || "",
-            postTso: record.postTso ?? record.soTsr ?? "",
+            postTso: record.postTso ?? "",
             postCso: record.postCso ?? "",
             postDso: record.postDso ?? "",
             postTsr: record.postTsr ?? "",
@@ -2290,8 +2390,10 @@ exports.bulkSaveCalendar = async (req, res) => {
         const bulkOperations = [];
         const affectedResetGroups = new Map();
 
+        await ensureMaintenanceCalendarIndexes();
+
         for (const record of calendarData) {
-            const parseNum = (val) => (val === "" || val === undefined) ? null : Number(val);
+            const parseNum = (val) => (val === "" || val === null || val === undefined) ? null : Number(val);
             const resetGroup = normalizeResetGroup({
                 msnEsn: record.calMsn,
                 pn: record.calPn,
@@ -2302,49 +2404,61 @@ exports.bulkSaveCalendar = async (req, res) => {
                 affectedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
             }
 
-            bulkOperations.push({
-                updateOne: {
-                    filter: {
-                        userId: String(userId),
-                        calMsn: record.calMsn,
-                        calPn: record.calPn,
-                        snBn: record.snBn
-                    },
-                    update: {
-                        $set: {
-                            calLabel: record.calLabel,
-                            lineBase: record.lineBase,
-                            schEvent: record.schEvent,
+            const update = {
+                $set: {
+                    calLabel: record.calLabel,
+                    lineBase: record.lineBase,
+                    schEvent: record.schEvent,
+                    calMsn: record.calMsn,
+                    calPn: record.calPn,
+                    snBn: record.snBn,
+                    eTsn: parseNum(record.eTsn),
+                    eCsn: parseNum(record.eCsn),
+                    eDsn: parseNum(record.eDsn),
+                    eTso: parseNum(record.eTso),
+                    eCso: parseNum(record.eCso),
+                    eDso: parseNum(record.eDso),
+                    eTsr: parseNum(record.eTsr),
+                    eCsr: parseNum(record.eCsr),
+                    eDsr: parseNum(record.eDsr),
+                    downDays: parseNum(record.downDays),
+                    avgDownda: parseNum(record.avgDownda),
+                    lastOccurre: null,
+                    nextEstima: null,
+                    occurrence: 0,
+                    postTso: parseNum(record.postTso),
+                    postCso: parseNum(record.postCso),
+                    postDso: parseNum(record.postDso),
+                    postTsr: parseNum(record.postTsr),
+                    postCsr: parseNum(record.postCsr),
+                    postDsr: parseNum(record.postDsr),
+                    soTsr: parseNum(record.soTsr),
+                    userId: String(userId)
+                }
+            };
+
+            if (isValidObjectId(record.id)) {
+                bulkOperations.push({
+                    updateOne: {
+                        filter: { _id: record.id, userId: String(userId) },
+                        update
+                    }
+                });
+            } else {
+                bulkOperations.push({
+                    updateOne: {
+                        filter: {
+                            userId: String(userId),
                             calMsn: record.calMsn,
                             calPn: record.calPn,
                             snBn: record.snBn,
-                            eTsn: parseNum(record.eTsn),
-                            eCsn: parseNum(record.eCsn),
-                            eDsn: parseNum(record.eDsn),
-                            eTso: parseNum(record.eTso),
-                            eCso: parseNum(record.eCso),
-                            eDso: parseNum(record.eDso),
-                            eTsr: parseNum(record.eTsr),
-                            eCsr: parseNum(record.eCsr),
-                            eDsr: parseNum(record.eDsr),
-                            downDays: parseNum(record.downDays),
-                            avgDownda: parseNum(record.avgDownda),
-                            lastOccurre: null,
-                            nextEstima: null,
-                            occurrence: 0,
-                            postTso: parseNum(record.postTso),
-                            postCso: parseNum(record.postCso),
-                            postDso: parseNum(record.postDso),
-                            postTsr: parseNum(record.postTsr),
-                            postCsr: parseNum(record.postCsr),
-                            postDsr: parseNum(record.postDsr),
-                            soTsr: parseNum(record.soTsr),
-                            userId: userId
-                        }
+                            schEvent: record.schEvent
+                        },
+                        update,
+                        upsert: true
                     },
-                    upsert: true
-                }
-            });
+                });
+            }
         }
 
         if (bulkOperations.length > 0) {

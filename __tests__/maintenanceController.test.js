@@ -1133,6 +1133,9 @@ test("maintenance calendar restoration intervals reset and repeat", async () => 
     schEvent: "Restoration interval",
     eTso: 10,
     downDays: 1,
+    postTso: 0,
+    postCso: 0,
+    postDso: 0,
   });
 
   const res = createMockResponse();
@@ -1199,6 +1202,9 @@ test("maintenance calendar replacement intervals reset replacement counters", as
     schEvent: "Replacement interval",
     eTsr: 10,
     avgDownda: 1,
+    postTsr: 0,
+    postCsr: 0,
+    postDsr: 0,
   });
 
   const res = createMockResponse();
@@ -1284,6 +1290,109 @@ test("saving calendar inputs recomputes next estimated date and occurrence count
   assert.equal(calendar?.occurrence, 1);
   assert.equal(calendar?.nextEstima.toISOString().slice(0, 10), "2026-05-06");
   assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-05-06");
+});
+
+test("saving calendar inputs retains multiple scheduled events for the same part", async () => {
+  const res = createMockResponse();
+  await maintenanceController.bulkSaveCalendar({
+    user: { id: USER_ID },
+    body: {
+      calendarData: [
+        {
+          calLabel: "Airframe",
+          lineBase: "Base",
+          calMsn: "1600",
+          schEvent: "A4",
+          calPn: "ATR72",
+          snBn: "1600",
+          eTsn: 2000,
+          downDays: 3,
+        },
+        {
+          calLabel: "Airframe",
+          lineBase: "Base",
+          calMsn: "1600",
+          schEvent: "4C",
+          calPn: "ATR72",
+          snBn: "1600",
+          downDays: 7,
+          avgDownda: 11,
+        },
+      ],
+    },
+  }, res);
+
+  const records = await MaintenanceCalendar.find({
+    userId: USER_ID,
+    calMsn: "1600",
+    calPn: "ATR72",
+    snBn: "1600",
+  }).sort({ schEvent: 1 }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map(record => record.schEvent), ["4C", "A4"]);
+});
+
+test("post-event calendar values are blank no-ops and filled values apply on last ground day", async () => {
+  const days = [1, 2, 3, 4, 5].map(day => utcDate(2026, 1, day));
+
+  await seedFlightDays(days);
+  await seedFleetAsset({
+    msn: 4400,
+    regn: "VT-PEV",
+    entry: days[0],
+    exit: days[4],
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: days[0],
+    msnEsn: "4400",
+    pn: "PN-PEV",
+    snBn: "SN-PEV",
+    tsn: 100,
+    csn: 100,
+    dsn: 100,
+    tsoTsr: 42,
+    csoCsr: 0,
+    dsoDsr: 50,
+    tsRplmt: 100,
+    csRplmt: 100,
+    dsRplmt: 100,
+    timeMetric: "BH",
+  });
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "4400",
+    fromDate: days[1],
+    toDate: days[4],
+    hours: 5,
+    cycles: 1,
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "4400",
+    calPn: "PN-PEV",
+    snBn: "SN-PEV",
+    schEvent: "Post event restoration",
+    eCso: 1,
+    downDays: 3,
+    postDso: 0,
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const triggerDay = await Utilisation.findOne({ userId: USER_ID, date: days[1], msnEsn: "4400" }).lean();
+  const lastGroundDay = await Utilisation.findOne({ userId: USER_ID, date: days[3], msnEsn: "4400" }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(triggerDay?.remarks, "Maintenance Check Triggered");
+  assert.equal(triggerDay?.tsoTsr, 42);
+  assert.equal(triggerDay?.dsoDsr, 51);
+  assert.equal(lastGroundDay?.remarks, "Maintenance Downtime");
+  assert.equal(lastGroundDay?.tsoTsr, 42);
+  assert.equal(lastGroundDay?.dsoDsr, 0);
 });
 
 test("utilisation assumptions persist avg downdays", async () => {
