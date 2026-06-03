@@ -1781,6 +1781,68 @@ test("saving reset records accepts modal fallback date", async () => {
   assert.equal(savedReset?.timeMetric, "FH");
 });
 
+test("saving reset records rejects invalid numeric status values with a client error", async () => {
+  const resetDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([resetDate]);
+
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      resetDate: "2026-05-05",
+      resetData: [
+        {
+          msnEsn: "ED0095",
+          pn: "PN-2",
+          snBn: "SN-2",
+          tsn: "not-a-number",
+          metric: "FH",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveResetRecords(req, res);
+
+  const savedResetCount = await MaintenanceReset.countDocuments({ userId: USER_ID });
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /TSN must be a valid number/i);
+  assert.equal(savedResetCount, 0);
+});
+
+test("saving reset records rejects invalid application time metrics", async () => {
+  const resetDate = utcDate(2026, 5, 5);
+
+  await seedFlightDays([resetDate]);
+
+  const req = {
+    user: { id: USER_ID },
+    body: {
+      resetDate: "2026-05-05",
+      resetData: [
+        {
+          msnEsn: "ED0095",
+          pn: "PN-2",
+          snBn: "SN-2",
+          tsn: 30,
+          metric: "minutes",
+        },
+      ],
+    },
+  };
+  const res = createMockResponse();
+
+  await maintenanceController.bulkSaveResetRecords(req, res);
+
+  const savedResetCount = await MaintenanceReset.countDocuments({ userId: USER_ID });
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /must be BH or FH/i);
+  assert.equal(savedResetCount, 0);
+});
+
 test("saving reset records uses modal reset date over effective row date", async () => {
   const staleEffectiveDate = utcDate(2026, 5, 1);
   const resetDate = utcDate(2026, 5, 5);

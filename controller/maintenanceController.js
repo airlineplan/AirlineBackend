@@ -43,6 +43,60 @@ const buildResetGroupKey = ({ msnEsn, pn, snBn } = {}) => [
     String(snBn || "").trim().toUpperCase()
 ].join("|");
 
+const resetNumericFields = [
+    { payloadKey: "tsn", label: "TSN", modelKey: "tsn" },
+    { payloadKey: "csn", label: "CSN", modelKey: "csn" },
+    { payloadKey: "dsn", label: "DSN", modelKey: "dsn" },
+    { payloadKey: "tso", label: "TSO/TSRtrtn", modelKey: "tsoTsr" },
+    { payloadKey: "cso", label: "CSO/CSRtrtn", modelKey: "csoCsr" },
+    { payloadKey: "dso", label: "DSO/DSRtrtn", modelKey: "dsoDsr" },
+    { payloadKey: "tsr", label: "TSRplmt", modelKey: "tsRplmt" },
+    { payloadKey: "csr", label: "CSRplmt", modelKey: "csRplmt" },
+    { payloadKey: "dsr", label: "DSRplmt", modelKey: "dsRplmt" },
+];
+
+const parseResetNumericValue = (value, label) => {
+    const normalizedValue = typeof value === "string" ? value.trim() : value;
+
+    if (normalizedValue === "" || normalizedValue === null || normalizedValue === undefined) {
+        return { ok: true, value: null };
+    }
+
+    const numericValue = Number(normalizedValue);
+    if (!Number.isFinite(numericValue)) {
+        return {
+            ok: false,
+            message: `${label} must be a valid number.`
+        };
+    }
+
+    return { ok: true, value: numericValue };
+};
+
+const normalizeResetTimeMetric = (value) => {
+    const metric = String(value || "BH").trim().toUpperCase();
+    return ["BH", "FH"].includes(metric) ? metric : null;
+};
+
+const getMongooseValidationMessage = (error) => {
+    if (error?.name === "ValidationError") {
+        return Object.values(error.errors || {})
+            .map(validationError => validationError.message)
+            .filter(Boolean)
+            .join(" ") || error.message;
+    }
+
+    const validationErrors = error?.validationErrors || error?.result?.result?.writeErrors;
+    if (Array.isArray(validationErrors) && validationErrors.length > 0) {
+        return validationErrors
+            .map(validationError => validationError?.message || validationError?.errmsg || validationError?.err?.errmsg)
+            .filter(Boolean)
+            .join(" ");
+    }
+
+    return null;
+};
+
 const calendarMetricGroups = {
     sinceNew: [
         { limitKey: "eTsn", valueKey: "tsn" },
@@ -1581,7 +1635,6 @@ exports.bulkSaveResetRecords = async (req, res) => {
         }
 
         const bulkOperations = [];
-        const utilisationOps = [];
         const replaceExistingResetOps = [];
         const saveDateStrings = new Set();
         const changedResetGroups = new Map();
@@ -1589,8 +1642,6 @@ exports.bulkSaveResetRecords = async (req, res) => {
 
         // Use a for...of loop to handle async Await calls
         for (const record of resetData) {
-            // Clean up empty string values to null for numeric fields
-            const parseNum = (val) => (val === "" || val === undefined) ? null : Number(val);
             const msnEsn = String(record.msnEsn || "").trim();
             const pn = String(record.pn || "").trim();
             const snBn = String(record.snBn || "").trim();
@@ -1628,21 +1679,33 @@ exports.bulkSaveResetRecords = async (req, res) => {
                 });
             }
 
+            const numericFields = {};
+            for (const { payloadKey, label, modelKey } of resetNumericFields) {
+                const parsedValue = parseResetNumericValue(record[payloadKey], label);
+                if (!parsedValue.ok) {
+                    return res.status(400).json({
+                        success: false,
+                        message: parsedValue.message
+                    });
+                }
+                numericFields[modelKey] = parsedValue.value;
+            }
+
+            const timeMetric = normalizeResetTimeMetric(record.metric);
+            if (!timeMetric) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Application time metric must be BH or FH."
+                });
+            }
+
             const normalizedDate = parsedDate.startOf("day").toDate();
             const updateFields = {
                 date: normalizedDate,
                 msnEsn,
                 pn,
                 snBn,
-                tsn: parseNum(record.tsn),
-                csn: parseNum(record.csn),
-                dsn: parseNum(record.dsn),
-                tsoTsr: parseNum(record.tso),
-                csoCsr: parseNum(record.cso),
-                dsoDsr: parseNum(record.dso),
-                tsRplmt: parseNum(record.tsr),
-                csRplmt: parseNum(record.csr),
-                dsRplmt: parseNum(record.dsr),
+                ...numericFields,
             };
             saveDateStrings.add(moment(normalizedDate).format("YYYY-MM-DD"));
             changedResetGroups.set(resetGroupKey, resetGroup);
@@ -1673,30 +1736,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
                         $set: {
                             ...updateFields,
                             userId: String(userId),
-                            timeMetric: record.metric || "BH"
-                        }
-                    },
-                    upsert: true
-                }
-            });
-
-            // 2. Utilisation table mapping (Sync for the explicit reset date)
-            utilisationOps.push({
-                updateOne: {
-                    filter: {
-                        userId: String(userId),
-                        date: updateFields.date,
-                        msnEsn: updateFields.msnEsn,
-                        pn: updateFields.pn,
-                        snBn: updateFields.snBn
-                    },
-                    update: {
-                        $set: {
-                            ...updateFields,
-                            userId: String(userId),
-                            timeMetric: record.metric || "BH",
-                            setFlag: "Y",
-                            remarks: "(end of day)"
+                            timeMetric
                         }
                     },
                     upsert: true
@@ -1705,10 +1745,7 @@ exports.bulkSaveResetRecords = async (req, res) => {
         }
 
         if (bulkOperations.length > 0) {
-            await Promise.all([
-                MaintenanceReset.bulkWrite(bulkOperations, { ordered: false }),
-                Utilisation.bulkWrite(utilisationOps, { ordered: false })
-            ]);
+            await MaintenanceReset.bulkWrite(bulkOperations, { ordered: false });
         }
 
         if (replaceExistingResetOps.length > 0) {
@@ -1734,6 +1771,13 @@ exports.bulkSaveResetRecords = async (req, res) => {
         res.status(200).json({ success: true, message: "Maintenance reset records updated successfully!" });
     } catch (error) {
         console.error("🔥 Error saving reset records:", error);
+        const validationMessage = getMongooseValidationMessage(error);
+        if (validationMessage) {
+            return res.status(400).json({
+                success: false,
+                message: validationMessage
+            });
+        }
         res.status(500).json({ message: "Failed to save records", error: error.message });
     }
 };
