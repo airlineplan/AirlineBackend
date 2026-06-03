@@ -635,19 +635,18 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
     }
 
     const msnNumber = Number(effectiveMsn);
+    if (!Number.isFinite(msnNumber)) {
+        return getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
+    }
+
     const assignmentFilter = {
         ...(userId ? { userId: String(userId) } : {}),
         date: {
             $gte: date.toDate(),
             $lt: moment.utc(date).endOf("day").toDate()
-        }
+        },
+        "aircraft.msn": msnNumber
     };
-
-    if (Number.isFinite(msnNumber)) {
-        assignmentFilter["aircraft.msn"] = msnNumber;
-    } else {
-        assignmentFilter["aircraft.msn"] = effectiveMsn;
-    }
 
     const assignments = await Assignment.find(assignmentFilter);
 

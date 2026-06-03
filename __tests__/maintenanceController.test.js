@@ -474,6 +474,60 @@ test("maintenance compute uses utilisation assumptions only when assignments are
   assert.equal(day3Util?.csn, 103);
 });
 
+test("maintenance compute falls back to assumptions for alphanumeric spare assets", async () => {
+  const day1 = utcDate(2026, 4, 1);
+  const day2 = utcDate(2026, 4, 2);
+
+  await seedFlightDays([day1, day2]);
+  await Fleet.create({
+    userId: USER_ID,
+    category: "Engine",
+    type: "CFM56",
+    variant: "5B",
+    sn: "ENG-A1",
+    entry: day1,
+    exit: utcDate(2026, 4, 30),
+    titled: "Spare",
+  });
+
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: day1,
+    msnEsn: "ENG-A1",
+    pn: "PN-ENG",
+    snBn: "ENG-A1",
+    tsn: 100,
+    csn: 50,
+    dsn: 10,
+    timeMetric: "BH",
+  });
+
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "ENG-A1",
+    fromDate: day2,
+    toDate: day2,
+    hours: 4,
+    cycles: 1,
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const day2Util = await Utilisation.findOne({
+    userId: USER_ID,
+    date: day2,
+    msnEsn: "ENG-A1",
+    pn: "PN-ENG",
+    snBn: "ENG-A1",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(day2Util?.tsn, 104);
+  assert.equal(day2Util?.csn, 51);
+  assert.equal(day2Util?.dsn, 11);
+});
+
 test("maintenance dashboard shows computed status before and after reset date", async () => {
   const day1 = utcDate(2026, 5, 1);
   const day2 = utcDate(2026, 5, 2);
