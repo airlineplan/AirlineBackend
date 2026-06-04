@@ -128,7 +128,6 @@ async function connectMongo() {
       stdio: ["ignore", "ignore", "ignore"],
     }
   );
-  mongodProcess.unref();
 
   await waitForPortOpen(port);
   await mongoose.connect(`mongodb://127.0.0.1:${port}/${dbName}`, {
@@ -139,6 +138,25 @@ async function connectMongo() {
 async function resetDatabase() {
   if (mongoose.connection?.db) {
     await mongoose.connection.db.dropDatabase();
+  }
+}
+
+async function closeMongooseConnections() {
+  const connections = Array.isArray(mongoose.connections) && mongoose.connections.length > 0
+    ? mongoose.connections
+    : [mongoose.connection];
+
+  for (const connection of connections) {
+    if (!connection) continue;
+
+    if (connection.readyState !== 0) {
+      await connection.close(true);
+    }
+
+    const client = connection.getClient?.() || connection.client;
+    if (client && typeof client.close === "function") {
+      await client.close(true);
+    }
   }
 }
 
@@ -250,6 +268,8 @@ before(async () => {
 });
 
 after(async () => {
+  await closeMongooseConnections();
+
   if (mongodProcess) {
     await new Promise((resolve) => {
       if (mongodProcess.exitCode !== null || mongodProcess.signalCode !== null) {
@@ -270,12 +290,21 @@ after(async () => {
       mongodProcess.kill("SIGINT");
     });
   }
-  await Promise.race([
-    mongoose.connection.client?.close(true) || mongoose.connection.close(true),
-    new Promise((resolve) => setTimeout(resolve, 5000)),
-  ]);
   if (dbPath) {
     fs.rmSync(dbPath, { recursive: true, force: true });
+  }
+
+  if (process.env.DEBUG_TEST_HANDLES === "1") {
+    await new Promise((resolve) => setImmediate(resolve));
+    const handles = process._getActiveHandles().map((handle) => ({
+      type: handle.constructor?.name,
+      fd: handle.fd,
+      localAddress: handle.localAddress,
+      localPort: handle.localPort,
+      remoteAddress: handle.remoteAddress,
+      remotePort: handle.remotePort,
+    }));
+    console.error("ACTIVE_HANDLES", JSON.stringify(handles));
   }
 });
 

@@ -2704,7 +2704,10 @@ const enrichAllocatedCosts = (flights, config) => {
     getOverlappedApuUsageMonths(row, flights).forEach(({ monthKey, monthStart, days }) => {
       const priceRule = findFuelPriceForStations(config, [apuStation], monthKey);
       const totalKg = round2(apuHrPerDay * days * kgPerApuHr);
-      const poolAmount = priceRule ? calculateFuelCost(totalKg, priceRule) : 0;
+      const explicitPoolAmount = row.fromDate || row.toDate
+        ? 0
+        : toNumber(row.costRCCY || row.reportingAmount);
+      const poolAmount = priceRule ? calculateFuelCost(totalKg, priceRule) : explicitPoolAmount;
       const basis = row.basis || getAllocationBasis(config, "APUFUELCOST");
 
       const candidateFlights = flights.filter((flight) => {

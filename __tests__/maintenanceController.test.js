@@ -17,6 +17,7 @@ const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
 const Utilisation = require("../model/utilisation");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema");
 const RotableMovement = require("../model/rotableMovementSchema");
+const GroundDay = require("../model/groundDay");
 const maintenanceController = require("../controller/maintenanceController");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
@@ -142,7 +143,7 @@ async function seedFleetAsset({ msn, regn, entry, exit, titled = "" }) {
   });
 }
 
-async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, fh = 0, includeMetrics = true }) {
+async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, fh = 0, cycles = 1, includeMetrics = true }) {
   const assignment = {
     userId: USER_ID,
     date,
@@ -154,7 +155,7 @@ async function seedAssignment({ date, flightNumber, msn, registration, bh = 0, f
     metrics: {
       blockHours: bh,
       flightHours: fh,
-      cycles: 1,
+      cycles,
     },
     isValid: true,
     validationErrors: [],
@@ -1079,7 +1080,7 @@ test("maintenance calendar since-new threshold triggers once inside the master d
   assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-04-03");
 });
 
-test("maintenance compute deletes affected assignments and clears matching flights", async () => {
+test("maintenance compute creates ground days and excludes flying utilisation on conflicts", async () => {
   const day1 = utcDate(2026, 4, 1);
   const day2 = utcDate(2026, 4, 2);
 
@@ -1137,11 +1138,21 @@ test("maintenance compute deletes affected assignments and clears matching fligh
     flightNumber: "MX2",
   }).lean();
   const flight = await Flight.findOne({ userId: USER_ID, date: day2, flight: "MX2" }).lean();
+  const groundDay = await GroundDay.findOne({ userId: USER_ID, date: day2, msn: "4150" }).lean();
+  const triggerDay = await Utilisation.findOne({
+    userId: USER_ID,
+    date: day2,
+    msnEsn: "4150",
+    pn: "PN-MX",
+    snBn: "SN-MX",
+  }).lean();
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.assignmentImpact.deletedCount, 1);
-  assert.equal(assignment, null);
-  assert.ok(!flight?.aircraft?.registration);
+  assert.equal(res.body.assignmentImpact.deletedCount, 0);
+  assert.equal(assignment?.flightNumber, "MX2");
+  assert.equal(flight?.aircraft?.registration, "VT-MX1");
+  assert.equal(groundDay?.event, "Performance restoration");
+  assert.equal(triggerDay?.tsn, 100);
 });
 
 test("maintenance calendar restoration intervals reset and repeat", async () => {
@@ -1369,6 +1380,7 @@ test("saving calendar inputs retains multiple scheduled events for the same part
           schEvent: "4C",
           calPn: "ATR72",
           snBn: "1600",
+          eCsn: 4000,
           downDays: 7,
           avgDownda: 11,
         },
@@ -1443,10 +1455,222 @@ test("post-event calendar values are blank no-ops and filled values apply on las
   assert.equal(res.statusCode, 200);
   assert.equal(triggerDay?.remarks, "Maintenance Check Triggered");
   assert.equal(triggerDay?.tsoTsr, 42);
-  assert.equal(triggerDay?.dsoDsr, 51);
+  assert.equal(triggerDay?.dsoDsr, 50);
   assert.equal(lastGroundDay?.remarks, "Maintenance Downtime");
   assert.equal(lastGroundDay?.tsoTsr, 42);
   assert.equal(lastGroundDay?.dsoDsr, 0);
+});
+
+test("calendar earliest-of every creates one occurrence, suppresses alternates, and is idempotent", async () => {
+  const jan1 = utcDate(2027, 1, 1);
+  const jan2 = utcDate(2027, 1, 2);
+  const jan3 = utcDate(2027, 1, 3);
+  const jan4 = utcDate(2027, 1, 4);
+  const jan5 = utcDate(2027, 1, 5);
+  const jan6 = utcDate(2027, 1, 6);
+  const jan7 = utcDate(2027, 1, 7);
+  const jun21 = utcDate(2029, 6, 21);
+  const jun22 = utcDate(2029, 6, 22);
+  const jun23 = utcDate(2029, 6, 23);
+  const jun27 = utcDate(2029, 6, 27);
+  const jun28 = utcDate(2029, 6, 28);
+
+  await seedFlightDays([jan1, jun28], "CK");
+  await seedFleetAsset({
+    msn: 4120,
+    regn: "VT-CHK",
+    entry: jan1,
+    exit: jun28,
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: jan1,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+    tsn: 0,
+    csn: 0,
+    dsn: 0,
+    tsoTsr: 0,
+    csoCsr: 12845,
+    dsoDsr: 3250,
+    tsRplmt: 0,
+    csRplmt: 0,
+    dsRplmt: 0,
+    timeMetric: "BH",
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: jun21,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+    tsn: 0,
+    csn: 0,
+    dsn: 0,
+    tsoTsr: 0,
+    csoCsr: 38565,
+    dsoDsr: 9898,
+    tsRplmt: 0,
+    csRplmt: 0,
+    dsRplmt: 0,
+    timeMetric: "BH",
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calLabel: "MSN 4120 - C-check",
+    lineBase: "Base",
+    calMsn: "4120",
+    schEvent: "C-check",
+    calPn: "A320",
+    snBn: "4120",
+    eCso: 12860,
+    eDso: 3300,
+    downDays: 3,
+    avgDownda: 5,
+  });
+
+  await seedAssignment({ date: jan2, flightNumber: "CK2", msn: 4120, registration: "VT-CHK", cycles: 7 });
+  await seedAssignment({ date: jan3, flightNumber: "CK3", msn: 4120, registration: "VT-CHK", cycles: 6 });
+  await seedAssignment({ date: jan4, flightNumber: "CK4", msn: 4120, registration: "VT-CHK", cycles: 4 });
+  await seedAssignment({ date: jun22, flightNumber: "CK22", msn: 4120, registration: "VT-CHK", cycles: 4 });
+  await seedAssignment({ date: jun23, flightNumber: "CK23", msn: 4120, registration: "VT-CHK", cycles: 6 });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const [jan4Util, jan5Util, jan6Util] = await Promise.all([jan4, jan5, jan6].map(date => Utilisation.findOne({
+    userId: USER_ID,
+    date,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+  }).lean()));
+  let calendar = await MaintenanceCalendar.findOne({ userId: USER_ID, calMsn: "4120" }).lean();
+  let groundDays = await GroundDay.find({ userId: USER_ID, msn: "4120" }).sort({ date: 1 }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calendar.occurrence, 2);
+  assert.equal(calendar.occurrencesTillExit, 1);
+  assert.equal(calendar.nextEstima.toISOString().slice(0, 10), "2027-01-04");
+  assert.equal(calendar.lastOccurre.toISOString().slice(0, 10), "2029-06-23");
+  assert.equal(calendar.generatedOccurrences.length, 2);
+
+  assert.equal(calendar.generatedOccurrences[0].triggeredByMetric, "CSO/CSRtrtn");
+  assert.equal(calendar.generatedOccurrences[0].triggerThreshold, 12860);
+  assert.equal(calendar.generatedOccurrences[0].downtimeApplied, 3);
+  assert.equal(calendar.generatedOccurrences[0].isFirstOccurrence, true);
+  assert.ok(calendar.generatedOccurrences[0].suppressedAlternateThresholds.some(item =>
+    item.metricCode === "DSO/DSRtrtn" && item.suppressedThreshold === 6600
+  ));
+
+  assert.equal(calendar.generatedOccurrences[1].triggeredByMetric, "DSO/DSRtrtn");
+  assert.equal(calendar.generatedOccurrences[1].triggerThreshold, 9900);
+  assert.equal(calendar.generatedOccurrences[1].downtimeApplied, 5);
+  assert.equal(calendar.generatedOccurrences[1].isFirstOccurrence, false);
+  assert.ok(calendar.generatedOccurrences[1].suppressedAlternateThresholds.some(item =>
+    item.metricCode === "CSO/CSRtrtn" && item.suppressedThreshold === 38580
+  ));
+
+  assert.equal(jan4Util.csoCsr, 12858);
+  assert.equal(jan4Util.dsoDsr, 3252);
+  assert.equal(jan5Util.csoCsr, 12858);
+  assert.equal(jan5Util.dsoDsr, 3253);
+  assert.equal(jan6Util.csoCsr, 12858);
+  assert.equal(jan6Util.dsoDsr, 3254);
+  assert.deepEqual(
+    groundDays.map(row => row.date.toISOString().slice(0, 10)),
+    ["2027-01-04", "2027-01-05", "2027-01-06", "2029-06-23", "2029-06-24", "2029-06-25", "2029-06-26", "2029-06-27"]
+  );
+
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+  calendar = await MaintenanceCalendar.findOne({ userId: USER_ID, calMsn: "4120" }).lean();
+  groundDays = await GroundDay.find({ userId: USER_ID, msn: "4120" }).lean();
+
+  assert.equal(calendar.generatedOccurrences.length, 2);
+  assert.equal(groundDays.length, 8);
+
+  await MaintenanceCalendar.updateOne({ _id: calendar._id }, { $set: { downDays: 4 } });
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, createMockResponse());
+
+  const janGroundDays = await GroundDay.find({
+    userId: USER_ID,
+    msn: "4120",
+    date: { $gte: jan4, $lte: jan7 },
+  }).sort({ date: 1 }).lean();
+  const jan7Util = await Utilisation.findOne({
+    userId: USER_ID,
+    date: jan7,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+  }).lean();
+
+  assert.deepEqual(janGroundDays.map(row => row.date.toISOString().slice(0, 10)), [
+    "2027-01-04",
+    "2027-01-05",
+    "2027-01-06",
+    "2027-01-07",
+  ]);
+  assert.equal(jan7Util.remarks, "Maintenance Downtime");
+  assert.equal(jan7Util.dsoDsr, 3255);
+});
+
+test("calendar planned post-event zero values apply on the last generated ground day", async () => {
+  const jan1 = utcDate(2027, 1, 1);
+  const jan2 = utcDate(2027, 1, 2);
+  const jan3 = utcDate(2027, 1, 3);
+  const jan4 = utcDate(2027, 1, 4);
+  const jan6 = utcDate(2027, 1, 6);
+
+  await seedFlightDays([jan1, jan6], "CZ");
+  await seedFleetAsset({
+    msn: 4120,
+    regn: "VT-POST",
+    entry: jan1,
+    exit: jan6,
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: jan1,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+    csoCsr: 12845,
+    dsoDsr: 3250,
+    timeMetric: "BH",
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "4120",
+    schEvent: "C-check",
+    calPn: "A320",
+    snBn: "4120",
+    eCso: 12860,
+    eDso: 3300,
+    downDays: 3,
+    avgDownda: 5,
+    postCso: 0,
+    postDso: 0,
+  });
+  await seedAssignment({ date: jan2, flightNumber: "CZ2", msn: 4120, registration: "VT-POST", cycles: 7 });
+  await seedAssignment({ date: jan3, flightNumber: "CZ3", msn: 4120, registration: "VT-POST", cycles: 6 });
+  await seedAssignment({ date: jan4, flightNumber: "CZ4", msn: 4120, registration: "VT-POST", cycles: 4 });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const endOfCheck = await Utilisation.findOne({
+    userId: USER_ID,
+    date: jan6,
+    msnEsn: "4120",
+    pn: "A320",
+    snBn: "4120",
+  }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(endOfCheck.csoCsr, 0);
+  assert.equal(endOfCheck.dsoDsr, 0);
 });
 
 test("utilisation assumptions persist avg downdays", async () => {

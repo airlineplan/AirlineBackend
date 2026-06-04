@@ -296,6 +296,12 @@ user.delete(
   maintenanceController.deleteUtilisationAssumption
 );
 
+user.get(
+  "/maintenance/ground-days",
+  ...featureAccess("maintenance"),
+  maintenanceController.getGroundDays
+);
+
 // 11. Get Calendar Inputs
 user.get(
   "/maintenance/calendar",

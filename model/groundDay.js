@@ -22,9 +22,27 @@ const groundDaySchema = new mongoose.Schema({
     event: {
         type: String,
         trim: true
+    },
+    source: {
+        type: String,
+        trim: true,
+        default: "MANUAL"
+    },
+    eventSeriesId: {
+        type: String,
+        trim: true,
+        index: true
+    },
+    occurrenceNumber: {
+        type: Number
+    },
+    occurrenceId: {
+        type: String,
+        trim: true
     }
 });
 
 groundDaySchema.index({ userId: 1, date: 1, msn: 1 });
+groundDaySchema.index({ userId: 1, source: 1, eventSeriesId: 1 });
 
 module.exports = mongoose.model("GroundDay", groundDaySchema);

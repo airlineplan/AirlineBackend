@@ -14,6 +14,20 @@ const moment = require('moment');
 const { revalidateAssignmentsForUser } = require('../utils/assignmentSync');
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
+const isInvalidUserIdCast = (error) =>
+    error?.name === "CastError" &&
+    (error.path === "userId" || /userId/.test(String(error.message || "")));
+
+const deleteManyIgnoringInvalidUserId = async (model, filter) => {
+    try {
+        return await model.deleteMany(filter);
+    } catch (error) {
+        if (isInvalidUserIdCast(error)) {
+            return { deletedCount: 0 };
+        }
+        throw error;
+    }
+};
 const escapeRegex = (value = "") =>
     String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const normalizeNumericAssetKey = (value) => {
@@ -120,11 +134,11 @@ const purgeMaintenanceDataForFleetAssets = async ({ userId, assets = [] } = {}) 
     ] = await Promise.all([
         MaintenanceReset.deleteMany({ userId: userKey, $or: resetUtilClauses }),
         Utilisation.deleteMany({ userId: userKey, $or: resetUtilClauses }),
-        MaintenanceTarget.deleteMany({ userId: userKey, $or: resetUtilClauses }),
-        MaintenanceCalendar.deleteMany({ userId: userKey, $or: calendarClauses }),
-        MaintenanceStatus.deleteMany({ userId: userKey, $or: statusClauses }),
+        deleteManyIgnoringInvalidUserId(MaintenanceTarget, { userId: userKey, $or: resetUtilClauses }),
+        deleteManyIgnoringInvalidUserId(MaintenanceCalendar, { userId: userKey, $or: calendarClauses }),
+        deleteManyIgnoringInvalidUserId(MaintenanceStatus, { userId: userKey, $or: statusClauses }),
         UtilisationAssumption.deleteMany({ userId: userKey, $or: assumptionClauses }),
-        RotableMovement.deleteMany({ userId: userKey, $or: rotableClauses }),
+        deleteManyIgnoringInvalidUserId(RotableMovement, { userId: userKey, $or: rotableClauses }),
         AircraftOnwing.deleteMany({ userId: userKey, $or: onwingAircraftClauses }),
         ...["pos1Esn", "pos2Esn", "apun"].map((field) =>
             AircraftOnwing.updateMany(
@@ -183,17 +197,17 @@ const purgeOrphanMaintenanceDataForActiveFleet = async ({ userId, activeAssetSns
             fields: ["msnEsn", "snBn"],
             activeAssetSns
         })),
-        MaintenanceTarget.deleteMany(buildInactiveFleetIdentityFilter({
+        deleteManyIgnoringInvalidUserId(MaintenanceTarget, buildInactiveFleetIdentityFilter({
             userId: userKey,
             fields: ["msnEsn", "snBn"],
             activeAssetSns
         })),
-        MaintenanceCalendar.deleteMany(buildInactiveFleetIdentityFilter({
+        deleteManyIgnoringInvalidUserId(MaintenanceCalendar, buildInactiveFleetIdentityFilter({
             userId: userKey,
             fields: ["calMsn", "snBn"],
             activeAssetSns
         })),
-        MaintenanceStatus.deleteMany(buildInactiveFleetIdentityFilter({
+        deleteManyIgnoringInvalidUserId(MaintenanceStatus, buildInactiveFleetIdentityFilter({
             userId: userKey,
             fields: ["targetId"],
             activeAssetSns
@@ -203,7 +217,7 @@ const purgeOrphanMaintenanceDataForActiveFleet = async ({ userId, activeAssetSns
             fields: ["msn"],
             activeAssetSns
         })),
-        RotableMovement.deleteMany(buildInactiveFleetIdentityFilter({
+        deleteManyIgnoringInvalidUserId(RotableMovement, buildInactiveFleetIdentityFilter({
             userId: userKey,
             fields: ["msn", "removedSN", "installedSN"],
             activeAssetSns

@@ -10,8 +10,8 @@ const Assignment = require("../model/assignment.js");
 const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema.js");
+const GroundDay = require("../model/groundDay.js");
 const moment = require('moment'); // <-- Added missing moment import
-const { deleteAssignmentsForAircraftDate } = require("../utils/assignmentSync");
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 const isValidObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
@@ -97,38 +97,220 @@ const getMongooseValidationMessage = (error) => {
     return null;
 };
 
-const calendarMetricGroups = {
-    sinceNew: [
-        { limitKey: "eTsn", valueKey: "tsn" },
-        { limitKey: "eCsn", valueKey: "csn" },
-        { limitKey: "eDsn", valueKey: "dsn" }
-    ],
-    restoration: [
-        { limitKey: "eTso", valueKey: "tsoTsr" },
-        { limitKey: "eCso", valueKey: "csoCsr" },
-        { limitKey: "eDso", valueKey: "dsoDsr" }
-    ],
-    replacement: [
-        { limitKey: "eTsr", valueKey: "tsRplmt" },
-        { limitKey: "eCsr", valueKey: "csRplmt" },
-        { limitKey: "eDsr", valueKey: "dsRplmt" }
-    ]
+const maintenanceMetricDefinitions = [
+    { limitKey: "eTsn", valueKey: "tsn", metricCode: "TSN", group: "sinceNew", label: "TSN" },
+    { limitKey: "eCsn", valueKey: "csn", metricCode: "CSN", group: "sinceNew", label: "CSN" },
+    { limitKey: "eDsn", valueKey: "dsn", metricCode: "DSN", group: "sinceNew", label: "DSN" },
+    { limitKey: "eTso", valueKey: "tsoTsr", metricCode: "TSO/TSRTRTN", group: "restoration", label: "TSO/TSRtrtn" },
+    { limitKey: "eCso", valueKey: "csoCsr", metricCode: "CSO/CSRTRTN", group: "restoration", label: "CSO/CSRtrtn" },
+    { limitKey: "eDso", valueKey: "dsoDsr", metricCode: "DSO/DSRTRTN", group: "restoration", label: "DSO/DSRtrtn" },
+    { limitKey: "eTsr", valueKey: "tsRplmt", metricCode: "TSRPLMT", group: "replacement", label: "TSRplmt" },
+    { limitKey: "eCsr", valueKey: "csRplmt", metricCode: "CSRPLMT", group: "replacement", label: "CSRplmt" },
+    { limitKey: "eDsr", valueKey: "dsRplmt", metricCode: "DSRPLMT", group: "replacement", label: "DSRplmt" },
+];
+
+const normalizeThresholdNumber = (value) => {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? Number(numericValue.toFixed(6)) : null;
 };
 
-const hasCalendarLimitHit = (cal, projectedValues, metricGroup) => metricGroup.some(({ limitKey, valueKey }) => {
-    const limit = Number(cal?.[limitKey]);
-    const projected = projectedValues?.[valueKey];
-    return Number.isFinite(limit) && limit > 0 && projected !== null && projected !== undefined && projected >= limit;
+const thresholdSetKey = (value) => {
+    const normalized = normalizeThresholdNumber(value);
+    return normalized === null ? "" : String(normalized);
+};
+
+const nextMultipleAfter = (value, interval) => {
+    const numericInterval = Number(interval);
+    if (!Number.isFinite(numericInterval) || numericInterval <= 0) return null;
+
+    const numericValue = Number(value || 0);
+    const multiplier = Math.floor((numericValue + Number.EPSILON) / numericInterval) + 1;
+    return normalizeThresholdNumber(multiplier * numericInterval);
+};
+
+const getCalendarTriggerDefinitions = (cal = {}) => maintenanceMetricDefinitions
+    .map(definition => {
+        const interval = Number(cal?.[definition.limitKey]);
+        if (!Number.isFinite(interval) || interval <= 0) return null;
+        return {
+            ...definition,
+            interval: normalizeThresholdNumber(interval)
+        };
+    })
+    .filter(Boolean);
+
+const getCalendarTriggeredGroups = (triggerDefinitions = []) => [
+    ...new Set(triggerDefinitions.map(definition => definition.group))
+];
+
+const hasSuppressedThreshold = (state, metricCode, threshold) => {
+    const set = state?.suppressedThresholdsByMetric?.get(metricCode);
+    return Boolean(set?.has(thresholdSetKey(threshold)));
+};
+
+const addSuppressedThreshold = (state, metricCode, threshold) => {
+    if (!state || threshold === null || threshold === undefined) return false;
+    if (!state.suppressedThresholdsByMetric.has(metricCode)) {
+        state.suppressedThresholdsByMetric.set(metricCode, new Set());
+    }
+    const key = thresholdSetKey(threshold);
+    const set = state.suppressedThresholdsByMetric.get(metricCode);
+    const wasMissing = !set.has(key);
+    set.add(key);
+    return wasMissing;
+};
+
+const getNextUnsuppressedThreshold = ({ state, metricCode, currentValue, interval }) => {
+    let threshold = nextMultipleAfter(currentValue, interval);
+    let guard = 0;
+
+    while (threshold !== null && hasSuppressedThreshold(state, metricCode, threshold) && guard < 1000) {
+        threshold = normalizeThresholdNumber(threshold + Number(interval));
+        guard += 1;
+    }
+
+    return threshold;
+};
+
+const findCalendarTriggerCandidate = ({ cal, state, currentValues, projectedValues }) => {
+    const triggerDefinitions = getCalendarTriggerDefinitions(cal);
+    if (triggerDefinitions.length === 0) return null;
+
+    const candidates = [];
+    for (const definition of triggerDefinitions) {
+        const currentValue = normalizeMetricNumber(currentValues?.[definition.valueKey]);
+        const projectedValue = normalizeMetricNumber(projectedValues?.[definition.valueKey]);
+        if (projectedValue === null) continue;
+
+        if (definition.group === "sinceNew") {
+            const alreadyTriggered = state?.triggeredSinceNewMetrics?.has(definition.metricCode);
+            const threshold = definition.interval;
+            if (!alreadyTriggered && projectedValue >= threshold && (currentValue === null || currentValue < threshold)) {
+                candidates.push({
+                    ...definition,
+                    threshold,
+                    projectedValue
+                });
+            }
+            continue;
+        }
+
+        const threshold = getNextUnsuppressedThreshold({
+            state,
+            metricCode: definition.metricCode,
+            currentValue,
+            interval: definition.interval
+        });
+
+        if (threshold !== null && projectedValue >= threshold) {
+            candidates.push({
+                ...definition,
+                threshold,
+                projectedValue
+            });
+        }
+    }
+
+    if (candidates.length === 0) return null;
+    return candidates.sort((left, right) => {
+        const leftOrder = maintenanceMetricDefinitions.findIndex(definition => definition.metricCode === left.metricCode);
+        const rightOrder = maintenanceMetricDefinitions.findIndex(definition => definition.metricCode === right.metricCode);
+        return leftOrder - rightOrder;
+    })[0];
+};
+
+const getCalendarDowntimeDaysForOccurrence = (cal, occurrenceNumber) => {
+    const firstOccurrenceDownDays = Number(cal?.downDays);
+    const laterOccurrenceDownDays = Number(cal?.avgDownda);
+    const selectedValue = occurrenceNumber <= 1
+        ? firstOccurrenceDownDays
+        : laterOccurrenceDownDays;
+
+    if (Number.isFinite(selectedValue) && selectedValue > 0) return Math.ceil(selectedValue);
+    return 0;
+};
+
+const getMetricValuesFromCurrent = ({
+    currentTsn,
+    currentCsn,
+    currentDsn,
+    currentTso,
+    currentCso,
+    currentDso,
+    currentTsr,
+    currentCsr,
+    currentDsr
+}) => ({
+    tsn: currentTsn,
+    csn: currentCsn,
+    dsn: currentDsn,
+    tsoTsr: currentTso,
+    csoCsr: currentCso,
+    dsoDsr: currentDso,
+    tsRplmt: currentTsr,
+    csRplmt: currentCsr,
+    dsRplmt: currentDsr,
 });
 
-const getCalendarDowntimeDays = (cal) => {
-    const downDays = Number(cal?.downDays);
-    if (Number.isFinite(downDays) && downDays > 0) return Math.ceil(downDays);
+const getCalendarState = (calendarEventState, cal) => {
+    const key = String(cal._id);
+    if (!calendarEventState.has(key)) {
+        calendarEventState.set(key, {
+            id: cal._id,
+            occurrence: 0,
+            lastOccurre: null,
+            nextEstima: null,
+            firstOccurrenceDate: null,
+            occurrencesTillExit: 0,
+            soTsr: null,
+            triggeredSinceNew: false,
+            triggeredSinceNewMetrics: new Set(),
+            suppressedThresholdsByMetric: new Map(),
+            generatedOccurrences: [],
+            suppressedAlternateThresholds: []
+        });
+    }
+    return calendarEventState.get(key);
+};
 
-    const avgDowndays = Number(cal?.avgDownda);
-    if (Number.isFinite(avgDowndays) && avgDowndays > 0) return Math.ceil(avgDowndays);
+const serializeSuppressedThresholds = (suppressedThresholdsByMetric = new Map()) => {
+    const rows = [];
+    for (const [metricCode, thresholds] of suppressedThresholdsByMetric.entries()) {
+        for (const threshold of thresholds.values()) {
+            rows.push({
+                metricCode,
+                suppressedThreshold: normalizeThresholdNumber(threshold)
+            });
+        }
+    }
+    return rows;
+};
 
-    return 0;
+const getCalendarGroundDateRows = ({ userId, msn, cal, occurrenceNumber, startDate, downtimeDays }) => {
+    const rows = [];
+    const days = Number(downtimeDays);
+    if (!Number.isFinite(days) || days <= 0) return rows;
+
+    const occurrenceId = `${cal._id}:${occurrenceNumber}`;
+    for (let offset = 0; offset < days; offset += 1) {
+        const date = moment.utc(startDate).add(offset, "days").startOf("day").toDate();
+        rows.push({
+            userId: String(userId),
+            msn: String(msn || cal.calMsn || "").trim(),
+            date,
+            event: cal.schEvent || "",
+            source: "SCHEDULED_MAINTENANCE",
+            eventSeriesId: String(cal._id),
+            occurrenceNumber,
+            occurrenceId
+        });
+    }
+    return rows;
+};
+
+const getPostEventValuesForTriggeredMetric = (cal, triggerDefinition) => {
+    if (!triggerDefinition) return {};
+    return collectPostEventValues(cal, [triggerDefinition.group]);
 };
 
 const getExplicitPostEventValue = (cal, key) => {
@@ -211,6 +393,23 @@ const ensureMaintenanceCalendarIndexes = async () => {
 };
 
 const formatCalendarDate = (value) => value ? moment.utc(value).format("YYYY-MM-DD") : "";
+
+const formatCalendarOccurrence = (occurrence = {}) => ({
+    occurrenceNumber: occurrence.occurrenceNumber || 0,
+    triggerRelationship: occurrence.triggerRelationship || "EARLIEST_OF_EVERY",
+    triggerDate: formatCalendarDate(occurrence.triggerDate),
+    triggeredByMetric: occurrence.triggeredByMetric || "",
+    triggerThreshold: occurrence.triggerThreshold ?? "",
+    triggerMetricValueOnDetectionDate: occurrence.triggerMetricValueOnDetectionDate ?? "",
+    groundStartDate: formatCalendarDate(occurrence.groundStartDate),
+    groundEndDate: formatCalendarDate(occurrence.groundEndDate),
+    downtimeApplied: occurrence.downtimeApplied ?? 0,
+    isFirstOccurrence: Boolean(occurrence.isFirstOccurrence),
+    postEventStatusApplied: occurrence.postEventStatusApplied || {},
+    suppressedAlternateThresholds: Array.isArray(occurrence.suppressedAlternateThresholds)
+        ? occurrence.suppressedAlternateThresholds
+        : []
+});
 
 const normalizeResetGroup = ({ msnEsn, pn, snBn } = {}) => ({
     msnEsn: String(msnEsn || "").trim(),
@@ -737,6 +936,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
         ]);
 
     const totalOps = [];
+    const groundDayOps = [];
     const calendarEventState = new Map();
     const calendarIdsTouched = new Set();
     const assignmentImpact = {
@@ -745,33 +945,132 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
         daysTouched: 0
     };
 
-    const recordCalendarEvent = ({ cal, date, triggeredGroups, projectedValues }) => {
-        const key = String(cal._id);
-        const previous = calendarEventState.get(key) || {
-            id: cal._id,
-            occurrence: 0,
-            lastOccurre: null,
-            nextEstima: null,
-            soTsr: null,
-            triggeredSinceNew: false
+    const affectedResetGroupKeys = new Set(resetGroups.map(group => buildResetGroupKey(group._id)));
+    const affectedCalendarIds = allCalendars
+        .filter(cal => affectedResetGroupKeys.has(buildResetGroupKey({
+            msnEsn: cal.calMsn,
+            pn: cal.calPn,
+            snBn: cal.snBn
+        })))
+        .map(cal => String(cal._id));
+
+    const isScopedRecompute = Array.isArray(requestedResetGroups) && requestedResetGroups.length > 0;
+    if (allCalendars.length > 0 && (!isScopedRecompute || affectedCalendarIds.length > 0)) {
+        const deleteGeneratedGroundDaysFilter = {
+            userId: String(userId),
+            source: "SCHEDULED_MAINTENANCE"
         };
+        if (affectedCalendarIds.length > 0) {
+            deleteGeneratedGroundDaysFilter.eventSeriesId = { $in: affectedCalendarIds };
+        }
+        await GroundDay.deleteMany(deleteGeneratedGroundDaysFilter);
+    }
+
+    const recordCalendarEvent = ({
+        cal,
+        state,
+        date,
+        triggerDefinition,
+        preOccurrenceValues,
+        projectedValues,
+        downtimeApplied,
+        postEventValues
+    }) => {
+        const key = String(cal._id);
+        const previous = state || getCalendarState(calendarEventState, cal);
 
         const eventDate = moment.utc(date).startOf("day");
         const occurrence = previous.occurrence + 1;
-        const soTsr = triggeredGroups.includes("replacement")
+        const triggeredGroups = getCalendarTriggeredGroups([triggerDefinition]);
+        const soTsr = triggerDefinition.group === "replacement"
             ? projectedValues.tsRplmt
-            : triggeredGroups.includes("restoration")
+            : triggerDefinition.group === "restoration"
                 ? projectedValues.tsoTsr
                 : projectedValues.tsn;
+        const suppressedAlternateThresholds = [];
+        const triggerThreshold = normalizeThresholdNumber(triggerDefinition.threshold);
+
+        const triggerMetricResetByPostEvent = Object.prototype.hasOwnProperty.call(
+            postEventValues || {},
+            triggerDefinition.valueKey
+        );
+        if (!triggerMetricResetByPostEvent) {
+            addSuppressedThreshold(previous, triggerDefinition.metricCode, triggerThreshold);
+        }
+        if (triggerDefinition.group === "sinceNew") {
+            previous.triggeredSinceNewMetrics.add(triggerDefinition.metricCode);
+        }
+
+        for (const alternateDefinition of getCalendarTriggerDefinitions(cal)) {
+            if (alternateDefinition.metricCode === triggerDefinition.metricCode) continue;
+            if (Object.prototype.hasOwnProperty.call(postEventValues || {}, alternateDefinition.valueKey)) continue;
+
+            const preOccurrenceValue = normalizeMetricNumber(preOccurrenceValues?.[alternateDefinition.valueKey]);
+            const firstSuppressedThreshold = nextMultipleAfter(preOccurrenceValue, alternateDefinition.interval);
+            const thresholdsToSuppress = [];
+            if (firstSuppressedThreshold !== null) {
+                thresholdsToSuppress.push(firstSuppressedThreshold);
+                if (
+                    occurrence === 1 &&
+                    preOccurrenceValue !== null &&
+                    preOccurrenceValue > 0 &&
+                    preOccurrenceValue < alternateDefinition.interval
+                ) {
+                    thresholdsToSuppress.push(normalizeThresholdNumber(firstSuppressedThreshold + alternateDefinition.interval));
+                }
+            }
+
+            for (const suppressedThreshold of thresholdsToSuppress) {
+                const wasMissing = addSuppressedThreshold(previous, alternateDefinition.metricCode, suppressedThreshold);
+                if (wasMissing) {
+                    suppressedAlternateThresholds.push({
+                        metricCode: alternateDefinition.label,
+                        suppressedThreshold,
+                        reason: `Same ${cal.schEvent || "maintenance"} requirement already satisfied by ${triggerDefinition.label} on ${eventDate.format("YYYY-MM-DD")}.`
+                    });
+                }
+            }
+        }
+
+        const groundStartDate = downtimeApplied > 0 ? eventDate.toDate() : null;
+        const groundEndDate = downtimeApplied > 0
+            ? eventDate.clone().add(downtimeApplied - 1, "days").toDate()
+            : null;
+        const generatedOccurrence = {
+            occurrenceNumber: occurrence,
+            triggerRelationship: cal.triggerRelationship || "EARLIEST_OF_EVERY",
+            triggerDate: eventDate.toDate(),
+            triggeredByMetric: triggerDefinition.label,
+            triggerThreshold,
+            triggerMetricValueOnDetectionDate: normalizeMetricNumber(projectedValues?.[triggerDefinition.valueKey]),
+            groundStartDate,
+            groundEndDate,
+            downtimeApplied,
+            isFirstOccurrence: occurrence === 1,
+            postEventStatusApplied: postEventValues || {},
+            suppressedAlternateThresholds
+        };
 
         calendarEventState.set(key, {
             ...previous,
             occurrence,
             lastOccurre: eventDate.toDate(),
             nextEstima: previous.nextEstima || eventDate.toDate(),
+            firstOccurrenceDate: previous.firstOccurrenceDate || eventDate.toDate(),
+            occurrencesTillExit: Math.max(0, occurrence - 1),
             soTsr: Number.isFinite(Number(soTsr)) ? Number(soTsr) : previous.soTsr,
-            triggeredSinceNew: previous.triggeredSinceNew || triggeredGroups.includes("sinceNew")
+            triggeredSinceNew: previous.triggeredSinceNew || triggeredGroups.includes("sinceNew"),
+            generatedOccurrences: [...previous.generatedOccurrences, generatedOccurrence],
+            suppressedAlternateThresholds: [
+                ...previous.suppressedAlternateThresholds,
+                ...suppressedAlternateThresholds.map(item => ({
+                    occurrenceNumber: occurrence,
+                    ...item
+                }))
+            ]
         });
+
+        return generatedOccurrence;
     };
 
     for (const group of resetGroups) {
@@ -914,7 +1213,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             );
             assetCalendars.forEach(c => calendarIdsTouched.add(String(c._id)));
             let inMaintenanceUntil = null;
-            let pendingPostEvent = null;
+            let pendingPostEvents = [];
 
             while (currDate.isSameOrBefore(segmentEnd)) {
                 const currentUtilizationContext = await getEffectiveUtilisationContext({
@@ -925,30 +1224,23 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 const currentEffectiveMsn = currentUtilizationContext.effectiveMsn || msnEsn;
 
                 if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
-                    const cleanup = await deleteAssignmentsForAircraftDate({
-                        userId,
-                        msn: currentEffectiveMsn,
-                        date: currDate,
-                        reason: "GROUND_DAY_CONFLICT"
-                    });
-                    assignmentImpact.deletedCount += cleanup.deletedCount;
-                    assignmentImpact.clearedFlightCount += cleanup.clearedFlightCount;
-                    if (cleanup.deletedCount > 0) assignmentImpact.daysTouched += 1;
-
                     if (currentDsn !== null) currentDsn += 1;
                     if (currentDso !== null) currentDso += 1;
                     if (currentDsr !== null) currentDsr += 1;
 
-                    if (pendingPostEvent && currDate.isSame(pendingPostEvent.date, "day")) {
-                        ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
-                            currentTso,
-                            currentCso,
-                            currentDso,
-                            currentTsr,
-                            currentCsr,
-                            currentDsr
-                        }, pendingPostEvent.values));
-                        pendingPostEvent = null;
+                    const duePostEvents = pendingPostEvents.filter(event => currDate.isSame(event.date, "day"));
+                    if (duePostEvents.length > 0) {
+                        for (const postEvent of duePostEvents) {
+                            ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
+                                currentTso,
+                                currentCso,
+                                currentDso,
+                                currentTsr,
+                                currentCsr,
+                                currentDsr
+                            }, postEvent.values));
+                        }
+                        pendingPostEvents = pendingPostEvents.filter(event => !currDate.isSame(event.date, "day"));
                     }
 
                     totalOps.push({
@@ -1007,82 +1299,119 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     dsRplmt: projectedDsr
                 };
 
+                const currentValues = getMetricValuesFromCurrent({
+                    currentTsn,
+                    currentCsn,
+                    currentDsn,
+                    currentTso,
+                    currentCso,
+                    currentDso,
+                    currentTsr,
+                    currentCsr,
+                    currentDsr
+                });
                 const triggeredCalendars = [];
-                let downDaysToApply = 0;
+                let maxDownDaysToApply = 0;
 
                 for (const cal of assetCalendars) {
-                    const state = calendarEventState.get(String(cal._id));
-                    const triggeredGroups = [];
+                    const state = getCalendarState(calendarEventState, cal);
+                    const triggerDefinition = findCalendarTriggerCandidate({
+                        cal,
+                        state,
+                        currentValues,
+                        projectedValues
+                    });
 
-                    if (!state?.triggeredSinceNew && hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.sinceNew)) {
-                        triggeredGroups.push("sinceNew");
-                    }
-
-                    if (hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.restoration)) {
-                        triggeredGroups.push("restoration");
-                    }
-
-                    if (hasCalendarLimitHit(cal, projectedValues, calendarMetricGroups.replacement)) {
-                        triggeredGroups.push("replacement");
-                    }
-
-                    if (triggeredGroups.length > 0) {
-                        triggeredCalendars.push({ cal, triggeredGroups });
-                        downDaysToApply = Math.max(downDaysToApply, getCalendarDowntimeDays(cal));
+                    if (triggerDefinition) {
+                        const occurrenceNumber = state.occurrence + 1;
+                        const downDaysToApply = getCalendarDowntimeDaysForOccurrence(cal, occurrenceNumber);
+                        triggeredCalendars.push({
+                            cal,
+                            state,
+                            triggerDefinition,
+                            downDaysToApply
+                        });
+                        maxDownDaysToApply = Math.max(maxDownDaysToApply, downDaysToApply);
                     }
                 }
 
                 if (triggeredCalendars.length > 0) {
-                    const cleanup = await deleteAssignmentsForAircraftDate({
-                        userId,
-                        msn: currentEffectiveMsn,
-                        date: currDate,
-                        reason: "GROUND_DAY_CONFLICT"
-                    });
-                    assignmentImpact.deletedCount += cleanup.deletedCount;
-                    assignmentImpact.clearedFlightCount += cleanup.clearedFlightCount;
-                    if (cleanup.deletedCount > 0) assignmentImpact.daysTouched += 1;
-
-                    if (downDaysToApply > 0) {
-                        inMaintenanceUntil = moment.utc(currDate).add(downDaysToApply - 1, "days");
+                    if (maxDownDaysToApply > 0) {
+                        inMaintenanceUntil = moment.utc(currDate).add(maxDownDaysToApply - 1, "days");
                     }
 
-                    if (currentDsn !== null) currentDsn += 1;
-                    if (currentDso !== null) currentDso += 1;
-                    if (currentDsr !== null) currentDsr += 1;
+                    if (maxDownDaysToApply <= 0) {
+                        currentTsn = projectedTsn;
+                        currentCsn = projectedCsn;
+                        currentDsn = projectedDsn;
+                        currentTso = projectedTso;
+                        currentCso = projectedCso;
+                        currentDso = projectedDso;
+                        currentTsr = projectedTsr;
+                        currentCsr = projectedCsr;
+                        currentDsr = projectedDsr;
+                    }
 
-                    const postEventValues = {};
-                    for (const { cal, triggeredGroups } of triggeredCalendars) {
-                        recordCalendarEvent({
+                    const immediatePostEventValues = {};
+                    for (const { cal, state, triggerDefinition, downDaysToApply } of triggeredCalendars) {
+                        const postEventValues = getPostEventValuesForTriggeredMetric(cal, triggerDefinition);
+                        const occurrence = recordCalendarEvent({
                             cal,
+                            state,
                             date: currDate,
-                            triggeredGroups,
-                            projectedValues
+                            triggerDefinition,
+                            preOccurrenceValues: currentValues,
+                            projectedValues,
+                            downtimeApplied: downDaysToApply,
+                            postEventValues
                         });
 
-                        Object.assign(postEventValues, collectPostEventValues(cal, triggeredGroups));
+                        groundDayOps.push(...getCalendarGroundDateRows({
+                            userId,
+                            msn: currentEffectiveMsn,
+                            cal,
+                            occurrenceNumber: occurrence.occurrenceNumber,
+                            startDate: currDate,
+                            downtimeDays: downDaysToApply
+                        }).map(row => ({
+                            updateOne: {
+                                filter: {
+                                    userId: row.userId,
+                                    msn: row.msn,
+                                    date: row.date,
+                                    eventSeriesId: row.eventSeriesId,
+                                    occurrenceNumber: row.occurrenceNumber
+                                },
+                                update: { $set: row },
+                                upsert: true
+                            }
+                        })));
+
+                        if (Object.keys(postEventValues).length > 0) {
+                            const postEventApplyDate = moment.utc(currDate)
+                                .add(Math.max(1, downDaysToApply) - 1, "days")
+                                .startOf("day");
+
+                            if (postEventApplyDate.isSame(currDate, "day")) {
+                                Object.assign(immediatePostEventValues, postEventValues);
+                            } else {
+                                pendingPostEvents.push({
+                                    date: postEventApplyDate,
+                                    values: postEventValues
+                                });
+                            }
+                        }
                     }
 
-                    if (Object.keys(postEventValues).length > 0) {
-                        const postEventApplyDate = moment.utc(currDate)
-                            .add(Math.max(1, downDaysToApply) - 1, "days")
-                            .startOf("day");
-
-                        if (postEventApplyDate.isSame(currDate, "day")) {
-                            ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
-                                currentTso,
-                                currentCso,
-                                currentDso,
-                                currentTsr,
-                                currentCsr,
-                                currentDsr
-                            }, postEventValues));
-                        } else {
-                            pendingPostEvent = {
-                                date: postEventApplyDate,
-                                values: postEventValues
-                            };
-                        }
+                    if (Object.keys(immediatePostEventValues).length > 0) {
+                        ({ currentTso, currentCso, currentDso, currentTsr, currentCsr, currentDsr } = applyPostEventValuesToCurrent({
+                            currentTso,
+                            currentCso,
+                            currentDso,
+                            currentTsr,
+                            currentCsr,
+                            currentDsr
+                        }, immediatePostEventValues));
                     }
 
                     totalOps.push({
@@ -1153,13 +1482,23 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
         }
     }
 
+    if (groundDayOps.length > 0) {
+        const chunkSize = 1000;
+        for (let i = 0; i < groundDayOps.length; i += chunkSize) {
+            const chunk = groundDayOps.slice(i, i + chunkSize);
+            await GroundDay.bulkWrite(chunk, { ordered: false });
+        }
+    }
+
     if (calendarIdsTouched.size > 0) {
         await MaintenanceCalendar.bulkWrite([...calendarIdsTouched].map(calendarId => {
             const event = calendarEventState.get(calendarId) || {
                 id: calendarId,
                 lastOccurre: null,
                 nextEstima: null,
+                firstOccurrenceDate: null,
                 occurrence: 0,
+                occurrencesTillExit: 0,
                 soTsr: null
             };
 
@@ -1171,7 +1510,12 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             lastOccurre: event.lastOccurre,
                             nextEstima: event.nextEstima,
                             occurrence: event.occurrence,
-                            soTsr: event.soTsr
+                            firstOccurrenceDate: event.firstOccurrenceDate,
+                            occurrencesTillExit: event.occurrencesTillExit || Math.max(0, Number(event.occurrence || 0) - 1),
+                            soTsr: event.soTsr,
+                            generatedOccurrences: event.generatedOccurrences || [],
+                            suppressedAlternateThresholds: event.suppressedAlternateThresholds || [],
+                            suppressedThresholds: serializeSuppressedThresholds(event.suppressedThresholdsByMetric)
                         }
                     }
                 }
@@ -1425,12 +1769,13 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 allFleetFilter.userId = String(userId);
             }
 
-            const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions] = await Promise.all([
+            const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions, calendarRows] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 Fleet.find(fleetFilter).select("sn titled regn").lean(),
                 Fleet.find(allFleetFilter).select("sn titled regn").lean(),
                 UtilisationAssumption.find({ userId: String(userId) }).lean(),
+                MaintenanceCalendar.find({ userId: String(userId) }).select("calMsn calPn snBn").lean(),
             ]);
 
             const getFleetTitledDisplay = (asset = {}) =>
@@ -1475,6 +1820,12 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 resetRecordsByKey.set(key, recordsForKey);
             });
 
+            const calendarKeys = new Set((calendarRows || []).map(record => [
+                String(record.calMsn || "").trim().toUpperCase(),
+                String(record.calPn || "").trim().toUpperCase(),
+                String(record.snBn || "").trim().toUpperCase()
+            ].join("|")));
+
             const selectedDateMoment = selectedDateBounds.start.clone().endOf("day");
             const selectedDate = selectedDateMoment.format("YYYY-MM-DD");
             const rowSourcesByKey = new Map(utilByKey);
@@ -1515,7 +1866,12 @@ exports.getMaintenanceDashboard = async (req, res) => {
                         assumptions: utilisationAssumptions
                     })
                     : null;
-                const metricSource = computedMetricSource || exactResetRecord || util || sourceRecord;
+                const hasCalendarSchedule = calendarKeys.has(utilKey);
+                const metricSource = exactResetRecord
+                    || (hasCalendarSchedule && util ? util : null)
+                    || computedMetricSource
+                    || util
+                    || sourceRecord;
 
                 return {
                     id: sourceRecord?._id,
@@ -2374,6 +2730,53 @@ exports.deleteUtilisationAssumption = async (req, res) => {
     }
 };
 
+exports.getGroundDays = async (req, res) => {
+    try {
+        const userId = getUserIdFromReq(req);
+        const filter = { userId: String(userId) };
+        const { msn, fromDate, toDate } = req.query || {};
+
+        if (msn) {
+            filter.msn = { $regex: `^${escapeRegex(String(msn).trim())}$`, $options: "i" };
+        }
+
+        if (fromDate || toDate) {
+            filter.date = {};
+            if (fromDate) {
+                const parsedFrom = parseUtcIsoDate(fromDate);
+                if (!parsedFrom) return res.status(400).json({ message: "Invalid fromDate." });
+                filter.date.$gte = parsedFrom.startOf("day").toDate();
+            }
+            if (toDate) {
+                const parsedTo = parseUtcIsoDate(toDate);
+                if (!parsedTo) return res.status(400).json({ message: "Invalid toDate." });
+                filter.date.$lte = parsedTo.endOf("day").toDate();
+            }
+        }
+
+        const rows = await GroundDay.find(filter)
+            .sort({ date: 1, msn: 1, event: 1 })
+            .lean();
+
+        res.status(200).json({
+            success: true,
+            data: rows.map(row => ({
+                id: row._id,
+                msn: row.msn || "",
+                date: formatCalendarDate(row.date),
+                event: row.event || "",
+                source: row.source || "",
+                eventSeriesId: row.eventSeriesId || "",
+                occurrenceNumber: row.occurrenceNumber || "",
+                occurrenceId: row.occurrenceId || ""
+            }))
+        });
+    } catch (error) {
+        console.error("Error fetching generated ground days:", error);
+        res.status(500).json({ message: "Failed to fetch ground days", error: error.message });
+    }
+};
+
 /**
  * 9. GET: Fetch Calendar Inputs
  */
@@ -2389,6 +2792,8 @@ exports.getCalendar = async (req, res) => {
             schEvent: record.schEvent || "",
             calPn: record.calPn || "",
             snBn: record.snBn || "",
+            applyToAllSnBn: Boolean(record.applyToAllSnBn),
+            triggerRelationship: record.triggerRelationship || "EARLIEST_OF_EVERY",
             eTsn: record.eTsn || "",
             eCsn: record.eCsn || "",
             eDsn: record.eDsn || "",
@@ -2402,14 +2807,25 @@ exports.getCalendar = async (req, res) => {
             avgDownda: record.avgDownda || 0,
             lastOccurre: formatCalendarDate(record.lastOccurre),
             nextEstima: formatCalendarDate(record.nextEstima),
+            firstOccurrenceDate: formatCalendarDate(record.firstOccurrenceDate || record.nextEstima),
             occurrence: record.occurrence || "",
+            occurrencesTillExit: record.occurrencesTillExit ?? Math.max(0, Number(record.occurrence || 0) - 1),
             postTso: record.postTso ?? "",
             postCso: record.postCso ?? "",
             postDso: record.postDso ?? "",
             postTsr: record.postTsr ?? "",
             postCsr: record.postCsr ?? "",
             postDsr: record.postDsr ?? "",
-            soTsr: record.soTsr ?? ""
+            soTsr: record.soTsr ?? "",
+            generatedOccurrences: Array.isArray(record.generatedOccurrences)
+                ? record.generatedOccurrences.map(formatCalendarOccurrence)
+                : [],
+            suppressedAlternateThresholds: Array.isArray(record.suppressedAlternateThresholds)
+                ? record.suppressedAlternateThresholds
+                : [],
+            suppressedThresholds: Array.isArray(record.suppressedThresholds)
+                ? record.suppressedThresholds
+                : []
         }));
         res.status(200).json({ success: true, data: formattedRecords });
     } catch (error) {
@@ -2436,12 +2852,94 @@ exports.bulkSaveCalendar = async (req, res) => {
         await ensureMaintenanceCalendarIndexes();
 
         for (const record of calendarData) {
-            const parseNum = (val) => (val === "" || val === null || val === undefined) ? null : Number(val);
+            const hasAnyValue = [
+                record.calLabel,
+                record.lineBase,
+                record.schEvent,
+                record.calMsn,
+                record.calPn,
+                record.snBn,
+                ...maintenanceMetricDefinitions.map(definition => record[definition.limitKey]),
+                record.downDays,
+                record.avgDownda,
+                record.postTso,
+                record.postCso,
+                record.postDso,
+                record.postTsr,
+                record.postCsr,
+                record.postDsr,
+            ].some(value => String(value ?? "").trim() !== "");
+
+            if (!hasAnyValue) continue;
+
+            const parseNum = (val, label, { required = false, positive = false, whole = false, nonNegative = false } = {}) => {
+                if (val === "" || val === null || val === undefined) {
+                    if (required) {
+                        return { ok: false, message: `${label} is required.` };
+                    }
+                    return { ok: true, value: null };
+                }
+
+                const value = Number(val);
+                if (!Number.isFinite(value)) {
+                    return { ok: false, message: `${label} must be a valid number.` };
+                }
+                if (positive && value <= 0) {
+                    return { ok: false, message: `${label} must be greater than zero.` };
+                }
+                if (nonNegative && value < 0) {
+                    return { ok: false, message: `${label} cannot be negative.` };
+                }
+                if (whole && !Number.isInteger(value)) {
+                    return { ok: false, message: `${label} must be a whole number.` };
+                }
+                return { ok: true, value };
+            };
+
             const resetGroup = normalizeResetGroup({
                 msnEsn: record.calMsn,
                 pn: record.calPn,
                 snBn: record.snBn
             });
+
+            const scheduledEvent = String(record.schEvent || "").trim();
+            if (!resetGroup.msnEsn || !resetGroup.pn || !resetGroup.snBn || !scheduledEvent) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Calendar inputs require MSN/ESN, PN, SN/BN, and Scheduled Maintenance Event."
+                });
+            }
+
+            const parsedMetricValues = {};
+            let triggerCount = 0;
+            for (const definition of maintenanceMetricDefinitions) {
+                const rawMetricValue = record[definition.limitKey];
+                const parsed = parseNum(rawMetricValue, definition.label, { positive: String(rawMetricValue ?? "").trim() !== "" });
+                if (!parsed.ok) {
+                    return res.status(400).json({ success: false, message: parsed.message });
+                }
+                parsedMetricValues[definition.limitKey] = parsed.value;
+                if (parsed.value !== null) triggerCount += 1;
+            }
+
+            if (triggerCount === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Calendar inputs require at least one positive Earliest of, every trigger."
+                });
+            }
+
+            const parsedDownDays = parseNum(record.downDays, "Down days", { nonNegative: true, whole: true });
+            if (!parsedDownDays.ok) return res.status(400).json({ success: false, message: parsedDownDays.message });
+            const parsedAvgDowndays = parseNum(record.avgDownda, "Avg Downdays", { nonNegative: true, whole: true });
+            if (!parsedAvgDowndays.ok) return res.status(400).json({ success: false, message: parsedAvgDowndays.message });
+
+            const parsedPostValues = {};
+            for (const postField of ["postTso", "postCso", "postDso", "postTsr", "postCsr", "postDsr", "soTsr"]) {
+                const parsed = parseNum(record[postField], postField);
+                if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+                parsedPostValues[postField] = parsed.value;
+            }
 
             if (resetGroup.msnEsn && resetGroup.pn && resetGroup.snBn) {
                 affectedResetGroups.set(buildResetGroupKey(resetGroup), resetGroup);
@@ -2451,31 +2949,38 @@ exports.bulkSaveCalendar = async (req, res) => {
                 $set: {
                     calLabel: record.calLabel,
                     lineBase: record.lineBase,
-                    schEvent: record.schEvent,
-                    calMsn: record.calMsn,
-                    calPn: record.calPn,
-                    snBn: record.snBn,
-                    eTsn: parseNum(record.eTsn),
-                    eCsn: parseNum(record.eCsn),
-                    eDsn: parseNum(record.eDsn),
-                    eTso: parseNum(record.eTso),
-                    eCso: parseNum(record.eCso),
-                    eDso: parseNum(record.eDso),
-                    eTsr: parseNum(record.eTsr),
-                    eCsr: parseNum(record.eCsr),
-                    eDsr: parseNum(record.eDsr),
-                    downDays: parseNum(record.downDays),
-                    avgDownda: parseNum(record.avgDownda),
+                    schEvent: scheduledEvent,
+                    calMsn: resetGroup.msnEsn,
+                    calPn: resetGroup.pn,
+                    snBn: resetGroup.snBn,
+                    applyToAllSnBn: Boolean(record.applyToAllSnBn),
+                    triggerRelationship: "EARLIEST_OF_EVERY",
+                    eTsn: parsedMetricValues.eTsn,
+                    eCsn: parsedMetricValues.eCsn,
+                    eDsn: parsedMetricValues.eDsn,
+                    eTso: parsedMetricValues.eTso,
+                    eCso: parsedMetricValues.eCso,
+                    eDso: parsedMetricValues.eDso,
+                    eTsr: parsedMetricValues.eTsr,
+                    eCsr: parsedMetricValues.eCsr,
+                    eDsr: parsedMetricValues.eDsr,
+                    downDays: parsedDownDays.value,
+                    avgDownda: parsedAvgDowndays.value,
                     lastOccurre: null,
                     nextEstima: null,
+                    firstOccurrenceDate: null,
                     occurrence: 0,
-                    postTso: parseNum(record.postTso),
-                    postCso: parseNum(record.postCso),
-                    postDso: parseNum(record.postDso),
-                    postTsr: parseNum(record.postTsr),
-                    postCsr: parseNum(record.postCsr),
-                    postDsr: parseNum(record.postDsr),
-                    soTsr: parseNum(record.soTsr),
+                    occurrencesTillExit: 0,
+                    generatedOccurrences: [],
+                    suppressedAlternateThresholds: [],
+                    suppressedThresholds: [],
+                    postTso: parsedPostValues.postTso,
+                    postCso: parsedPostValues.postCso,
+                    postDso: parsedPostValues.postDso,
+                    postTsr: parsedPostValues.postTsr,
+                    postCsr: parsedPostValues.postCsr,
+                    postDsr: parsedPostValues.postDsr,
+                    soTsr: parsedPostValues.soTsr,
                     userId: String(userId)
                 }
             };
@@ -2492,10 +2997,10 @@ exports.bulkSaveCalendar = async (req, res) => {
                     updateOne: {
                         filter: {
                             userId: String(userId),
-                            calMsn: record.calMsn,
-                            calPn: record.calPn,
-                            snBn: record.snBn,
-                            schEvent: record.schEvent
+                            calMsn: resetGroup.msnEsn,
+                            calPn: resetGroup.pn,
+                            snBn: resetGroup.snBn,
+                            schEvent: scheduledEvent
                         },
                         update,
                         upsert: true
@@ -2535,6 +3040,21 @@ exports.deleteCalendar = async (req, res) => {
         if (!deletedRecord) {
             return res.status(404).json({ message: "Calendar input not found." });
         }
+
+        await GroundDay.deleteMany({
+            userId: String(userId),
+            source: "SCHEDULED_MAINTENANCE",
+            eventSeriesId: String(deletedRecord._id)
+        });
+
+        await recomputeMaintenanceTimeline({
+            userId,
+            resetGroups: [{
+                msnEsn: deletedRecord.calMsn,
+                pn: deletedRecord.calPn,
+                snBn: deletedRecord.snBn
+            }]
+        });
 
         res.status(200).json({ success: true, message: "Calendar input deleted successfully." });
     } catch (error) {
