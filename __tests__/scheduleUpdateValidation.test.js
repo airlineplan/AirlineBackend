@@ -8,6 +8,14 @@ const path = require("node:path");
 const mongoose = require("mongoose");
 const xlsx = require("xlsx");
 
+const originalMongooseConnect = mongoose.connect.bind(mongoose);
+mongoose.connect = (...args) => {
+  if (process.env.DEBUG_MONGOOSE_CONNECT === "1") {
+    console.error("MONGOOSE_CONNECT", args[0], new Error().stack);
+  }
+  return originalMongooseConnect(...args);
+};
+
 const Data = require("../model/dataSchema");
 const Sector = require("../model/sectorSchema");
 const Flight = require("../model/flight");
@@ -149,15 +157,17 @@ async function closeMongooseConnections() {
   for (const connection of connections) {
     if (!connection) continue;
 
-    if (connection.readyState !== 0) {
-      await connection.close(true);
-    }
-
     const client = connection.getClient?.() || connection.client;
     if (client && typeof client.close === "function") {
       await client.close(true);
     }
+
+    if (connection.readyState !== 0) {
+      await connection.close(true);
+    }
   }
+
+  await mongoose.disconnect();
 }
 
 async function seedNetwork(overrides = {}) {
