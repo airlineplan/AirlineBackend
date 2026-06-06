@@ -10,9 +10,10 @@ const {
   __testables__: {
     normalizeCrewMemberUploadRow,
     otherDutyColumnAliases,
+    parseOtherDutyTimes,
   },
 } = require("../services/crewUploadService");
-const { getRowValue } = require("../services/crewTimeUtils");
+const { dateKey, diffMinutes, getRowValue } = require("../services/crewTimeUtils");
 
 const writeWorkbook = (rows) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crew-upload-"));
@@ -75,6 +76,40 @@ test("crew member upload ignores header case, spaces, and punctuation", () => {
   });
 });
 
+test("required Crew Information workbook format parses zero allowance fields", () => {
+  const filePath = writeWorkbook([
+    ["ID", "Name", "FC/CC", "Role", "Base", "DP allw", "FDP allw", "FT allw", "Allowance CCY", ""],
+    ["1", "Amit", "FC", "Captain", "BOM", "0", "1500", "0", "INR", ""],
+    ["2", "Vijay", "FC", "FO", "BOM", "0", "0", "800", "INR", ""],
+  ]);
+
+  const rows = readRows(filePath);
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(normalizeCrewMemberUploadRow(rows[0]), {
+    crewCode: "1",
+    name: "Amit",
+    crewType: "FC",
+    role: "Captain",
+    baseStation: "BOM",
+    dpAllowanceRate: 0,
+    fdpAllowanceRate: 1500,
+    ftAllowanceRate: 0,
+    allowanceCurrency: "INR",
+  });
+  assert.deepEqual(normalizeCrewMemberUploadRow(rows[1]), {
+    crewCode: "2",
+    name: "Vijay",
+    crewType: "FC",
+    role: "FO",
+    baseStation: "BOM",
+    dpAllowanceRate: 0,
+    fdpAllowanceRate: 0,
+    ftAllowanceRate: 800,
+    allowanceCurrency: "INR",
+  });
+});
+
 test("crew upload reader promotes the real header row after a table title", () => {
   const filePath = writeWorkbook([
     ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
@@ -91,6 +126,26 @@ test("crew upload reader promotes the real header row after a table title", () =
   assert.equal(rows[0].Captain, "1");
 });
 
+test("required Flight Duty workbook format parses roster columns after title row", () => {
+  const filePath = writeWorkbook([
+    ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["ID", "Date", "Day", "Flight #", "Dep Stn", "Arr Stn", "Sector", "Captain", "FO", "CC1", "CC2", "CC3", "CC4"],
+    ["1", "6 Jun 26", "Sat", "9I611", "BOM", "AMD", "BOM-AMD", "1", "2", "3", "4", "", ""],
+  ]);
+
+  const [row] = readRows(filePath);
+
+  assert.equal(getRowValue(row, ["id"]), "1");
+  assert.equal(getRowValue(row, ["date"]), "6 Jun 26");
+  assert.equal(getRowValue(row, ["flight #", "flight number"]), "9I611");
+  assert.equal(getRowValue(row, ["dep stn"]), "BOM");
+  assert.equal(getRowValue(row, ["arr stn"]), "AMD");
+  assert.equal(getRowValue(row, ["captain"]), "1");
+  assert.equal(getRowValue(row, ["fo"]), "2");
+  assert.equal(getRowValue(row, ["cc1"]), "3");
+  assert.equal(getRowValue(row, ["cc2"]), "4");
+});
+
 test("other duty roster uses Crew ID for crew and ID for the roster row", () => {
   const row = {
     ID: "100",
@@ -99,4 +154,28 @@ test("other duty roster uses Crew ID for crew and ID for the roster row", () => 
 
   assert.equal(getRowValue(row, otherDutyColumnAliases.crewCode), "2");
   assert.equal(getRowValue(row, otherDutyColumnAliases.sourceRosterRowId), "100");
+});
+
+test("required Other Duty workbook format parses title row and separate date/time columns", () => {
+  const filePath = writeWorkbook([
+    ["Non-flight / additional duty period", "", "", "", "", "", "", "", "", "", "", ""],
+    ["ID", "Date", "Day", "Crew ID", "Location", "Category", "Sub-category", "Start date", "Start time", "Duty time", "Finish date", "Finish time"],
+    ["100", "3 Jun 26", "Wed", "2", "DEL", "Training", "CR session", "3 Jun 26", "10:30", "01:00", "3 Jun 26", "11:30"],
+  ]);
+
+  const [row] = readRows(filePath);
+  const { start, end } = parseOtherDutyTimes(row);
+
+  assert.equal(getRowValue(row, otherDutyColumnAliases.sourceRosterRowId), "100");
+  assert.equal(getRowValue(row, otherDutyColumnAliases.crewCode), "2");
+  assert.equal(getRowValue(row, ["location"]), "DEL");
+  assert.equal(getRowValue(row, ["category"]), "Training");
+  assert.equal(getRowValue(row, ["sub-category"]), "CR session");
+  assert.equal(dateKey(start), "2026-06-03");
+  assert.equal(start.getUTCHours(), 10);
+  assert.equal(start.getUTCMinutes(), 30);
+  assert.equal(dateKey(end), "2026-06-03");
+  assert.equal(end.getUTCHours(), 11);
+  assert.equal(end.getUTCMinutes(), 30);
+  assert.equal(diffMinutes(start, end), 60);
 });

@@ -421,7 +421,8 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
 };
 
 const parseOtherDutyTimes = (row) => {
-  const startDateTime = parseDateTime(getRowValue(row, ["start datetime", "start date time", "start"]), getRowValue(row, ["date", "start date"]));
+  const startDateTimeValue = getRowValue(row, ["start datetime", "start date time", "start"]);
+  const startDateTime = startDateTimeValue ? parseDateTime(startDateTimeValue) : null;
   let start = startDateTime;
 
   if (!start) {
@@ -431,7 +432,8 @@ const parseOtherDutyTimes = (row) => {
     );
   }
 
-  let end = parseDateTime(getRowValue(row, ["finish datetime", "finish date time", "end datetime", "end"]), getRowValue(row, ["date", "finish date", "end date"]));
+  const endDateTimeValue = getRowValue(row, ["finish datetime", "finish date time", "end datetime", "end"]);
+  let end = endDateTimeValue ? parseDateTime(endDateTimeValue) : null;
 
   if (!end) {
     end = combineDateAndClock(
