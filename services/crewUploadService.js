@@ -13,6 +13,7 @@ const {
   diffMinutes,
   endAfterStartWithOvernight,
   getRowValue,
+  normalizeKey,
   normalizeText,
   normalizeUpper,
   parseDateTime,
@@ -21,10 +22,89 @@ const {
   roundMoney,
 } = require("./crewTimeUtils");
 
+const READ_ROW_NUMBER_KEY = "__excelRowNumber";
+
+const headerAliases = [
+  "id",
+  "date",
+  "day",
+  "crew id",
+  "crew code",
+  "name",
+  "fc/cc",
+  "role",
+  "base",
+  "dp allw",
+  "fdp allw",
+  "ft allw",
+  "allowance ccy",
+  "allowance currency",
+  "flight #",
+  "flight number",
+  "dep stn",
+  "arr stn",
+  "sector",
+  "captain",
+  "fo",
+  "cc1",
+  "cc2",
+  "cc3",
+  "cc4",
+  "location",
+  "category",
+  "sub-category",
+  "start date",
+  "start time",
+  "duty time",
+  "finish date",
+  "finish time",
+];
+
+const headerAliasSet = new Set(headerAliases.map(normalizeKey));
+
+const isBlankRow = (row = []) => row.every((cell) => !normalizeText(cell));
+
+const scoreHeaderRow = (row = []) => row.reduce((score, cell) => (
+  headerAliasSet.has(normalizeKey(cell)) ? score + 1 : score
+), 0);
+
+const makeUniqueHeader = (value, index, used) => {
+  const base = normalizeText(value) || `__EMPTY_${index}`;
+  const normalizedBase = normalizeKey(base);
+  const count = used.get(normalizedBase) || 0;
+  used.set(normalizedBase, count + 1);
+  return count === 0 ? base : `${base}_${count}`;
+};
+
 const readRows = (filePath) => {
   const workbook = xlsx.readFile(filePath, { cellDates: true });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  return xlsx.utils.sheet_to_json(sheet, { raw: false, defval: "" });
+  const matrix = xlsx.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false });
+  if (matrix.length === 0) return [];
+
+  const scoredRows = matrix
+    .map((row, index) => ({ row, index, score: scoreHeaderRow(row) }))
+    .filter(({ row }) => !isBlankRow(row));
+  const bestHeader = scoredRows.reduce((best, candidate) => (
+    candidate.score > best.score ? candidate : best
+  ), { row: matrix[0] || [], index: 0, score: 0 });
+  const headerIndex = bestHeader.score > 1 ? bestHeader.index : 0;
+  const usedHeaders = new Map();
+  const headers = (matrix[headerIndex] || []).map((value, index) => makeUniqueHeader(value, index, usedHeaders));
+
+  return matrix.slice(headerIndex + 1).reduce((rows, row, offset) => {
+    if (isBlankRow(row)) return rows;
+    const item = {};
+    headers.forEach((header, index) => {
+      item[header] = row[index] ?? "";
+    });
+    Object.defineProperty(item, READ_ROW_NUMBER_KEY, {
+      value: headerIndex + offset + 2,
+      enumerable: false,
+    });
+    rows.push(item);
+    return rows;
+  }, []);
 };
 
 const cleanNumber = (value) => {
@@ -34,6 +114,8 @@ const cleanNumber = (value) => {
 };
 
 const rowError = (rowNumber, message, row = {}) => ({ rowNumber, message, row });
+
+const getUploadRowNumber = (row, fallbackIndex) => Number(row?.[READ_ROW_NUMBER_KEY]) || fallbackIndex + 2;
 
 const crewMemberColumnAliases = {
   crewCode: ["id", "crew id", "crew code", "crewid", "crew no", "crewno", "employee id", "emp id"],
@@ -113,7 +195,7 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const rowNumber = index + 2;
+    const rowNumber = getUploadRowNumber(row, index);
     const {
       crewCode,
       name,
@@ -180,6 +262,11 @@ const assignmentColumns = [
   { role: "Cabin Crew 4", aliases: ["cc4", "cabin crew 4", "cabincrew4"] },
 ];
 
+const otherDutyColumnAliases = {
+  crewCode: ["crew id", "crewid", "crew code"],
+  sourceRosterRowId: ["row id", "rowid", "s.no", "s no", "id"],
+};
+
 const findScheduleFlight = async ({ userId, date, flightNumber, departureStation, arrivalStation }) => {
   const start = moment.utc(date).startOf("day").toDate();
   const end = moment.utc(date).endOf("day").toDate();
@@ -229,14 +316,14 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const rowNumber = index + 2;
+    const rowNumber = getUploadRowNumber(row, index);
     const rawDate = getRowValue(row, ["date", "flight date", "flightdate"]);
     const flightDate = parseExcelDate(rawDate);
     const flightNumber = normalizeUpper(getRowValue(row, ["flight number", "flight no", "flight #", "flight", "flightnumber"]));
     const departureStation = normalizeUpper(getRowValue(row, ["departure station", "dep stn", "dep", "from"]));
     const arrivalStation = normalizeUpper(getRowValue(row, ["arrival station", "arr stn", "arr", "to"]));
     const sector = normalizeUpper(getRowValue(row, ["sector"])) || [departureStation, arrivalStation].filter(Boolean).join("-");
-    const sourceRosterRowId = normalizeText(getRowValue(row, ["row id", "rowid", "s.no", "s no"])) || String(rowNumber - 1);
+    const sourceRosterRowId = normalizeText(getRowValue(row, ["row id", "rowid", "s.no", "s no", "id"])) || String(rowNumber - 1);
 
     const errors = [];
     if (!flightDate) errors.push("Date is required and must be valid.");
@@ -380,14 +467,14 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const rowNumber = index + 2;
-    const crewCode = normalizeUpper(getRowValue(row, ["crew id", "crewid", "crew code", "id"]));
+    const rowNumber = getUploadRowNumber(row, index);
+    const crewCode = normalizeUpper(getRowValue(row, otherDutyColumnAliases.crewCode));
     const crew = crewByCode.get(crewCode);
     const { start, end } = parseOtherDutyTimes(row);
     const location = normalizeUpper(getRowValue(row, ["location", "stn", "station"]));
     const category = normalizeText(getRowValue(row, ["category", "duty category"]));
     const subCategory = normalizeText(getRowValue(row, ["sub-category", "subcategory", "sub category"]));
-    const sourceRosterRowId = normalizeText(getRowValue(row, ["row id", "rowid", "s.no", "s no"])) || String(rowNumber - 1);
+    const sourceRosterRowId = normalizeText(getRowValue(row, otherDutyColumnAliases.sourceRosterRowId)) || String(rowNumber - 1);
     const errors = [];
 
     if (!crewCode) errors.push("Crew ID is required.");
@@ -467,6 +554,7 @@ module.exports = {
     crewMemberColumnAliases,
     isPositioningDuty,
     normalizeCrewMemberUploadRow,
+    otherDutyColumnAliases,
     parseOtherDutyTimes,
   },
 };

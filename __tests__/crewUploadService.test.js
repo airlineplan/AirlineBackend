@@ -1,11 +1,27 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { test } = require("node:test");
+const xlsx = require("xlsx");
 
 const {
+  readRows,
   __testables__: {
     normalizeCrewMemberUploadRow,
+    otherDutyColumnAliases,
   },
 } = require("../services/crewUploadService");
+const { getRowValue } = require("../services/crewTimeUtils");
+
+const writeWorkbook = (rows) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crew-upload-"));
+  const filePath = path.join(dir, "upload.xlsx");
+  const workbook = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(workbook, xlsx.utils.aoa_to_sheet(rows), "Sheet1");
+  xlsx.writeFile(workbook, filePath);
+  return filePath;
+};
 
 test("crew member upload accepts abbreviated allowance headers", () => {
   const row = {
@@ -57,4 +73,30 @@ test("crew member upload ignores header case, spaces, and punctuation", () => {
     ftAllowanceRate: 500,
     allowanceCurrency: "INR",
   });
+});
+
+test("crew upload reader promotes the real header row after a table title", () => {
+  const filePath = writeWorkbook([
+    ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["ID", "Date", "Day", "Flight #", "Dep Stn", "Arr Stn", "Sector", "Captain", "FO", "CC1", "CC2", "CC3", "CC4"],
+    ["1", "6 Jun 26", "Sat", "9I611", "BOM", "AMD", "BOM-AMD", "1", "2", "3", "4", "", ""],
+  ]);
+
+  const rows = readRows(filePath);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].Date, "6 Jun 26");
+  assert.equal(rows[0]["Flight #"], "9I611");
+  assert.equal(rows[0]["Dep Stn"], "BOM");
+  assert.equal(rows[0].Captain, "1");
+});
+
+test("other duty roster uses Crew ID for crew and ID for the roster row", () => {
+  const row = {
+    ID: "100",
+    "Crew ID": "2",
+  };
+
+  assert.equal(getRowValue(row, otherDutyColumnAliases.crewCode), "2");
+  assert.equal(getRowValue(row, otherDutyColumnAliases.sourceRosterRowId), "100");
 });

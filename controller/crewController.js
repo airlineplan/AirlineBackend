@@ -323,12 +323,35 @@ const deletePositioningCostRule = async (req, res) => {
   }
 };
 
+const sendUploadSummary = (res, summary, label) => {
+  const invalidRows = Number(summary?.invalidRows || 0);
+  const changedRows = Number(summary?.rowsInserted || 0) + Number(summary?.rowsUpdated || 0);
+
+  if (invalidRows > 0 && changedRows === 0) {
+    return res.status(422).json({
+      success: false,
+      data: summary,
+      message: `${label} import failed. ${invalidRows} invalid row${invalidRows === 1 ? "" : "s"} found.`,
+    });
+  }
+
+  if (invalidRows > 0) {
+    return res.status(200).json({
+      success: true,
+      data: summary,
+      message: `${label} imported with ${invalidRows} invalid row${invalidRows === 1 ? "" : "s"}.`,
+    });
+  }
+
+  return res.status(200).json({ success: true, data: summary, message: `${label} import completed.` });
+};
+
 const uploadCrewInformation = async (req, res) => {
   try {
     const userId = requireUserId(req);
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded." });
     const summary = await importCrewMembers({ userId, file: req.file, uploadedBy: req.user.email });
-    return res.status(200).json({ success: true, data: summary, message: "Crew Information import completed." });
+    return sendUploadSummary(res, summary, "Crew Information");
   } catch (error) {
     return sendError(res, error, "Failed to import Crew Information");
   }
@@ -339,7 +362,7 @@ const uploadFlightDuties = async (req, res) => {
     const userId = requireUserId(req);
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded." });
     const summary = await importFlightDuties({ userId, file: req.file, uploadedBy: req.user.email });
-    return res.status(200).json({ success: true, data: summary, message: "Flight Duty roster import completed." });
+    return sendUploadSummary(res, summary, "Flight Duty roster");
   } catch (error) {
     return sendError(res, error, "Failed to import Flight Duty roster");
   }
@@ -350,7 +373,7 @@ const uploadOtherDuties = async (req, res) => {
     const userId = requireUserId(req);
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded." });
     const summary = await importOtherDuties({ userId, file: req.file, uploadedBy: req.user.email });
-    return res.status(200).json({ success: true, data: summary, message: "Other Duty roster import completed." });
+    return sendUploadSummary(res, summary, "Other Duty roster");
   } catch (error) {
     return sendError(res, error, "Failed to import Other Duty roster");
   }
