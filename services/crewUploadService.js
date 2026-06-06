@@ -35,6 +35,39 @@ const cleanNumber = (value) => {
 
 const rowError = (rowNumber, message, row = {}) => ({ rowNumber, message, row });
 
+const crewMemberColumnAliases = {
+  crewCode: ["id", "crew id", "crew code", "crewid", "crew no", "crewno", "employee id", "emp id"],
+  name: ["name", "crew name", "crewname", "employee name"],
+  crewType: ["fc/cc", "fc cc", "fc or cc", "crew type", "crewtype", "crew category"],
+  role: ["role", "rank", "position", "designation"],
+  baseStation: ["base", "base station", "basestation", "home base"],
+  dpAllowanceRate: ["dp allowance", "dp allowance rate", "dp allw", "dp allw rate", "dp allow", "dp"],
+  fdpAllowanceRate: ["fdp allowance", "fdp allowance rate", "fdp allw", "fdp allw rate", "fdp allow", "fdp"],
+  ftAllowanceRate: ["ft allowance", "ft allowance rate", "ft allw", "ft allw rate", "ft allow", "ft"],
+  allowanceCurrency: [
+    "allowance currency",
+    "allowance ccy",
+    "allowance currency code",
+    "allowance cur",
+    "allw ccy",
+    "currency",
+    "currency code",
+    "ccy",
+  ],
+};
+
+const normalizeCrewMemberUploadRow = (row) => ({
+  crewCode: normalizeUpper(getRowValue(row, crewMemberColumnAliases.crewCode)),
+  name: normalizeText(getRowValue(row, crewMemberColumnAliases.name)),
+  crewType: normalizeUpper(getRowValue(row, crewMemberColumnAliases.crewType)),
+  role: normalizeText(getRowValue(row, crewMemberColumnAliases.role)),
+  baseStation: normalizeUpper(getRowValue(row, crewMemberColumnAliases.baseStation)),
+  dpAllowanceRate: cleanNumber(getRowValue(row, crewMemberColumnAliases.dpAllowanceRate)),
+  fdpAllowanceRate: cleanNumber(getRowValue(row, crewMemberColumnAliases.fdpAllowanceRate)),
+  ftAllowanceRate: cleanNumber(getRowValue(row, crewMemberColumnAliases.ftAllowanceRate)),
+  allowanceCurrency: normalizeUpper(getRowValue(row, crewMemberColumnAliases.allowanceCurrency)),
+});
+
 const buildBatch = async ({ userId, uploadType, fileName, uploadedBy }) => CrewUploadBatch.create({
   userId,
   uploadType,
@@ -81,15 +114,17 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     const rowNumber = index + 2;
-    const crewCode = normalizeUpper(getRowValue(row, ["id", "crew id", "crew code", "crewid"]));
-    const name = normalizeText(getRowValue(row, ["name", "crew name", "crewname"]));
-    const crewType = normalizeUpper(getRowValue(row, ["fc/cc", "fc cc", "crew type", "crewtype"]));
-    const role = normalizeText(getRowValue(row, ["role", "rank", "position"]));
-    const baseStation = normalizeUpper(getRowValue(row, ["base", "base station", "basestation"]));
-    const dpAllowanceRate = cleanNumber(getRowValue(row, ["dp allowance", "dp allowance rate", "dpallowance"]));
-    const fdpAllowanceRate = cleanNumber(getRowValue(row, ["fdp allowance", "fdp allowance rate", "fdpallowance"]));
-    const ftAllowanceRate = cleanNumber(getRowValue(row, ["ft allowance", "ft allowance rate", "ftallowance"]));
-    const allowanceCurrency = normalizeUpper(getRowValue(row, ["allowance currency", "currency", "ccy"]));
+    const {
+      crewCode,
+      name,
+      crewType,
+      role,
+      baseStation,
+      dpAllowanceRate,
+      fdpAllowanceRate,
+      ftAllowanceRate,
+      allowanceCurrency,
+    } = normalizeCrewMemberUploadRow(row);
 
     const errors = [];
     if (!crewCode) errors.push("Crew ID is required.");
@@ -429,7 +464,9 @@ module.exports = {
   __testables__: {
     buildFlightTimes,
     cleanNumber,
+    crewMemberColumnAliases,
     isPositioningDuty,
+    normalizeCrewMemberUploadRow,
     parseOtherDutyTimes,
   },
 };
