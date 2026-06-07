@@ -134,9 +134,10 @@ test("crew diary classifies gaps, applies convenience and HOTAC rules, and avoid
   approx(delBreak.layoverCost, 8966.67);
   assert.match(delBreak.reasonText, /269 minutes were cost eligible/);
 
-  const ccuHotac = events.find((event) => event.sourceType === "SYSTEM_REST" && event.location === "CCU");
+  const ccuHotacRows = events.filter((event) => event.sourceType === "SYSTEM_REST" && event.location === "CCU");
+  const ccuHotac = ccuHotacRows[0];
   assert.equal(ccuHotac.subCategory, "Layover HOTAC");
-  assert.ok(ccuHotac.rpMinutes > 360);
+  assert.ok(ccuHotacRows.reduce((total, event) => total + event.rpMinutes, 0) > 360);
   assert.ok(ccuHotac.layoverCost > 0);
 
   const delHomeRest = events.find((event) => event.sourceType === "SYSTEM_REST" && event.location === "DEL");
@@ -203,6 +204,67 @@ test("crew diary does not duplicate user-uploaded positioning duties", () => {
   assert.equal(systemPositioning.length, 0);
   const uploadedPositioning = events.find((event) => event.sourceType === "OTHER_DUTY_ROSTER");
   assert.equal(uploadedPositioning.dpMinutes, 150);
+});
+
+test("crew diary does not auto-position after a non-flight duty period", () => {
+  const events = calculateCrewMemberEvents({
+    crewMember: { ...crewMember, baseStation: "BOM" },
+    flightAssignments: [
+      { _id: "nf-flight", std: d("2026-06-05T13:05:00"), sta: d("2026-06-05T14:50:00"), flightNumber: "9I611", departureStation: "BOM", arrivalStation: "AMD" },
+    ],
+    otherDuties: [
+      { _id: "nf-duty", startDateTime: d("2026-06-03T16:00:00"), endDateTime: d("2026-06-03T17:00:00"), location: "DEL", category: "Training", subCategory: "CR session" },
+    ],
+    dutySettings,
+    positioningSettings,
+    layoverRules,
+    positioningCostRules: [],
+  });
+
+  const automaticPositioning = events.find((event) => (
+    event.sourceType === "SYSTEM_POSITIONING" &&
+    event.departureStation === "DEL" &&
+    event.arrivalStation === "BOM"
+  ));
+  assert.equal(automaticPositioning, undefined);
+});
+
+test("crew diary splits rest by calendar day and covers the calculation window", () => {
+  const events = calculateCrewMemberEvents({
+    crewMember: { ...crewMember, baseStation: "BOM" },
+    flightAssignments: [
+      { _id: "cover-flight", std: d("2026-06-05T13:05:00"), sta: d("2026-06-05T14:50:00"), flightNumber: "9I611", departureStation: "BOM", arrivalStation: "AMD" },
+    ],
+    otherDuties: [
+      { _id: "cover-duty", startDateTime: d("2026-06-03T16:00:00"), endDateTime: d("2026-06-03T17:00:00"), location: "DEL", category: "Training", subCategory: "CR session" },
+    ],
+    dutySettings,
+    positioningSettings,
+    layoverRules,
+    positioningCostRules: [],
+    coverageStart: d("2026-06-02T00:00:00"),
+    coverageEnd: d("2026-06-06T00:00:00"),
+  });
+
+  const restRows = events.filter((event) => event.sourceType === "SYSTEM_REST");
+  const fullJun4Rest = restRows.find((event) => (
+    event.startDateTime.toISOString() === "2026-06-04T00:00:00.000Z" &&
+    event.endDateTime.toISOString() === "2026-06-05T00:00:00.000Z"
+  ));
+  assert.ok(fullJun4Rest);
+  assert.equal(fullJun4Rest.rpMinutes, 24 * 60);
+
+  const preFirstDutyRest = restRows.find((event) => (
+    event.startDateTime.toISOString() === "2026-06-02T00:00:00.000Z" &&
+    event.endDateTime.toISOString() === "2026-06-03T00:00:00.000Z"
+  ));
+  assert.ok(preFirstDutyRest);
+
+  const postLastDutyRest = restRows.find((event) => (
+    event.startDateTime > d("2026-06-05T14:50:00") &&
+    event.endDateTime.toISOString() === "2026-06-06T00:00:00.000Z"
+  ));
+  assert.ok(postLastDutyRest);
 });
 
 test("crew KPI values aggregate from diary events without mixing currencies", () => {

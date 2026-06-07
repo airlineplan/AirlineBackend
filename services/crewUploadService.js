@@ -289,6 +289,7 @@ const buildFlightTimes = async ({ userId, date, flightNumber, departureStation, 
   const scheduleFlight = await findScheduleFlight({ userId, date, flightNumber, departureStation, arrivalStation });
   const stdValue = scheduleFlight?.std || getRowValue(row, ["std", "std lt", "scheduled departure"]);
   const staValue = scheduleFlight?.sta || getRowValue(row, ["sta", "sta lt", "scheduled arrival"]);
+  // The flight duty roster date is authoritative for crew diary placement; schedule STD/STA only provide the clock.
   const std = combineDateAndClock(date, stdValue);
   const rawSta = combineDateAndClock(date, staValue);
   const sta = endAfterStartWithOvernight(std, rawSta);

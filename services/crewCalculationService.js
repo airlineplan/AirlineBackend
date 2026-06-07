@@ -55,6 +55,27 @@ const eventCurrency = (crewMember, overrideCurrency = "") => (
   normalizeUpper(overrideCurrency) || normalizeUpper(crewMember.allowanceCurrency) || "INR"
 );
 
+const startOfUtcDay = (date) => moment.utc(date).startOf("day").toDate();
+
+const startOfNextUtcDay = (date) => moment.utc(date).add(1, "day").startOf("day").toDate();
+
+const splitByUtcDay = (start, end) => {
+  const periods = [];
+  let cursor = new Date(start);
+  const finalEnd = new Date(end);
+
+  while (cursor < finalEnd) {
+    const nextMidnight = moment.utc(cursor).add(1, "day").startOf("day").toDate();
+    const segmentEnd = nextMidnight < finalEnd ? nextMidnight : finalEnd;
+    if (diffMinutes(cursor, segmentEnd) > 0) {
+      periods.push({ start: cursor, end: segmentEnd });
+    }
+    cursor = segmentEnd;
+  }
+
+  return periods;
+};
+
 const makeEvent = ({
   crewMember,
   start,
@@ -235,7 +256,7 @@ const addContinuingDutyEvent = ({ events, crewMember, start, end, location, acti
   }));
 };
 
-const addRestEvent = ({ events, crewMember, start, end, location, layoverRules }) => {
+const addRestEvent = ({ events, crewMember, start, end, location, layoverRules, reasonPrefix = "Rest inserted" }) => {
   const duration = diffMinutes(start, end);
   if (duration <= 0) return;
   const baseStation = normalizeUpper(crewMember.baseStation);
@@ -244,7 +265,7 @@ const addRestEvent = ({ events, crewMember, start, end, location, layoverRules }
   const rule = !isBase ? findLayoverRule(layoverRules, "HOTAC", restStation, crewMember.role) : null;
   let layoverCost = 0;
   let subCategory = isBase ? "Rest at Base" : "Away Rest";
-  let reasonText = `Rest inserted because the duty gap of ${duration} minutes meets the configured rest threshold.`;
+  let reasonText = `${reasonPrefix} because the duty gap of ${duration} minutes meets the configured rest threshold.`;
 
   if (isBase) {
     reasonText += " Rest location equals crew base, so HOTAC was not applied.";
@@ -256,19 +277,23 @@ const addRestEvent = ({ events, crewMember, start, end, location, layoverRules }
     reasonText += " No matching HOTAC threshold was met.";
   }
 
-  events.push(makeEvent({
-    crewMember,
-    start,
-    end,
-    location: restStation,
-    category: "Rest",
-    subCategory,
-    sourceType: "SYSTEM_REST",
-    rpMinutes: duration,
-    layoverCost,
-    currency: rule?.currency,
-    reasonText,
-  }));
+  for (const period of splitByUtcDay(start, end)) {
+    const segmentDuration = diffMinutes(period.start, period.end);
+    const segmentLayoverCost = layoverCost > 0 ? (layoverCost * segmentDuration) / duration : 0;
+    events.push(makeEvent({
+      crewMember,
+      start: period.start,
+      end: period.end,
+      location: restStation,
+      category: "Rest",
+      subCategory,
+      sourceType: "SYSTEM_REST",
+      rpMinutes: segmentDuration,
+      layoverCost: segmentLayoverCost,
+      currency: rule?.currency,
+      reasonText,
+    }));
+  }
 };
 
 const addPostflightEvent = ({ events, crewMember, start, dutySettings, location, limitEnd }) => {
@@ -381,6 +406,8 @@ const calculateCrewMemberEvents = ({
   positioningSettings = DEFAULT_POSITIONING_SETTINGS,
   layoverRules = [],
   positioningCostRules = [],
+  coverageStart = null,
+  coverageEnd = null,
 }) => {
   const settings = { ...DEFAULT_DUTY_SETTINGS, ...(dutySettings || {}) };
   const posSettings = { ...DEFAULT_POSITIONING_SETTINGS, ...(positioningSettings || {}) };
@@ -393,7 +420,7 @@ const calculateCrewMemberEvents = ({
   let activeDuty = false;
   let postflightAlreadyAddedForLastFlight = false;
 
-  const getLeadIn = (activity, location, activeDutyState, activeFdpState, afterEnd) => {
+  const getLeadIn = (activity, location, activeDutyState, activeFdpState, afterEnd, previousDutyWasNonFlight = false) => {
     if (activity.type !== "FLIGHT") {
       return { duration: 0, preflightMinutes: 0, positioningMinutes: 0, transferMinutes: 0, needsPositioning: false };
     }
@@ -409,6 +436,7 @@ const calculateCrewMemberEvents = ({
     const previousDutyWasUnspecifiedTravel = normalizeUpper(location) === "FLIGHT";
     const needsPositioning = Boolean(
       posSettings.positioningWithinCurrentFdpEnabled &&
+      !previousDutyWasNonFlight &&
       normalizeUpper(location) &&
       normalizeUpper(location) !== departure &&
       !matchingUploadedPositioning &&
@@ -548,11 +576,23 @@ const calculateCrewMemberEvents = ({
   for (const activity of activities) {
     if (!lastDutyEnd) {
       const leadIn = getLeadIn(activity, currentLocation, activeDuty, activeFdp, null);
+      if (coverageStart && new Date(coverageStart).getTime() < new Date(addMinutes(activity.start, -leadIn.duration)).getTime()) {
+        addRestEvent({
+          events,
+          crewMember,
+          start: coverageStart,
+          end: addMinutes(activity.start, -leadIn.duration),
+          location: currentLocation,
+          layoverRules,
+          reasonPrefix: "Rest inserted before the first duty in the calculation coverage window",
+        });
+      }
       insertLeadInAndActivity(activity, leadIn);
       continue;
     }
 
-    let leadIn = getLeadIn(activity, currentLocation, activeDuty, activeFdp, lastDutyEnd);
+    const previousDutyWasNonFlight = !lastWasFlight && lastDutyEnd;
+    let leadIn = getLeadIn(activity, currentLocation, activeDuty, activeFdp, lastDutyEnd, previousDutyWasNonFlight);
     let nextDutyStart = addMinutes(activity.start, -leadIn.duration);
     let gapMinutes = diffMinutes(lastDutyEnd, nextDutyStart);
 
@@ -575,12 +615,14 @@ const calculateCrewMemberEvents = ({
       const restPrePositionStart = restStart;
       const shouldReturnBase = (
         activity.type === "FLIGHT" &&
+        lastWasFlight &&
         posSettings.returnToBaseAfterFdpEnabled &&
         currentLocation !== baseStation &&
         activityDeparture === baseStation
       );
       const shouldCutoffPosition = (
         activity.type === "FLIGHT" &&
+        lastWasFlight &&
         posSettings.hotacCutoffEnabled &&
         currentLocation !== baseStation &&
         activityDeparture !== baseStation &&
@@ -609,7 +651,7 @@ const calculateCrewMemberEvents = ({
 
       activeFdp = false;
       activeDuty = false;
-      leadIn = getLeadIn(activity, currentLocation, activeDuty, activeFdp, restStart);
+      leadIn = getLeadIn(activity, currentLocation, activeDuty, activeFdp, restStart, previousDutyWasNonFlight);
       nextDutyStart = addMinutes(activity.start, -leadIn.duration);
       if (new Date(nextDutyStart).getTime() < new Date(restStart).getTime()) {
         nextDutyStart = restStart;
@@ -661,13 +703,37 @@ const calculateCrewMemberEvents = ({
   }
 
   if (lastWasFlight && !postflightAlreadyAddedForLastFlight) {
-    addPostflightEvent({
+    lastDutyEnd = addPostflightEvent({
       events,
       crewMember,
       start: lastDutyEnd,
       dutySettings: settings,
       location: currentLocation,
     });
+  }
+
+  if (coverageEnd) {
+    if (!lastDutyEnd && coverageStart && new Date(coverageStart).getTime() < new Date(coverageEnd).getTime()) {
+      addRestEvent({
+        events,
+        crewMember,
+        start: coverageStart,
+        end: coverageEnd,
+        location: currentLocation,
+        layoverRules,
+        reasonPrefix: "Rest inserted for a crew member with no duties in the calculation coverage window",
+      });
+    } else if (lastDutyEnd && new Date(lastDutyEnd).getTime() < new Date(coverageEnd).getTime()) {
+      addRestEvent({
+        events,
+        crewMember,
+        start: lastDutyEnd,
+        end: coverageEnd,
+        location: currentLocation,
+        layoverRules,
+        reasonPrefix: "Rest inserted after the last duty in the calculation coverage window",
+      });
+    }
   }
 
   return events.sort((a, b) => new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime());
@@ -827,16 +893,27 @@ const runCrewCalculation = async ({ userId, triggeredBy }) => {
 
     const flightsByCrew = new Map();
     const dutiesByCrew = new Map();
+    const coverageDates = [];
     for (const assignment of flightAssignments) {
       const key = String(assignment.crewMemberId);
       if (!flightsByCrew.has(key)) flightsByCrew.set(key, []);
       flightsByCrew.get(key).push(assignment);
+      if (assignment.std) coverageDates.push(new Date(assignment.std));
+      if (assignment.sta) coverageDates.push(new Date(assignment.sta));
     }
     for (const duty of otherDuties) {
       const key = String(duty.crewMemberId);
       if (!dutiesByCrew.has(key)) dutiesByCrew.set(key, []);
       dutiesByCrew.get(key).push(duty);
+      if (duty.startDateTime) coverageDates.push(new Date(duty.startDateTime));
+      if (duty.endDateTime) coverageDates.push(new Date(duty.endDateTime));
     }
+    const coverageStart = coverageDates.length
+      ? startOfUtcDay(coverageDates.reduce((min, date) => (date < min ? date : min), coverageDates[0]))
+      : null;
+    const coverageEnd = coverageDates.length
+      ? startOfNextUtcDay(coverageDates.reduce((max, date) => (date > max ? date : max), coverageDates[0]))
+      : null;
 
     const allEvents = [];
     for (const crewMember of crewMembers) {
@@ -849,6 +926,8 @@ const runCrewCalculation = async ({ userId, triggeredBy }) => {
         positioningSettings: settings.positioningSettings,
         layoverRules,
         positioningCostRules,
+        coverageStart,
+        coverageEnd,
       });
       allEvents.push(...crewEvents.map((event) => ({
         ...event,

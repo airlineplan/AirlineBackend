@@ -1,3 +1,4 @@
+const moment = require("moment");
 const {
   CrewCalculationRun,
   CrewDiaryEvent,
@@ -423,9 +424,16 @@ const getCrewDiary = async (req, res) => {
 
     const query = { userId, calculationRunId: latestRun._id };
     if (req.query.startDate || req.query.endDate) {
-      query.startDateTime = {};
-      if (req.query.startDate) query.startDateTime.$gte = new Date(req.query.startDate);
-      if (req.query.endDate) query.startDateTime.$lte = new Date(req.query.endDate);
+      const startDate = req.query.startDate ? moment.utc(req.query.startDate).startOf("day").toDate() : null;
+      const endDate = req.query.endDate ? moment.utc(req.query.endDate).add(1, "day").startOf("day").toDate() : null;
+      if (startDate && endDate) {
+        query.startDateTime = { $lt: endDate };
+        query.endDateTime = { $gt: startDate };
+      } else if (startDate) {
+        query.endDateTime = { $gt: startDate };
+      } else if (endDate) {
+        query.startDateTime = { $lt: endDate };
+      }
     }
     if (req.query.crewCode) query.crewCode = new RegExp(normalizeText(req.query.crewCode), "i");
     if (req.query.crewName) query.crewName = new RegExp(normalizeText(req.query.crewName), "i");
