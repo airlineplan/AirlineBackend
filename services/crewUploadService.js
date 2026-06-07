@@ -181,6 +181,10 @@ const defaultSummary = (batch) => ({
   unresolvedFlights: [],
 });
 
+const shouldApplyReplacement = (rows, validRows, summary) => (
+  rows.length === 0 || validRows.length > 0 || summary.invalidRows === 0
+);
+
 const importCrewMembers = async ({ userId, file, uploadedBy }) => {
   const batch = await buildBatch({
     userId,
@@ -192,6 +196,7 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
   const rows = readRows(file.path);
   summary.rowsRead = rows.length;
   const seenCrewCodes = new Set();
+  const validMembers = [];
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -226,19 +231,53 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
     }
 
     seenCrewCodes.add(crewCode);
-    const existing = await CrewMember.findOne({ userId, crewCode }).lean();
+    validMembers.push({
+      crewCode,
+      name,
+      crewType,
+      role,
+      baseStation,
+      dpAllowanceRate,
+      fdpAllowanceRate,
+      ftAllowanceRate,
+      allowanceCurrency,
+    });
+  }
+
+  if (!shouldApplyReplacement(rows, validMembers, summary)) {
+    await finishBatch(batch, summary);
+    return summary;
+  }
+
+  const validCrewCodes = validMembers.map((member) => member.crewCode);
+  if (validCrewCodes.length > 0) {
+    await Promise.all([
+      CrewMember.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
+      CrewFlightAssignment.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
+      CrewOtherDuty.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
+    ]);
+  } else {
+    await Promise.all([
+      CrewMember.deleteMany({ userId }),
+      CrewFlightAssignment.deleteMany({ userId }),
+      CrewOtherDuty.deleteMany({ userId }),
+    ]);
+  }
+
+  for (const member of validMembers) {
+    const existing = await CrewMember.findOne({ userId, crewCode: member.crewCode }).lean();
     await CrewMember.findOneAndUpdate(
-      { userId, crewCode },
+      { userId, crewCode: member.crewCode },
       {
         $set: {
-          name,
-          crewType,
-          role,
-          baseStation,
-          dpAllowanceRate,
-          fdpAllowanceRate,
-          ftAllowanceRate,
-          allowanceCurrency,
+          name: member.name,
+          crewType: member.crewType,
+          role: member.role,
+          baseStation: member.baseStation,
+          dpAllowanceRate: member.dpAllowanceRate,
+          fdpAllowanceRate: member.fdpAllowanceRate,
+          ftAllowanceRate: member.ftAllowanceRate,
+          allowanceCurrency: member.allowanceCurrency,
           uploadBatchId: batch._id,
         },
       },
@@ -314,6 +353,7 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
   summary.rowsRead = rows.length;
   const crewMembers = await CrewMember.find({ userId }).lean();
   const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
+  const validAssignments = [];
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -387,34 +427,58 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
         assignedRole: assignment.role,
       }).lean();
 
-      await CrewFlightAssignment.findOneAndUpdate(
-        {
-          userId,
-          crewCode: crew.crewCode,
-          flightDate,
-          flightNumber,
-          assignedRole: assignment.role,
-        },
-        {
-          $set: {
-            flightId: scheduleFlight?._id || null,
-            crewMemberId: crew._id,
-            departureStation,
-            arrivalStation,
-            sector,
-            std,
-            sta,
-            sourceRosterRowId,
-            uploadBatchId: batch._id,
-            validationWarnings: warning ? [warning] : [],
-          },
-        },
-        { upsert: true, new: true }
-      );
+      validAssignments.push({
+        crewCode: crew.crewCode,
+        flightDate,
+        flightNumber,
+        assignedRole: assignment.role,
+        flightId: scheduleFlight?._id || null,
+        crewMemberId: crew._id,
+        departureStation,
+        arrivalStation,
+        sector,
+        std,
+        sta,
+        sourceRosterRowId,
+        validationWarnings: warning ? [warning] : [],
+      });
 
       if (existing) summary.rowsUpdated += 1;
       else summary.rowsInserted += 1;
     }
+  }
+
+  if (!shouldApplyReplacement(rows, validAssignments, summary)) {
+    await finishBatch(batch, summary);
+    return summary;
+  }
+
+  await CrewFlightAssignment.deleteMany({ userId });
+  for (const assignment of validAssignments) {
+    await CrewFlightAssignment.findOneAndUpdate(
+      {
+        userId,
+        crewCode: assignment.crewCode,
+        flightDate: assignment.flightDate,
+        flightNumber: assignment.flightNumber,
+        assignedRole: assignment.assignedRole,
+      },
+      {
+        $set: {
+          flightId: assignment.flightId,
+          crewMemberId: assignment.crewMemberId,
+          departureStation: assignment.departureStation,
+          arrivalStation: assignment.arrivalStation,
+          sector: assignment.sector,
+          std: assignment.std,
+          sta: assignment.sta,
+          sourceRosterRowId: assignment.sourceRosterRowId,
+          uploadBatchId: batch._id,
+          validationWarnings: assignment.validationWarnings,
+        },
+      },
+      { upsert: true, new: true }
+    );
   }
 
   await finishBatch(batch, summary);
@@ -467,6 +531,7 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
   summary.rowsRead = rows.length;
   const crewMembers = await CrewMember.find({ userId }).lean();
   const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
+  const validDuties = [];
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -495,14 +560,13 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
       continue;
     }
 
-    const overlaps = await CrewOtherDuty.find({
-      userId,
-      crewMemberId: crew._id,
-      startDateTime: { $lt: end },
-      endDateTime: { $gt: start },
-    }).lean();
+    const overlaps = validDuties.filter((duty) => (
+      String(duty.crewMemberId) === String(crew._id) &&
+      new Date(duty.startDateTime) < end &&
+      new Date(duty.endDateTime) > start
+    ));
     const validationWarnings = overlaps.length > 0
-      ? [`Overlaps ${overlaps.length} existing other duty row(s) for this crew member.`]
+      ? [`Overlaps ${overlaps.length} uploaded other duty row(s) for this crew member.`]
       : [];
     if (validationWarnings.length > 0) {
       summary.warnings.push({ rowNumber, crewCode, message: validationWarnings[0] });
@@ -515,30 +579,52 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
       startDateTime: start,
     }).lean();
 
+    validDuties.push({
+      crewCode,
+      sourceRosterRowId,
+      startDateTime: start,
+      crewMemberId: crew._id,
+      endDateTime: end,
+      location,
+      category,
+      subCategory,
+      isUserEnteredPositioning: isPositioningDuty(category, subCategory),
+      validationWarnings,
+    });
+
+    if (existing) summary.rowsUpdated += 1;
+    else summary.rowsInserted += 1;
+  }
+
+  if (!shouldApplyReplacement(rows, validDuties, summary)) {
+    await finishBatch(batch, summary);
+    summary.rowsInserted = roundMoney(summary.rowsInserted);
+    return summary;
+  }
+
+  await CrewOtherDuty.deleteMany({ userId });
+  for (const duty of validDuties) {
     await CrewOtherDuty.findOneAndUpdate(
       {
         userId,
-        crewCode,
-        sourceRosterRowId,
-        startDateTime: start,
+        crewCode: duty.crewCode,
+        sourceRosterRowId: duty.sourceRosterRowId,
+        startDateTime: duty.startDateTime,
       },
       {
         $set: {
-          crewMemberId: crew._id,
-          endDateTime: end,
-          location,
-          category,
-          subCategory,
-          isUserEnteredPositioning: isPositioningDuty(category, subCategory),
+          crewMemberId: duty.crewMemberId,
+          endDateTime: duty.endDateTime,
+          location: duty.location,
+          category: duty.category,
+          subCategory: duty.subCategory,
+          isUserEnteredPositioning: duty.isUserEnteredPositioning,
           uploadBatchId: batch._id,
-          validationWarnings,
+          validationWarnings: duty.validationWarnings,
         },
       },
       { upsert: true, new: true }
     );
-
-    if (existing) summary.rowsUpdated += 1;
-    else summary.rowsInserted += 1;
   }
 
   await finishBatch(batch, summary);
