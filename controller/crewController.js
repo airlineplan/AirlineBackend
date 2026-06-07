@@ -414,7 +414,9 @@ const getCrewDiary = async (req, res) => {
   try {
     const userId = requireUserId(req);
     const page = Math.max(1, Number(req.query.page || 1));
-    const limit = Math.min(200, Math.max(10, Number(req.query.limit || 50)));
+    const requestedView = String(req.query.view || req.query.mode || "").toLowerCase();
+    const maxLimit = requestedView === "summary" ? 5000 : 200;
+    const limit = Math.min(maxLimit, Math.max(10, Number(req.query.limit || 50)));
     const latestRun = req.query.calculationRunId
       ? { _id: req.query.calculationRunId }
       : await CrewCalculationRun.findOne({ userId, status: "COMPLETED" }).sort({ createdAt: -1 }).select("_id").lean();
