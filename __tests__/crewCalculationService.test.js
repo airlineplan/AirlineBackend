@@ -2,6 +2,9 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
 const {
+  DEFAULT_LAYOVER_RULES,
+  DEFAULT_POSITIONING_COST_RULES,
+  __testables__,
   buildMonthlyKpiSummaries,
   calculateCrewMemberEvents,
   calculateKpiResponse,
@@ -228,6 +231,47 @@ test("crew diary does not auto-position after a non-flight duty period", () => {
     event.arrivalStation === "BOM"
   ));
   assert.equal(automaticPositioning, undefined);
+});
+
+test("crew default layover rules classify zero-cost convenience and HOTAC rows", () => {
+  const breakEvents = calculateCrewMemberEvents({
+    crewMember,
+    flightAssignments: [
+      { _id: "default-break-1", std: d("2026-07-01T09:00:00"), sta: d("2026-07-01T10:00:00"), flightNumber: "DB100", departureStation: "DEL", arrivalStation: "BOM" },
+      { _id: "default-break-2", std: d("2026-07-01T16:00:00"), sta: d("2026-07-01T17:00:00"), flightNumber: "DB101", departureStation: "BOM", arrivalStation: "DEL" },
+    ],
+    dutySettings,
+    positioningSettings,
+    layoverRules: DEFAULT_LAYOVER_RULES,
+    positioningCostRules: [],
+  });
+  const convenience = breakEvents.find((event) => event.sourceType === "SYSTEM_BREAK" && event.location === "BOM");
+  assert.equal(convenience.subCategory, "Convenience");
+  assert.equal(convenience.layoverCost, 0);
+
+  const hotacEvents = calculateCrewMemberEvents({
+    crewMember,
+    flightAssignments: [
+      { _id: "default-hotac", std: d("2026-07-01T09:00:00"), sta: d("2026-07-01T11:00:00"), flightNumber: "DH100", departureStation: "DEL", arrivalStation: "BOM" },
+    ],
+    dutySettings,
+    positioningSettings,
+    layoverRules: DEFAULT_LAYOVER_RULES,
+    positioningCostRules: [],
+    coverageEnd: d("2026-07-02T00:00:00"),
+  });
+  const hotac = hotacEvents.find((event) => event.sourceType === "SYSTEM_REST" && event.location === "BOM");
+  assert.equal(hotac.subCategory, "Layover HOTAC");
+  assert.equal(hotac.layoverCost, 0);
+});
+
+test("crew positioning cost supports all-station defaults with specific overrides", () => {
+  const { findPositioningCostRule } = __testables__;
+  const specificRule = { departureStation: "BOM", arrivalStation: "DEL", sector: "BOM-DEL", role: "Captain", costAmount: 9000, currency: "INR" };
+  const rules = [...DEFAULT_POSITIONING_COST_RULES, specificRule];
+
+  assert.equal(findPositioningCostRule(rules, "BOM", "DEL", "Captain"), specificRule);
+  assert.equal(findPositioningCostRule(rules, "CCU", "MAA", "First Officer").costAmount, 0);
 });
 
 test("crew diary splits rest by calendar day and covers the calculation window", () => {

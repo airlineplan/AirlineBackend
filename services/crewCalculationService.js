@@ -41,6 +41,48 @@ const DEFAULT_POSITIONING_SETTINGS = {
   hotacToAirportTransferMinutes: 60,
 };
 
+const DEFAULT_UTILISATION_TARGETS = [
+  {
+    role: "ALL_ROLES",
+    averageDpMinutesPerDay: 0,
+    averageFdpMinutesPerDay: 0,
+    averageFtMinutesPerDay: 0,
+  },
+];
+
+const DEFAULT_LAYOVER_RULES = [
+  {
+    ruleType: "CONVENIENCE",
+    station: "ALL_STATIONS",
+    role: "ALL_ROLES",
+    thresholdMinutes: 180,
+    costAmount: 0,
+    costBasis: "PER_HOUR",
+    currency: "INR",
+  },
+  {
+    ruleType: "HOTAC",
+    station: "ALL_STATIONS",
+    role: "ALL_ROLES",
+    thresholdMinutes: 420,
+    costAmount: 0,
+    costBasis: "PER_24_HOURS",
+    currency: "INR",
+  },
+];
+
+const DEFAULT_POSITIONING_COST_RULES = [
+  {
+    departureStation: "ALL_STATIONS",
+    arrivalStation: "ALL_STATIONS",
+    sector: "ALL_STATIONS-ALL_STATIONS",
+    role: "ALL_ROLES",
+    costAmount: 0,
+    currency: "INR",
+    isOverride: true,
+  },
+];
+
 const toPlainId = (value) => (value?._id ? value._id : value);
 
 const sortByStart = (a, b) => {
@@ -159,12 +201,23 @@ const findPositioningCostRule = (rules, departureStation, arrivalStation, role) 
 
   return (rules || [])
     .map((rule) => {
-      const exactSector = normalizeUpper(rule.departureStation) === departure && normalizeUpper(rule.arrivalStation) === arrival;
-      const reverseSector = normalizeUpper(rule.sector) === `${departure}-${arrival}`;
+      const ruleDeparture = normalizeUpper(rule.departureStation);
+      const ruleArrival = normalizeUpper(rule.arrivalStation);
+      const ruleSector = normalizeUpper(rule.sector);
+      const departureExact = ruleDeparture === departure;
+      const arrivalExact = ruleArrival === arrival;
+      const departureAll = ruleDeparture === "ALL_STATIONS";
+      const arrivalAll = ruleArrival === "ALL_STATIONS";
+      const sectorExact = ruleSector === `${departure}-${arrival}`;
+      const sectorAll = ruleSector === "ALL_STATIONS-ALL_STATIONS";
       const roleExact = normalizeText(rule.role).toLowerCase() === roleLower;
       const roleAll = normalizeUpper(rule.role) === "ALL_ROLES";
-      if (!(exactSector || reverseSector) || !(roleExact || roleAll)) return null;
-      return { rule, score: (exactSector ? 2 : 1) + (roleExact ? 2 : 1) };
+      const sectorMatches = sectorExact || ((departureExact || departureAll) && (arrivalExact || arrivalAll)) || sectorAll;
+      if (!sectorMatches || !(roleExact || roleAll)) return null;
+      return {
+        rule,
+        score: (departureExact ? 2 : 1) + (arrivalExact ? 2 : 1) + (roleExact ? 2 : 1),
+      };
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score)[0]?.rule || null;
@@ -1156,7 +1209,10 @@ const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startD
 
 module.exports = {
   DEFAULT_DUTY_SETTINGS,
+  DEFAULT_LAYOVER_RULES,
   DEFAULT_POSITIONING_SETTINGS,
+  DEFAULT_POSITIONING_COST_RULES,
+  DEFAULT_UTILISATION_TARGETS,
   buildMonthlyKpiSummaries,
   calculateCrewMemberEvents,
   calculateKpiResponse,

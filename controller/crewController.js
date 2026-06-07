@@ -14,7 +14,10 @@ const {
 } = require("../model/crewSchemas");
 const {
   DEFAULT_DUTY_SETTINGS,
+  DEFAULT_LAYOVER_RULES,
   DEFAULT_POSITIONING_SETTINGS,
+  DEFAULT_POSITIONING_COST_RULES,
+  DEFAULT_UTILISATION_TARGETS,
   calculateKpiResponse,
   runCrewCalculation,
   validatePreconditions,
@@ -65,6 +68,78 @@ const validateMinutesPayload = (payload, fields) => {
   return errors;
 };
 
+const getBreakThresholdForUser = async (userId) => {
+  const dutySettings = await CrewDutySettings.findOneAndUpdate(
+    { userId },
+    { $setOnInsert: { ...DEFAULT_DUTY_SETTINGS, userId } },
+    { new: true, upsert: true }
+  ).lean();
+  return Number(dutySettings?.breakThresholdMinutes ?? DEFAULT_DUTY_SETTINGS.breakThresholdMinutes);
+};
+
+const upsertGlobalDefaults = async (Model, defaults, getFilter) => {
+  await Promise.all(defaults.map((item) => Model.updateOne(
+    getFilter(item),
+    { $setOnInsert: item },
+    { upsert: true }
+  )));
+};
+
+const ensureUtilisationTargetDefaults = async (userId) => {
+  await upsertGlobalDefaults(
+    CrewUtilisationTarget,
+    DEFAULT_UTILISATION_TARGETS.map((item) => ({ userId, ...item })),
+    (item) => ({ userId, role: item.role })
+  );
+};
+
+const buildDefaultLayoverRuleRows = (userId, breakThresholdMinutes) => (
+  DEFAULT_LAYOVER_RULES.map((item) => ({
+    userId,
+    ...item,
+    thresholdMinutes: item.ruleType === "CONVENIENCE"
+      ? Math.max(Number(item.thresholdMinutes || 0), Number(breakThresholdMinutes || 0))
+      : Number(item.thresholdMinutes || 0),
+  }))
+);
+
+const clampConvenienceThresholds = async (userId, breakThresholdMinutes) => {
+  await CrewLayoverRule.updateMany(
+    { userId, ruleType: "CONVENIENCE", thresholdMinutes: { $lt: Number(breakThresholdMinutes || 0) } },
+    { $set: { thresholdMinutes: Number(breakThresholdMinutes || 0) } }
+  );
+};
+
+const ensureLayoverRuleDefaults = async (userId, breakThresholdMinutes) => {
+  await clampConvenienceThresholds(userId, breakThresholdMinutes);
+  await upsertGlobalDefaults(
+    CrewLayoverRule,
+    buildDefaultLayoverRuleRows(userId, breakThresholdMinutes),
+    (item) => ({ userId, ruleType: item.ruleType, station: item.station, role: item.role })
+  );
+};
+
+const ensurePositioningCostDefaults = async (userId) => {
+  await upsertGlobalDefaults(
+    CrewPositioningCostRule,
+    DEFAULT_POSITIONING_COST_RULES.map((item) => ({ userId, ...item })),
+    (item) => ({
+      userId,
+      departureStation: item.departureStation,
+      arrivalStation: item.arrivalStation,
+      role: item.role,
+    })
+  );
+};
+
+const ensureCrewTableDefaults = async (userId, breakThresholdMinutes) => {
+  await Promise.all([
+    ensureUtilisationTargetDefaults(userId),
+    ensureLayoverRuleDefaults(userId, breakThresholdMinutes),
+    ensurePositioningCostDefaults(userId),
+  ]);
+};
+
 const getDutySettings = async (req, res) => {
   try {
     const userId = requireUserId(req);
@@ -102,6 +177,7 @@ const updateDutySettings = async (req, res) => {
       { $set: payload },
       { new: true, upsert: true }
     ).lean();
+    await ensureLayoverRuleDefaults(userId, payload.breakThresholdMinutes);
     return res.status(200).json({ success: true, data, message: "Duty settings saved." });
   } catch (error) {
     return sendError(res, error, "Failed to save duty settings");
@@ -170,6 +246,7 @@ const normalizeTarget = (item) => ({
 const listUtilisationTargets = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    await ensureUtilisationTargetDefaults(userId);
     const data = await CrewUtilisationTarget.find({ userId }).sort({ role: 1 }).lean();
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -184,9 +261,11 @@ const bulkSaveUtilisationTargets = async (req, res) => {
     const errors = items.flatMap((item, index) => validateTarget(item).map((message) => `Row ${index + 1}: ${message}`));
     if (errors.length > 0) return res.status(400).json({ success: false, message: errors.join(" "), errors });
     await CrewUtilisationTarget.deleteMany({ userId });
-    const data = items.length > 0
-      ? await CrewUtilisationTarget.insertMany(items.map((item) => ({ userId, ...normalizeTarget(item) })))
-      : [];
+    if (items.length > 0) {
+      await CrewUtilisationTarget.insertMany(items.map((item) => ({ userId, ...normalizeTarget(item) })));
+    }
+    await ensureUtilisationTargetDefaults(userId);
+    const data = await CrewUtilisationTarget.find({ userId }).sort({ role: 1 }).lean();
     return res.status(200).json({ success: true, data, message: "Utilisation targets saved." });
   } catch (error) {
     return sendError(res, error, "Failed to save utilisation targets");
@@ -197,19 +276,23 @@ const deleteUtilisationTarget = async (req, res) => {
   try {
     const userId = requireUserId(req);
     await CrewUtilisationTarget.deleteOne({ userId, _id: req.params.id });
+    await ensureUtilisationTargetDefaults(userId);
     return res.status(200).json({ success: true, message: "Utilisation target deleted." });
   } catch (error) {
     return sendError(res, error, "Failed to delete utilisation target");
   }
 };
 
-const validateLayoverRule = (item) => {
+const validateLayoverRule = (item, breakThresholdMinutes = DEFAULT_DUTY_SETTINGS.breakThresholdMinutes) => {
   const errors = [];
   const ruleType = normalizeUpper(item.ruleType);
   if (!["CONVENIENCE", "HOTAC"].includes(ruleType)) errors.push("Rule type must be CONVENIENCE or HOTAC.");
   if (!normalizeText(item.station)) errors.push("Station is required.");
   if (!normalizeText(item.role)) errors.push("Role is required.");
   if (!Number.isFinite(Number(item.thresholdMinutes)) || Number(item.thresholdMinutes) < 0) errors.push("Threshold must be non-negative minutes.");
+  if (ruleType === "CONVENIENCE" && Number(item.thresholdMinutes) < Number(breakThresholdMinutes || 0)) {
+    errors.push("Convenience LO time cannot be lower than the master Break period.");
+  }
   if (!Number.isFinite(Number(item.costAmount)) || Number(item.costAmount) < 0) errors.push("Cost amount must be non-negative.");
   if (!normalizeText(item.currency)) errors.push("Currency is required.");
   return errors;
@@ -231,6 +314,8 @@ const normalizeLayoverRule = (item) => {
 const listLayoverRules = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const breakThresholdMinutes = await getBreakThresholdForUser(userId);
+    await ensureLayoverRuleDefaults(userId, breakThresholdMinutes);
     const data = await CrewLayoverRule.find({ userId }).sort({ ruleType: 1, station: 1, role: 1 }).lean();
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -241,13 +326,16 @@ const listLayoverRules = async (req, res) => {
 const bulkSaveLayoverRules = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const breakThresholdMinutes = await getBreakThresholdForUser(userId);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-    const errors = items.flatMap((item, index) => validateLayoverRule(item).map((message) => `Row ${index + 1}: ${message}`));
+    const errors = items.flatMap((item, index) => validateLayoverRule(item, breakThresholdMinutes).map((message) => `Row ${index + 1}: ${message}`));
     if (errors.length > 0) return res.status(400).json({ success: false, message: errors.join(" "), errors });
     await CrewLayoverRule.deleteMany({ userId });
-    const data = items.length > 0
-      ? await CrewLayoverRule.insertMany(items.map((item) => ({ userId, ...normalizeLayoverRule(item) })))
-      : [];
+    if (items.length > 0) {
+      await CrewLayoverRule.insertMany(items.map((item) => ({ userId, ...normalizeLayoverRule(item) })));
+    }
+    await ensureLayoverRuleDefaults(userId, breakThresholdMinutes);
+    const data = await CrewLayoverRule.find({ userId }).sort({ ruleType: 1, station: 1, role: 1 }).lean();
     return res.status(200).json({ success: true, data, message: "Layover rules saved." });
   } catch (error) {
     return sendError(res, error, "Failed to save layover rules");
@@ -257,7 +345,9 @@ const bulkSaveLayoverRules = async (req, res) => {
 const deleteLayoverRule = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const breakThresholdMinutes = await getBreakThresholdForUser(userId);
     await CrewLayoverRule.deleteOne({ userId, _id: req.params.id });
+    await ensureLayoverRuleDefaults(userId, breakThresholdMinutes);
     return res.status(200).json({ success: true, message: "Layover rule deleted." });
   } catch (error) {
     return sendError(res, error, "Failed to delete layover rule");
@@ -291,6 +381,7 @@ const normalizePositioningCostRule = (item) => {
 const listPositioningCostRules = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    await ensurePositioningCostDefaults(userId);
     const data = await CrewPositioningCostRule.find({ userId }).sort({ departureStation: 1, arrivalStation: 1, role: 1 }).lean();
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -305,9 +396,11 @@ const bulkSavePositioningCostRules = async (req, res) => {
     const errors = items.flatMap((item, index) => validatePositioningCostRule(item).map((message) => `Row ${index + 1}: ${message}`));
     if (errors.length > 0) return res.status(400).json({ success: false, message: errors.join(" "), errors });
     await CrewPositioningCostRule.deleteMany({ userId });
-    const data = items.length > 0
-      ? await CrewPositioningCostRule.insertMany(items.map((item) => ({ userId, ...normalizePositioningCostRule(item) })))
-      : [];
+    if (items.length > 0) {
+      await CrewPositioningCostRule.insertMany(items.map((item) => ({ userId, ...normalizePositioningCostRule(item) })));
+    }
+    await ensurePositioningCostDefaults(userId);
+    const data = await CrewPositioningCostRule.find({ userId }).sort({ departureStation: 1, arrivalStation: 1, role: 1 }).lean();
     return res.status(200).json({ success: true, data, message: "Positioning costs saved." });
   } catch (error) {
     return sendError(res, error, "Failed to save positioning cost rules");
@@ -318,6 +411,7 @@ const deletePositioningCostRule = async (req, res) => {
   try {
     const userId = requireUserId(req);
     await CrewPositioningCostRule.deleteOne({ userId, _id: req.params.id });
+    await ensurePositioningCostDefaults(userId);
     return res.status(200).json({ success: true, message: "Positioning cost rule deleted." });
   } catch (error) {
     return sendError(res, error, "Failed to delete positioning cost rule");
@@ -383,6 +477,8 @@ const uploadOtherDuties = async (req, res) => {
 const updatePlan = async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const breakThresholdMinutes = await getBreakThresholdForUser(userId);
+    await ensureCrewTableDefaults(userId, breakThresholdMinutes);
     const result = await runCrewCalculation({ userId, triggeredBy: req.user.email || req.user.id });
     return res.status(200).json({
       success: true,
@@ -528,9 +624,6 @@ const getCrewBootstrap = async (req, res) => {
     const [
       dutySettings,
       positioningSettings,
-      utilisationTargets,
-      layoverRules,
-      positioningCostRules,
       latestRun,
       preconditions,
       counts,
@@ -545,9 +638,6 @@ const getCrewBootstrap = async (req, res) => {
         { $setOnInsert: { ...DEFAULT_POSITIONING_SETTINGS, userId } },
         { new: true, upsert: true }
       ).lean(),
-      CrewUtilisationTarget.find({ userId }).sort({ role: 1 }).lean(),
-      CrewLayoverRule.find({ userId }).sort({ ruleType: 1, station: 1 }).lean(),
-      CrewPositioningCostRule.find({ userId }).sort({ departureStation: 1 }).lean(),
       CrewCalculationRun.findOne({ userId }).sort({ createdAt: -1 }).lean(),
       validatePreconditions({ userId }),
       Promise.all([
@@ -557,6 +647,12 @@ const getCrewBootstrap = async (req, res) => {
         CrewDiaryEvent.countDocuments({ userId }),
         CrewKpiSummary.countDocuments({ userId }),
       ]),
+    ]);
+    await ensureCrewTableDefaults(userId, dutySettings.breakThresholdMinutes);
+    const [utilisationTargets, layoverRules, positioningCostRules] = await Promise.all([
+      CrewUtilisationTarget.find({ userId }).sort({ role: 1 }).lean(),
+      CrewLayoverRule.find({ userId }).sort({ ruleType: 1, station: 1, role: 1 }).lean(),
+      CrewPositioningCostRule.find({ userId }).sort({ departureStation: 1, arrivalStation: 1, role: 1 }).lean(),
     ]);
 
     return res.status(200).json({
