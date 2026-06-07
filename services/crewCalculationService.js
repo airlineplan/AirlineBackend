@@ -772,6 +772,32 @@ const getTargetForRole = (targets, role) => {
     || null;
 };
 
+const lowerEventText = (event) => `${normalizeText(event.category)} ${normalizeText(event.subCategory)}`.toLowerCase();
+
+const isPositioningEvent = (event) => {
+  const category = normalizeText(event.category).toLowerCase();
+  const subCategory = normalizeText(event.subCategory).toLowerCase();
+  return category.includes("position") || /position|deadhead|return to base/.test(subCategory);
+};
+
+const isConvenienceEvent = (event) => lowerEventText(event).includes("convenience");
+
+const isHotacEvent = (event) => lowerEventText(event).includes("hotac");
+
+const addCrewRoleForTarget = (crewRoles, event) => {
+  const crewKey = normalizeUpper(event.crewCode) || String(event.crewMemberId || "");
+  if (crewKey && event.role && !crewRoles.has(crewKey)) {
+    crewRoles.set(crewKey, event.role);
+  }
+};
+
+const rolewiseTargetMinutes = (targets, crewRoles, field, days) => (
+  Array.from(crewRoles.values()).reduce((total, role) => {
+    const target = getTargetForRole(targets, role);
+    return total + (Number(target?.[field] || 0) * days);
+  }, 0)
+);
+
 const buildMonthlyKpiSummaries = ({ userId, calculationRunId, events, targets }) => {
   const groups = new Map();
 
@@ -801,30 +827,39 @@ const buildMonthlyKpiSummaries = ({ userId, calculationRunId, events, targets })
         positioningCount: 0,
         layoverOccurrences: 0,
         layoverDurationMinutes: 0,
+        layoverTotalCost: 0,
+        layoverAverageCost: 0,
         positioningTotalCost: 0,
         positioningAverageCost: 0,
+        convenienceCount: 0,
         convenienceTotalCost: 0,
         convenienceAverageCost: 0,
+        hotacCount: 0,
         hotacTotalCost: 0,
         hotacAverageCost: 0,
         currency: event.currency || "",
+        crewRoles: new Map(),
       });
     }
     const row = groups.get(key);
+    addCrewRoleForTarget(row.crewRoles, event);
     row.totalDpMinutes += Number(event.dpMinutes || 0);
     row.totalFdpMinutes += Number(event.fdpMinutes || 0);
     row.totalFtMinutes += Number(event.ftMinutes || 0);
     row.totalRpMinutes += Number(event.rpMinutes || 0);
     if (event.sourceType === "FLIGHT_ROSTER") row.totalLandings += 1;
-    if (event.sourceType === "SYSTEM_POSITIONING") row.positioningCount += 1;
+    if (isPositioningEvent(event)) row.positioningCount += 1;
     if (Number(event.layoverCost || 0) > 0) {
       row.layoverOccurrences += 1;
       row.layoverDurationMinutes += eventDuration(event);
+      row.layoverTotalCost += Number(event.layoverCost || 0);
     }
-    if (normalizeText(event.subCategory).toLowerCase().includes("convenience")) {
+    if (isConvenienceEvent(event) && Number(event.layoverCost || 0) > 0) {
+      row.convenienceCount += 1;
       row.convenienceTotalCost += Number(event.layoverCost || 0);
     }
-    if (normalizeText(event.subCategory).toLowerCase().includes("hotac")) {
+    if (isHotacEvent(event) && Number(event.layoverCost || 0) > 0) {
+      row.hotacCount += 1;
       row.hotacTotalCost += Number(event.layoverCost || 0);
     }
     row.positioningTotalCost += Number(event.positioningCost || 0);
@@ -832,18 +867,20 @@ const buildMonthlyKpiSummaries = ({ userId, calculationRunId, events, targets })
 
   return Array.from(groups.values()).map((row) => {
     const days = Math.max(1, moment.utc(row.periodEnd).diff(moment.utc(row.periodStart), "days") + 1);
-    const target = getTargetForRole(targets, row.role);
-    const dpTarget = Number(target?.averageDpMinutesPerDay || 0) * days;
-    const fdpTarget = Number(target?.averageFdpMinutesPerDay || 0) * days;
-    const ftTarget = Number(target?.averageFtMinutesPerDay || 0) * days;
+    const dpTarget = rolewiseTargetMinutes(targets, row.crewRoles, "averageDpMinutesPerDay", days);
+    const fdpTarget = rolewiseTargetMinutes(targets, row.crewRoles, "averageFdpMinutesPerDay", days);
+    const ftTarget = rolewiseTargetMinutes(targets, row.crewRoles, "averageFtMinutesPerDay", days);
+    const { crewRoles, ...summaryRow } = row;
     return {
-      ...row,
+      ...summaryRow,
       dpUtilisationPercent: dpTarget > 0 ? roundMoney((row.totalDpMinutes / dpTarget) * 100) : null,
       fdpUtilisationPercent: fdpTarget > 0 ? roundMoney((row.totalFdpMinutes / fdpTarget) * 100) : null,
       ftUtilisationPercent: ftTarget > 0 ? roundMoney((row.totalFtMinutes / ftTarget) * 100) : null,
       positioningAverageCost: row.positioningCount > 0 ? roundMoney(row.positioningTotalCost / row.positioningCount) : 0,
-      convenienceAverageCost: row.layoverOccurrences > 0 ? roundMoney(row.convenienceTotalCost / row.layoverOccurrences) : 0,
-      hotacAverageCost: row.layoverOccurrences > 0 ? roundMoney(row.hotacTotalCost / row.layoverOccurrences) : 0,
+      layoverAverageCost: row.layoverOccurrences > 0 ? roundMoney(row.layoverTotalCost / row.layoverOccurrences) : 0,
+      convenienceAverageCost: row.convenienceCount > 0 ? roundMoney(row.convenienceTotalCost / row.convenienceCount) : 0,
+      hotacAverageCost: row.hotacCount > 0 ? roundMoney(row.hotacTotalCost / row.hotacCount) : 0,
+      layoverTotalCost: roundMoney(row.layoverTotalCost),
       positioningTotalCost: roundMoney(row.positioningTotalCost),
       convenienceTotalCost: roundMoney(row.convenienceTotalCost),
       hotacTotalCost: roundMoney(row.hotacTotalCost),
@@ -1020,6 +1057,8 @@ const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startD
     { key: "dpUtilisationPercent", label: "Crew utilisation % (DP/Target)", type: "percent" },
     { key: "fdpUtilisationPercent", label: "Crew utilisation % (FDP/Target)", type: "percent" },
     { key: "ftUtilisationPercent", label: "Crew utilisation % (FT/Target)", type: "percent" },
+    { key: "layoverTotalCost", label: "Layover total cost", type: "currency" },
+    { key: "layoverAverageCost", label: "Layover average cost", type: "currency" },
     { key: "positioningTotalCost", label: "Positioning total cost", type: "currency" },
     { key: "positioningAverageCost", label: "Positioning average cost", type: "currency" },
     { key: "convenienceTotalCost", label: "Convenience total cost", type: "currency" },
@@ -1038,21 +1077,23 @@ const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startD
       acc.totalFtMinutes += Number(event.ftMinutes || 0);
       acc.totalRpMinutes += Number(event.rpMinutes || 0);
       if (event.sourceType === "FLIGHT_ROSTER") acc.totalLandings += 1;
-      if (event.sourceType === "SYSTEM_POSITIONING") acc.positioningCount += 1;
+      if (isPositioningEvent(event)) acc.positioningCount += 1;
       if (Number(event.layoverCost || 0) > 0) {
         acc.layoverOccurrences += 1;
         acc.layoverDurationMinutes += eventDuration(event);
+        acc.layoverTotalCost += Number(event.layoverCost || 0);
       }
-      if (normalizeText(event.subCategory).toLowerCase().includes("convenience")) {
+      if (isConvenienceEvent(event) && Number(event.layoverCost || 0) > 0) {
+        acc.convenienceCount += 1;
         acc.convenienceTotalCost += Number(event.layoverCost || 0);
       }
-      if (normalizeText(event.subCategory).toLowerCase().includes("hotac")) {
+      if (isHotacEvent(event) && Number(event.layoverCost || 0) > 0) {
+        acc.hotacCount += 1;
         acc.hotacTotalCost += Number(event.layoverCost || 0);
       }
       acc.positioningTotalCost += Number(event.positioningCost || 0);
       if (event.currency) acc.currencies.add(event.currency);
-      if (event.crewCode) acc.crewCodes.add(event.crewCode);
-      if (event.role) acc.roles.add(event.role);
+      addCrewRoleForTarget(acc.crewRoles, event);
       return acc;
     }, {
       totalDpMinutes: 0,
@@ -1063,38 +1104,41 @@ const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startD
       positioningCount: 0,
       layoverOccurrences: 0,
       layoverDurationMinutes: 0,
+      layoverTotalCost: 0,
+      layoverAverageCost: 0,
       positioningTotalCost: 0,
       positioningAverageCost: 0,
+      convenienceCount: 0,
       convenienceTotalCost: 0,
       convenienceAverageCost: 0,
+      hotacCount: 0,
       hotacTotalCost: 0,
       hotacAverageCost: 0,
       currencies: new Set(),
-      crewCodes: new Set(),
-      roles: new Set(),
+      crewRoles: new Map(),
     });
 
-    const roleForTarget = filters.roles?.length === 1 ? filters.roles[0] : Array.from(totals.roles)[0];
-    const target = getTargetForRole(targets, roleForTarget);
     const days = Math.max(1, moment.utc(period.end).diff(moment.utc(period.start), "days") + 1);
-    const crewMultiplier = Math.max(1, totals.crewCodes.size);
-    const dpTarget = Number(target?.averageDpMinutesPerDay || 0) * days * crewMultiplier;
-    const fdpTarget = Number(target?.averageFdpMinutesPerDay || 0) * days * crewMultiplier;
-    const ftTarget = Number(target?.averageFtMinutesPerDay || 0) * days * crewMultiplier;
+    const dpTarget = rolewiseTargetMinutes(targets, totals.crewRoles, "averageDpMinutesPerDay", days);
+    const fdpTarget = rolewiseTargetMinutes(targets, totals.crewRoles, "averageFdpMinutesPerDay", days);
+    const ftTarget = rolewiseTargetMinutes(targets, totals.crewRoles, "averageFtMinutesPerDay", days);
 
     totals.dpUtilisationPercent = dpTarget > 0 ? roundMoney((totals.totalDpMinutes / dpTarget) * 100) : null;
     totals.fdpUtilisationPercent = fdpTarget > 0 ? roundMoney((totals.totalFdpMinutes / fdpTarget) * 100) : null;
     totals.ftUtilisationPercent = ftTarget > 0 ? roundMoney((totals.totalFtMinutes / ftTarget) * 100) : null;
     totals.positioningAverageCost = totals.positioningCount > 0 ? roundMoney(totals.positioningTotalCost / totals.positioningCount) : 0;
-    totals.convenienceAverageCost = totals.layoverOccurrences > 0 ? roundMoney(totals.convenienceTotalCost / totals.layoverOccurrences) : 0;
-    totals.hotacAverageCost = totals.layoverOccurrences > 0 ? roundMoney(totals.hotacTotalCost / totals.layoverOccurrences) : 0;
+    totals.layoverAverageCost = totals.layoverOccurrences > 0 ? roundMoney(totals.layoverTotalCost / totals.layoverOccurrences) : 0;
+    totals.convenienceAverageCost = totals.convenienceCount > 0 ? roundMoney(totals.convenienceTotalCost / totals.convenienceCount) : 0;
+    totals.hotacAverageCost = totals.hotacCount > 0 ? roundMoney(totals.hotacTotalCost / totals.hotacCount) : 0;
+    totals.layoverTotalCost = roundMoney(totals.layoverTotalCost);
     totals.positioningTotalCost = roundMoney(totals.positioningTotalCost);
     totals.convenienceTotalCost = roundMoney(totals.convenienceTotalCost);
     totals.hotacTotalCost = roundMoney(totals.hotacTotalCost);
     totals.currency = totals.currencies.size > 1 ? "MIXED" : (Array.from(totals.currencies)[0] || "");
     delete totals.currencies;
-    delete totals.crewCodes;
-    delete totals.roles;
+    delete totals.crewRoles;
+    delete totals.convenienceCount;
+    delete totals.hotacCount;
     return totals;
   });
 

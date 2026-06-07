@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
 const {
+  buildMonthlyKpiSummaries,
   calculateCrewMemberEvents,
   calculateKpiResponse,
 } = require("../services/crewCalculationService");
@@ -297,4 +298,53 @@ test("crew KPI values aggregate from diary events without mixing currencies", ()
   assert.equal(landingMetric.values[0].value, 5);
   const costMetric = response.metrics.find((metric) => metric.key === "positioningTotalCost");
   assert.equal(costMetric.values[0].currency, "MIXED");
+});
+
+test("crew KPI utilisation divides aggregate duty by aggregate rolewise targets", () => {
+  const events = [
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-05T08:00:00"), endDateTime: d("2026-03-05T16:00:00"), category: "Flight Duty", subCategory: "Operated Flight", sourceType: "FLIGHT_ROSTER", dpMinutes: 480, fdpMinutes: 420, ftMinutes: 240, currency: "INR" },
+    { crewMemberId: "c2", crewCode: "C2", role: "Captain", startDateTime: d("2026-03-06T08:00:00"), endDateTime: d("2026-03-06T16:00:00"), category: "Flight Duty", subCategory: "Operated Flight", sourceType: "FLIGHT_ROSTER", dpMinutes: 480, fdpMinutes: 420, ftMinutes: 240, currency: "INR" },
+    { crewMemberId: "f1", crewCode: "F1", role: "First Officer", startDateTime: d("2026-03-07T08:00:00"), endDateTime: d("2026-03-07T14:00:00"), category: "Flight Duty", subCategory: "Operated Flight", sourceType: "FLIGHT_ROSTER", dpMinutes: 360, fdpMinutes: 300, ftMinutes: 180, currency: "INR" },
+  ];
+  const targets = [
+    { role: "Captain", averageDpMinutesPerDay: 480, averageFdpMinutesPerDay: 420, averageFtMinutesPerDay: 240 },
+    { role: "First Officer", averageDpMinutesPerDay: 360, averageFdpMinutesPerDay: 300, averageFtMinutesPerDay: 180 },
+  ];
+
+  const response = calculateKpiResponse({ events, targets, periodicity: "MONTHLY", startDate: "2026-03-01" });
+  const dpMetric = response.metrics.find((metric) => metric.key === "dpUtilisationPercent");
+  const fdpMetric = response.metrics.find((metric) => metric.key === "fdpUtilisationPercent");
+  const ftMetric = response.metrics.find((metric) => metric.key === "ftUtilisationPercent");
+
+  assert.equal(dpMetric.values[0].value, 3.23);
+  assert.equal(fdpMetric.values[0].value, 3.23);
+  assert.equal(ftMetric.values[0].value, 3.23);
+
+  const monthlyRows = buildMonthlyKpiSummaries({
+    userId: "user-1",
+    calculationRunId: "run-1",
+    events,
+    targets,
+  });
+  const captainRow = monthlyRows.find((row) => row.role === "Captain");
+  assert.equal(captainRow.dpUtilisationPercent, 3.23);
+});
+
+test("crew KPI average costs divide by matching diary occurrence counts", () => {
+  const events = [
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-05T08:00:00"), endDateTime: d("2026-03-05T10:00:00"), category: "Positioning", subCategory: "Deadheading", sourceType: "SYSTEM_POSITIONING", positioningCost: 200, layoverCost: 0, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-06T08:00:00"), endDateTime: d("2026-03-06T10:00:00"), category: "Positioning", subCategory: "Uploaded travel", sourceType: "OTHER_DUTY_ROSTER", positioningCost: 0, layoverCost: 0, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-07T08:00:00"), endDateTime: d("2026-03-07T12:00:00"), category: "Break", subCategory: "Convenience", sourceType: "SYSTEM_BREAK", positioningCost: 0, layoverCost: 100, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-08T08:00:00"), endDateTime: d("2026-03-08T20:00:00"), category: "Rest", subCategory: "Layover HOTAC", sourceType: "SYSTEM_REST", positioningCost: 0, layoverCost: 300, currency: "INR" },
+  ];
+
+  const response = calculateKpiResponse({ events, targets: [], periodicity: "MONTHLY", startDate: "2026-03-01" });
+  const value = (key) => response.metrics.find((metric) => metric.key === key).values[0].value;
+
+  assert.equal(value("positioningCount"), 2);
+  assert.equal(value("positioningAverageCost"), 100);
+  assert.equal(value("layoverTotalCost"), 400);
+  assert.equal(value("layoverAverageCost"), 200);
+  assert.equal(value("convenienceAverageCost"), 100);
+  assert.equal(value("hotacAverageCost"), 300);
 });
