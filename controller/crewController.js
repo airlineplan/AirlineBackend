@@ -579,6 +579,7 @@ const getCrewKpis = async (req, res) => {
       targets,
       periodicity: req.query.periodicity || "MONTHLY",
       startDate: req.query.startDate,
+      endDate: req.query.endDate,
       filters: {
         roles: asArray(req.query.roles),
         bases: asArray(req.query.bases),

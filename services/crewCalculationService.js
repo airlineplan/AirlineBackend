@@ -1061,7 +1061,43 @@ const runCrewCalculation = async ({ userId, triggeredBy }) => {
   }
 };
 
-const buildPeriods = ({ events = [], periodicity = "MONTHLY", startDate, periods = 6 }) => {
+const getFirstWeekEnd = (date) => {
+  const weekEnd = date.clone().startOf("day");
+  if (weekEnd.day() !== 0) {
+    weekEnd.add(7 - weekEnd.day(), "days");
+  }
+  return weekEnd;
+};
+
+const buildWeeklyPeriods = ({ base, endDate, periods }) => {
+  const rangeStart = base.clone().startOf("day");
+  const rangeEnd = endDate && moment.utc(endDate).isValid()
+    ? moment.utc(endDate).endOf("day")
+    : null;
+  const firstWeekEnd = getFirstWeekEnd(rangeStart);
+  const lastWeekEnd = rangeEnd ? getFirstWeekEnd(rangeEnd) : null;
+  const weeklyPeriods = [];
+
+  for (let index = 0; ; index += 1) {
+    const weekEnd = firstWeekEnd.clone().add(index, "week");
+    if (lastWeekEnd && weekEnd.isAfter(lastWeekEnd)) break;
+    if (!lastWeekEnd && index >= periods) break;
+
+    const weekStart = weekEnd.clone().subtract(6, "days").startOf("day");
+    const start = moment.max(weekStart, rangeStart);
+    const end = rangeEnd ? moment.min(weekEnd.clone().endOf("day"), rangeEnd) : weekEnd.clone().endOf("day");
+
+    weeklyPeriods.push({
+      label: `Week ${weekEnd.format("DD MMM")}`,
+      start: start.toDate(),
+      end: end.toDate(),
+    });
+  }
+
+  return weeklyPeriods;
+};
+
+const buildPeriods = ({ events = [], periodicity = "MONTHLY", startDate, endDate, periods = 6 }) => {
   const type = normalizeUpper(periodicity || "MONTHLY");
   const firstEventDate = events.length > 0
     ? events.reduce((min, event) => (new Date(event.startDateTime) < min ? new Date(event.startDateTime) : min), new Date(events[0].startDateTime))
@@ -1069,11 +1105,35 @@ const buildPeriods = ({ events = [], periodicity = "MONTHLY", startDate, periods
   const base = startDate ? moment.utc(startDate) : moment.utc(firstEventDate);
   const unit = type === "DAILY" ? "day" : (type === "WEEKLY" ? "week" : "month");
 
+  if (type === "WEEKLY") {
+    return buildWeeklyPeriods({ base, endDate, periods });
+  }
+
+  if (endDate && moment.utc(endDate).isValid()) {
+    const rangeStart = base.clone().startOf("day");
+    const rangeEnd = moment.utc(endDate).endOf("day");
+    const result = [];
+    const current = base.clone().startOf(unit);
+
+    while (current.isSameOrBefore(rangeEnd)) {
+      const periodStart = moment.max(current.clone().startOf(unit), rangeStart);
+      const periodEnd = moment.min(current.clone().endOf(unit), rangeEnd);
+      result.push({
+        label: type === "DAILY" ? current.format("DD MMM YYYY") : current.format("MMM YYYY"),
+        start: periodStart.toDate(),
+        end: periodEnd.toDate(),
+      });
+      current.add(1, unit);
+    }
+
+    return result;
+  }
+
   return Array.from({ length: periods }, (_, index) => {
     const start = base.clone().startOf(unit).add(index, unit);
     const end = start.clone().endOf(unit);
     return {
-      label: type === "DAILY" ? start.format("DD MMM YYYY") : (type === "WEEKLY" ? `Week ${start.format("DD MMM")}` : start.format("MMM YYYY")),
+      label: type === "DAILY" ? start.format("DD MMM YYYY") : start.format("MMM YYYY"),
       start: start.toDate(),
       end: end.toDate(),
     };
@@ -1095,9 +1155,9 @@ const filterEventForKpi = (event, filters = {}) => {
   );
 };
 
-const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startDate, filters = {} }) => {
+const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startDate, endDate, filters = {} }) => {
   const filteredEvents = (events || []).filter((event) => filterEventForKpi(event, filters));
-  const periods = buildPeriods({ events: filteredEvents.length ? filteredEvents : events, periodicity, startDate, periods: 6 });
+  const periods = buildPeriods({ events: filteredEvents.length ? filteredEvents : events, periodicity, startDate, endDate, periods: 6 });
   const metrics = [
     { key: "totalFtMinutes", label: "Total Flight Time", type: "duration" },
     { key: "totalFdpMinutes", label: "Total Flight Duty Period", type: "duration" },
