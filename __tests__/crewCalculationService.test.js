@@ -374,6 +374,34 @@ test("crew KPI utilisation divides aggregate duty by aggregate rolewise targets"
   assert.equal(captainRow.dpUtilisationPercent, 3.23);
 });
 
+test("crew KPI weekly periods use master week endings without leaking prior month labels", () => {
+  const events = [
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-06-01T08:00:00"), endDateTime: d("2026-06-01T16:00:00"), category: "Flight Duty", subCategory: "Operated Flight", sourceType: "FLIGHT_ROSTER", dpMinutes: 480, fdpMinutes: 420, ftMinutes: 240, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-06-30T08:00:00"), endDateTime: d("2026-06-30T12:00:00"), category: "Flight Duty", subCategory: "Operated Flight", sourceType: "FLIGHT_ROSTER", dpMinutes: 240, fdpMinutes: 240, ftMinutes: 120, currency: "INR" },
+  ];
+
+  const response = calculateKpiResponse({
+    events,
+    targets: [],
+    periodicity: "WEEKLY",
+    startDate: "2026-06-01",
+    endDate: "2026-06-30",
+  });
+
+  assert.deepEqual(response.periods.map((period) => period.label), [
+    "Week 07 Jun",
+    "Week 14 Jun",
+    "Week 21 Jun",
+    "Week 28 Jun",
+    "Week 05 Jul",
+  ]);
+  assert.ok(!response.periods.some((period) => period.label.includes("May")));
+
+  const ftMetric = response.metrics.find((metric) => metric.key === "totalFtMinutes");
+  assert.equal(ftMetric.values[0].value, 240);
+  assert.equal(ftMetric.values[4].value, 120);
+});
+
 test("crew KPI average costs divide by matching diary occurrence counts", () => {
   const events = [
     { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-05T08:00:00"), endDateTime: d("2026-03-05T10:00:00"), category: "Positioning", subCategory: "Deadheading", sourceType: "SYSTEM_POSITIONING", positioningCost: 200, layoverCost: 0, currency: "INR" },
