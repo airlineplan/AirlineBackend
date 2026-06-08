@@ -711,9 +711,9 @@ test("maintenance reserve contribution uses flight FH and the matched engine SN 
     ],
   });
 
-  assert.equal(enriched.maintenanceReserveContribution, 735.28);
+  assert.equal(enriched.maintenanceReserveContribution, 735.24);
   assert.equal(enriched.maintenanceReserveContributionCCY, "USD");
-  assert.equal(enriched.mrContribution, 735.28);
+  assert.equal(enriched.mrContribution, 735.24);
 });
 
 test("maintenance reserve monthly contribution splits the schedule contribution by aircraft-month BH share", () => {
@@ -1477,6 +1477,118 @@ test("maintenance reserve schedule generation dedupes, preserves manual rows, an
   assert.deepEqual(deletedSettingPruned, []);
 });
 
+test("maintenance reserve schedule builds opening, monthly contribution, drawdown, and escalation ledger rows", () => {
+  const septemberFlights = Array.from({ length: 5 }, (_, index) => ({
+    date: `2025-09-${String(index + 26).padStart(2, "0")}`,
+    acftRegn: "VT-TFF",
+    fh: 11.2,
+    bh: 12,
+  }));
+  const octoberFlights = Array.from({ length: 31 }, (_, index) => ({
+    date: `2025-10-${String(index + 1).padStart(2, "0")}`,
+    acftRegn: "VT-TFF",
+    fh: 10,
+    bh: 11,
+  }));
+  const novemberFlights = Array.from({ length: 30 }, (_, index) => ({
+    date: `2025-11-${String(index + 1).padStart(2, "0")}`,
+    acftRegn: "VT-TFF",
+    fh: index < 29 ? 8.5 : 15.5,
+    bh: 9,
+  }));
+  const setting = {
+    mrAccId: "100",
+    schMxEvent: "ENG1PR",
+    acftRegn: "VT-TFF",
+    pn: "LEAP 1A",
+    sn: "830493",
+    setBalance: 15000000,
+    setRate: 290,
+    asOnDate: "2025-09-26",
+    ccy: "USD",
+    driver: "FH",
+    annualEscalation: 7.5,
+    anniversaryDate: "01 Aug",
+    endDate: "2027-10-25",
+  };
+
+  const schedule = generateMaintenanceReserveScheduleWithContributions(
+    [setting],
+    [],
+    [...septemberFlights, ...octoberFlights, ...novemberFlights],
+    {
+      aircraftOnwing: [
+        {
+          date: "2025-09-26",
+          acftRegn: "VT-TFF",
+          msn: "MSN-TFF",
+          eng1Esn: "830493",
+        },
+      ],
+      schMxEvents: [
+        {
+          id: "mx-1",
+          mrAccId: "100",
+          drawdownDate: "2026-10-15",
+          mrDrawdown: 2000000,
+          pn: "LEAP 1A",
+          snBn: "830493",
+        },
+      ],
+    }
+  );
+
+  const opening = schedule.find((row) => row.date === "2025-09-26");
+  const oct = schedule.find((row) => row.date === "2025-10-01" && row.transactionType === "Monthly Contribution");
+  const nov = schedule.find((row) => row.date === "2025-11-01");
+  const dec = schedule.find((row) => row.date === "2025-12-01");
+  const aug2026 = schedule.find((row) => row.date === "2026-08-01");
+  const aug2027 = schedule.find((row) => row.date === "2027-08-01");
+  const drawdown = schedule.find((row) => row.date === "2026-10-15" && row.transactionType === "Drawdown");
+
+  assert.equal(opening.transactionType, "Opening Balance");
+  assert.equal(opening.balance, 15000000);
+  assert.equal(oct.driverValue, 56);
+  assert.equal(oct.contribution, 16240);
+  assert.equal(oct.balance, 15016240);
+  assert.equal(nov.driverValue, 310);
+  assert.equal(nov.contribution, 89900);
+  assert.equal(nov.balance, 15106140);
+  assert.equal(dec.driverValue, 262);
+  assert.equal(dec.contribution, 75980);
+  assert.equal(dec.balance, 15182120);
+  assert.equal(aug2026.rate, 311.75);
+  assert.equal(aug2027.rate, 335.13);
+  assert.equal(drawdown.drawdown, 2000000);
+  approx(drawdown.balance, schedule.find((row) => row.date === "2026-10-01").balance - 2000000);
+});
+
+test("maintenance reserve schedule supports BH, departures, month, and missing utilisation", () => {
+  const settings = [
+    { mrAccId: "MR-BH", acftRegn: "VT-DRV", setBalance: 0, setRate: 10, asOnDate: "2026-01-15", endDate: "2026-03-31", driver: "BH", ccy: "USD" },
+    { mrAccId: "MR-DEP", acftRegn: "VT-DRV", setBalance: 0, setRate: 20, asOnDate: "2026-01-15", endDate: "2026-03-31", driver: "Departures", ccy: "USD" },
+    { mrAccId: "MR-MONTH", acftRegn: "VT-DRV", setBalance: 0, setRate: 300, asOnDate: "2026-01-15", endDate: "2026-03-31", driver: "Month", ccy: "USD" },
+  ];
+  const flights = [
+    { date: "2026-01-15", acftRegn: "VT-DRV", bh: 3, fh: 2 },
+    { date: "2026-01-16", acftRegn: "VT-DRV", bh: 4, fh: 3 },
+  ];
+  const schedule = generateMaintenanceReserveScheduleWithContributions(settings, [], flights);
+  const bhFebruary = schedule.find((row) => row.mrAccId === "MR-BH" && row.date === "2026-02-01");
+  const depFebruary = schedule.find((row) => row.mrAccId === "MR-DEP" && row.date === "2026-02-01");
+  const monthFebruary = schedule.find((row) => row.mrAccId === "MR-MONTH" && row.date === "2026-02-01");
+  const bhMarch = schedule.find((row) => row.mrAccId === "MR-BH" && row.date === "2026-03-01");
+
+  assert.equal(bhFebruary.driverValue, 7);
+  assert.equal(bhFebruary.contribution, 70);
+  assert.equal(depFebruary.driverValue, 2);
+  assert.equal(depFebruary.contribution, 40);
+  assert.equal(monthFebruary.driverValue, 1);
+  assert.equal(monthFebruary.contribution, 300);
+  assert.equal(bhMarch.driverValue, 0);
+  assert.equal(bhMarch.contribution, 0);
+});
+
 test("maintenance reserve schedule drives on-wing SN mapping, next-month lookup, FX, and monthly allocation", () => {
   const flights = [
     {
@@ -1619,7 +1731,7 @@ test("maintenance reserve supports BH, departure, and APUHR drivers", () => {
   assert.equal(enriched.maintenanceReserveContribution, 65);
 });
 
-test("generated maintenance reserve schedule uses prior-month BH without expensing opening balance", () => {
+test("generated maintenance reserve schedule expenses first opening balance in the prior utilization month", () => {
   const mayFlights = Array.from({ length: 31 }, (_, index) => ({
     date: `2026-05-${String(index + 1).padStart(2, "0")}`,
     flight: `MR${index + 1}`,

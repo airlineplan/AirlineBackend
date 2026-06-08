@@ -24,6 +24,8 @@ const MaintenanceReserveScheduleRowSchema = new mongoose.Schema({
   balance: { type: Number, default: 0 },
   ccy: { type: String, default: "" },
   source: { type: String, default: "" },
+  sourceEventId: { type: String, default: "" },
+  transactionType: { type: String, default: "" },
   notes: { type: String, default: "" },
   costRCCY: { type: Number, default: 0 },
 }, { _id: false });

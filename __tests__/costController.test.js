@@ -204,7 +204,8 @@ test("cost config controller round-trips the spreadsheet-style input sections", 
   assert.equal(data.apuUsage[0].kgPerApuHr, 255);
   assert.equal(data.leasedReserve[0].mrAccId, "MR-1");
   assert.equal(data.maintenanceReserveSchedule[0].mrAccId, "MR-1");
-  assert.equal(data.maintenanceReserveSchedule[0].balance, 750);
+  assert.equal(data.maintenanceReserveSchedule[0].transactionType, "Opening Balance");
+  assert.equal(data.maintenanceReserveSchedule[0].balance, 1000);
   assert.equal(data.transitMx[0].sn, "5825");
   assert.equal(data.otherDoc[0].label, "Doc");
   assert.equal(data.otherDoc[0].variantOrAcftRegn, "A320");

@@ -174,6 +174,7 @@ exports.saveCostConfig = async (req, res) => {
           mrScheduleContext.aircraftOnwing || [],
           (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
         ),
+        schMxEvents: Array.isArray(configData.schMxEvents) ? configData.schMxEvents : [],
       }
     );
     const hydratedSchMxEvents = await hydrateSchMxEventsForUser(
@@ -256,6 +257,7 @@ exports.getCostConfig = async (req, res) => {
             mrScheduleContext.aircraftOnwing || [],
             (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
           ),
+          schMxEvents: config.schMxEvents || [],
         }
       );
       config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || [], config.maintenanceReserveSchedule || []);
@@ -292,6 +294,7 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
           mrScheduleContext.aircraftOnwing || [],
           (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
         ),
+        schMxEvents: Array.isArray(body.schMxEvents) ? body.schMxEvents : [],
       }
     );
 
@@ -299,6 +302,102 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
   } catch (error) {
     console.error("Error generating maintenance reserve schedule:", error);
     res.status(500).json({ success: false, message: "Failed to generate maintenance reserve schedule." });
+  }
+};
+
+const buildGeneratedMaintenanceReserveScheduleForConfig = async (userId, config = {}, requestBody = {}) => {
+  const flightsForSchedule = await Flights.find({ userId }).lean();
+  const masterStartDate = getMasterStartDateKey(flightsForSchedule);
+  const normalizedAircraftOnwing = normalizeAircraftOnwing(requestBody.aircraftOnwing || config.aircraftOnwing || []);
+  const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
+  const allLeasedReserve = applyMasterStartDateToLeasedReserve(
+    normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve,
+    masterStartDate
+  );
+  const requestedMrAccId = String(requestBody.mrAccId || "").trim().toUpperCase();
+  const selectedLeasedReserve = requestedMrAccId && !requestBody.regenerateAll
+    ? allLeasedReserve.filter((row) => String(row?.mrAccId || "").trim().toUpperCase() === requestedMrAccId)
+    : allLeasedReserve;
+  const selectedIds = new Set(selectedLeasedReserve.map((row) => String(row?.mrAccId || "").trim().toUpperCase()).filter(Boolean));
+  const existingSchedule = normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []);
+  const preservedSchedule = requestedMrAccId && !requestBody.regenerateAll
+    ? existingSchedule.filter((row) => !selectedIds.has(String(row?.mrAccId || "").trim().toUpperCase()))
+    : [];
+  const generatedSchedule = generateMaintenanceReserveScheduleWithContributions(
+    selectedLeasedReserve,
+    existingSchedule,
+    flightsForSchedule,
+    {
+      aircraftOnwing: mergeByIdentity(
+        normalizedAircraftOnwing,
+        mrScheduleContext.aircraftOnwing || [],
+        (row) => [row?.acftRegn || row?.msn, row?.date, row?.pos1Esn || row?.eng1Esn, row?.pos2Esn || row?.eng2Esn, row?.apun].join("|")
+      ),
+      schMxEvents: config.schMxEvents || [],
+    }
+  );
+  return {
+    leasedReserve: allLeasedReserve,
+    aircraftOnwing: normalizedAircraftOnwing,
+    maintenanceReserveSchedule: [...preservedSchedule, ...generatedSchedule],
+  };
+};
+
+exports.generateMaintenanceReserveSchedule = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const config = await CostConfig.findOne({ userId }).lean();
+    if (!config) {
+      return res.status(404).json({ success: false, message: "Cost settings not found." });
+    }
+
+    const generated = await buildGeneratedMaintenanceReserveScheduleForConfig(userId, config, req.body || {});
+    const hydratedSchMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || [], generated.maintenanceReserveSchedule);
+    const updatedConfig = await CostConfig.findOneAndUpdate(
+      { userId },
+      {
+        $set: {
+          leasedReserve: generated.leasedReserve,
+          aircraftOnwing: generated.aircraftOnwing,
+          maintenanceReserveSchedule: generated.maintenanceReserveSchedule,
+          schMxEvents: hydratedSchMxEvents,
+        },
+      },
+      { new: true }
+    );
+
+    res.status(200).json({ success: true, data: updatedConfig.maintenanceReserveSchedule || [] });
+  } catch (error) {
+    console.error("Error generating maintenance reserve schedule:", error);
+    res.status(500).json({ success: false, message: "Failed to generate maintenance reserve schedule." });
+  }
+};
+
+exports.getMaintenanceReserveSchedule = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const config = await CostConfig.findOne({ userId }).lean();
+    const filters = req.query || {};
+    let rows = normalizeMaintenanceReserveSchedule(config?.maintenanceReserveSchedule || []);
+    const startDate = moment.utc(filters.startDate);
+    const endDate = moment.utc(filters.endDate);
+
+    rows = rows.filter((row) => {
+      if (filters.mrAccId && String(row.mrAccId || "").trim().toUpperCase() !== String(filters.mrAccId).trim().toUpperCase()) return false;
+      if (filters.acftRegn && String(row.acftRegn || row.acftReg || "").trim().toUpperCase() !== String(filters.acftRegn).trim().toUpperCase()) return false;
+      if (filters.pn && String(row.pn || "").trim().toUpperCase() !== String(filters.pn).trim().toUpperCase()) return false;
+      if (filters.sn && String(row.sn || row.msn || "").trim().toUpperCase() !== String(filters.sn).trim().toUpperCase()) return false;
+      if (filters.transactionType && String(row.transactionType || "").trim().toUpperCase() !== String(filters.transactionType).trim().toUpperCase()) return false;
+      const rowDate = moment.utc(row.date);
+      if (startDate.isValid() && rowDate.isValid() && rowDate.isBefore(startDate, "day")) return false;
+      if (endDate.isValid() && rowDate.isValid() && rowDate.isAfter(endDate, "day")) return false;
+      return true;
+    });
+
+    res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Error loading maintenance reserve schedule:", error);
+    res.status(500).json({ success: false, message: "Failed to load maintenance reserve schedule." });
   }
 };
 

@@ -12,6 +12,7 @@ test("hydrateSchMxEvents fills maintenance logic fields and exact opening balanc
         event: "E1PR",
         pn: "CFM56-5B",
         snBn: "629032",
+        cost: 500,
         drawdownDate: "2026-04-02",
         mrAccId: "2",
         mrDrawdown: 100,
@@ -44,7 +45,7 @@ test("hydrateSchMxEvents fills maintenance logic fields and exact opening balanc
   assert.equal(hydrated[0].cycles, 13038);
   assert.equal(hydrated[0].days, 3913);
   assert.equal(hydrated[0].openingBal, 3459209);
-  assert.equal(hydrated[0].remaining, 3459109);
+  assert.equal(hydrated[0].remaining, 400);
   assert.deepEqual(hydrated[0]._hydratedFields.sort(), ["days", "cycles", "hours", "openingBal", "remaining"].sort());
 });
 

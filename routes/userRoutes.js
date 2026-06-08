@@ -117,6 +117,8 @@ user.get("/master-weeks", ...featureAccess(["view", "assignment", "revenue", "co
 user.get("/cost-config", ...featureAccess("cost"), costController.getCostConfig);
 user.post("/cost-config", ...featureAccess("cost", "edit"), jsonParser, costController.saveCostConfig);
 user.post("/cost-config/maintenance-reserve-schedule/generate", ...featureAccess("cost"), jsonParser, costController.generateMaintenanceReserveSchedulePreview);
+user.post("/maintenance-reserve/generate", ...featureAccess("cost", "edit"), jsonParser, costController.generateMaintenanceReserveSchedule);
+user.get("/maintenance-reserve/schedule", ...featureAccess("cost"), costController.getMaintenanceReserveSchedule);
 user.post("/cost-page-data", ...featureAccess("cost"), jsonParser, costController.getCostPageData);
 user.post("/cost-page-data/recalculate-and-save", ...featureAccess("cost", "edit"), jsonParser, costController.recalculateAndSaveCostPageData);
 

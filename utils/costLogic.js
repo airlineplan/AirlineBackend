@@ -1091,6 +1091,8 @@ const normalizeMaintenanceReserveSchedule = (rows = []) => rows.map((row) => ({
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
   source: normalize(pick(row, ["source"])),
+  sourceEventId: pick(row, ["sourceEventId", "eventId", "maintenanceEventId"]),
+  transactionType: pick(row, ["transactionType", "type"]),
   notes: pick(row, ["notes"]),
   costRCCY: toNumber(pick(row, ["costRCCY", "reportingAmount"])),
 })).map((row) => ({
@@ -1121,60 +1123,238 @@ const toMonthStartKey = (value) => {
 const getScheduleIdentity = (row = {}) => [
   normalize(row.mrAccId),
   normalize(row.sn || row.msn),
-  toMonthStartKey(row.date),
+  toDayKey(row.date),
+  normalize(row.transactionType || row.source),
+  normalize(row.sourceEventId || row.eventId || row._id),
 ].join("|");
+
+const parseAnniversaryParts = (setting = {}) => {
+  const raw = String(setting.anniversaryDate || setting.anniversary || "").trim();
+  const date = parseDate(raw || setting.asOnDate);
+  if (date) return { month: date.getUTCMonth(), day: date.getUTCDate() };
+
+  const monthMap = {
+    JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+    JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+  };
+  const dayMonth = raw.match(/^(\d{1,2})[-\s/]?([A-Z]{3,})$/i);
+  if (dayMonth) {
+    const month = monthMap[dayMonth[2].slice(0, 3).toUpperCase()];
+    if (month !== undefined) return { month, day: Number(dayMonth[1]) };
+  }
+  const monthDay = raw.match(/^([A-Z]{3,})[-\s/](\d{1,2})$/i);
+  if (monthDay) {
+    const month = monthMap[monthDay[1].slice(0, 3).toUpperCase()];
+    if (month !== undefined) return { month, day: Number(monthDay[2]) };
+  }
+  return null;
+};
 
 const getEscalatedReserveRate = (setting = {}, scheduleDateValue) => {
   const baseRate = toNumber(setting.setRate || setting.rate);
   const escalation = toNumber(setting.annualEscalation || setting.annualEscl);
   const scheduleDate = parseDate(scheduleDateValue);
-  const anniversary = parseDate(setting.anniversaryDate || setting.anniversary || setting.asOnDate);
+  const anniversary = parseAnniversaryParts(setting);
   if (!baseRate || !escalation || !scheduleDate || !anniversary) return round2(baseRate);
 
-  let anniversaries = scheduleDate.getUTCFullYear() - anniversary.getUTCFullYear();
-  const anniversaryThisYear = new Date(Date.UTC(
-    scheduleDate.getUTCFullYear(),
-    anniversary.getUTCMonth(),
-    anniversary.getUTCDate()
-  ));
-  if (scheduleDate > anniversaryThisYear) anniversaries += 1;
-  if (anniversaries <= 0) return round2(baseRate);
+  let anniversaries = 0;
+  const startDate = parseDate(setting.asOnDate);
+  const startYear = startDate?.getUTCFullYear() || scheduleDate.getUTCFullYear();
+  for (let year = startYear; year <= scheduleDate.getUTCFullYear(); year += 1) {
+    const anniversaryDate = new Date(Date.UTC(year, anniversary.month, anniversary.day));
+    if (startDate && anniversaryDate <= startDate) continue;
+    if (scheduleDate >= anniversaryDate) anniversaries += 1;
+  }
   return round2(baseRate * ((1 + escalation / 100) ** anniversaries));
 };
 
-const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingScheduleRows = []) => {
+const generateMonthlyDates = (asOnDateValue, endDateValue) => {
+  const asOnDate = parseDate(asOnDateValue);
+  const endDate = parseDate(endDateValue);
+  if (!asOnDate || !endDate) return [];
+  const dates = [];
+  for (
+    let cursor = new Date(Date.UTC(asOnDate.getUTCFullYear(), asOnDate.getUTCMonth() + 1, 1));
+    cursor <= endDate;
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+  ) {
+    dates.push(new Date(cursor));
+  }
+  return dates;
+};
+
+const getPreviousUtilisationPeriod = (scheduleDateValue, asOnDateValue) => {
+  const scheduleDate = parseDate(scheduleDateValue);
+  const asOnDate = parseDate(asOnDateValue);
+  if (!scheduleDate || !asOnDate) return { from: null, to: null };
+  const previousMonthStart = new Date(Date.UTC(scheduleDate.getUTCFullYear(), scheduleDate.getUTCMonth() - 1, 1));
+  const previousMonthEnd = new Date(Date.UTC(scheduleDate.getUTCFullYear(), scheduleDate.getUTCMonth(), 0));
+  return {
+    from: asOnDate > previousMonthStart ? asOnDate : previousMonthStart,
+    to: previousMonthEnd,
+  };
+};
+
+const isGeneratedScheduleRow = (row = {}) => {
+  const source = normalize(row.source);
+  return !source || source === "GENERATED";
+};
+
+const getScheduleTransactionOrder = (row = {}) => {
+  const transactionType = normalize(row.transactionType);
+  if (transactionType === "OPENING BALANCE") return 1;
+  if (transactionType === "MONTHLY CONTRIBUTION") return 2;
+  if (transactionType === "DRAWDOWN") return 3;
+  if (toNumber(row.drawdown || row.mrDrawdown) > 0 && !toNumber(row.contribution)) return 3;
+  return 2;
+};
+
+const sortMaintenanceReserveLedgerRows = (rows = []) => rows.sort((a, b) => (
+  String(a.mrAccId || "").localeCompare(String(b.mrAccId || "")) ||
+  String(a.sn || a.msn || "").localeCompare(String(b.sn || b.msn || "")) ||
+  String(a.date || "").localeCompare(String(b.date || "")) ||
+  getScheduleTransactionOrder(a) - getScheduleTransactionOrder(b)
+));
+
+const normalizeMaintenanceReserveEvents = (rows = []) => (Array.isArray(rows) ? rows : []).map((row) => ({
+  ...row,
+  id: pick(row, ["id", "_id", "maintenanceEventId"]),
+  mrAccId: pick(row, ["mrAccId"]),
+  drawdownDate: pick(row, ["drawdownDate", "mrDrawdownDate"]),
+  mrDrawdown: toNumber(pick(row, ["mrDrawdown", "drawdown"])),
+  pn: normalize(pick(row, ["pn"])),
+  sn: normalize(pick(row, ["snBn", "sn", "bn", "msnEsnApun"])),
+})).filter((row) => row.mrAccId && row.drawdownDate && toNumber(row.mrDrawdown) !== 0);
+
+const getOpeningBalanceAsOfDate = (scheduleRows = [], mrAccId = "", drawdownDateValue = "") => {
+  const drawdownDate = parseDate(drawdownDateValue);
+  if (!drawdownDate) return "";
+  const targetTime = drawdownDate.getTime();
+  const rows = (Array.isArray(scheduleRows) ? scheduleRows : [])
+    .filter((row) => {
+      const rowDate = parseDate(row.date);
+      if (!rowDate || rowDate.getTime() > targetTime) return false;
+      if (mrAccId && normalize(row.mrAccId) !== normalize(mrAccId)) return false;
+      return true;
+    })
+    .sort((a, b) => (
+      (parseDate(b.date)?.getTime() || 0) - (parseDate(a.date)?.getTime() || 0) ||
+      getScheduleTransactionOrder(b) - getScheduleTransactionOrder(a)
+    ));
+  return rows.length ? toNumber(rows[0].balance || rows[0].closingBalance || rows[0].closingBal) : "";
+};
+
+const calculateRunningMaintenanceReserveBalance = (rows = []) => {
+  const balances = new Map();
+  sortMaintenanceReserveLedgerRows(rows).forEach((row) => {
+    const key = [normalize(row.mrAccId), normalize(row.sn || row.msn)].join("|");
+    if (normalize(row.transactionType) === "OPENING BALANCE") {
+      const balance = toNumber(row.balance || row.closingBalance || row.closingBal || row.openingBalance || row.openingBal);
+      Object.assign(row, {
+        contribution: null,
+        drawdown: null,
+        mrDrawdown: null,
+        openingBalance: balance,
+        openingBal: balance,
+        closingBalance: balance,
+        closingBal: balance,
+        balance,
+      });
+      balances.set(key, balance);
+      return;
+    }
+
+    const openingBalance = balances.has(key) ? balances.get(key) : toNumber(row.openingBalance || row.openingBal);
+    const contribution = toNumber(row.contribution);
+    const drawdown = toNumber(row.drawdown || row.mrDrawdown);
+    const balance = round2(openingBalance + contribution - drawdown);
+    Object.assign(row, {
+      openingBalance,
+      openingBal: openingBalance,
+      drawdown,
+      mrDrawdown: drawdown,
+      closingBalance: balance,
+      closingBal: balance,
+      balance,
+    });
+    balances.set(key, balance);
+  });
+  return rows;
+};
+
+const buildMaintenanceReserveDrawdownRows = (setting = {}, maintenanceEvents = []) => (
+  normalizeMaintenanceReserveEvents(maintenanceEvents)
+    .filter((event) => normalize(event.mrAccId) === normalize(setting.mrAccId))
+    .map((event, index) => ({
+      date: toDayKey(event.drawdownDate),
+      mrAccId: setting.mrAccId,
+      schMxEvent: setting.schMxEvent || "",
+      schMxEventAccount: setting.schMxEvent || "",
+      acftRegn: setting.acftRegn || "",
+      acftReg: setting.acftRegn || "",
+      pn: event.pn || setting.pn || "",
+      sn: setting.sn || event.sn || "",
+      msn: setting.sn || event.sn || "",
+      driver: "",
+      rate: null,
+      driverValue: null,
+      monthNumber: null,
+      contribution: null,
+      drawdown: toNumber(event.mrDrawdown),
+      mrDrawdown: toNumber(event.mrDrawdown),
+      ccy: setting.ccy || "",
+      source: "generated",
+      sourceEventId: String(event.id || `${event.mrAccId}-${event.drawdownDate}-${index}`),
+      transactionType: "Drawdown",
+      notes: "",
+    }))
+);
+
+const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingScheduleRows = [], maintenanceEvents = []) => {
   const settings = normalizeLeasedReserve(leasedReserveRows);
   const existing = normalizeMaintenanceReserveSchedule(existingScheduleRows);
-  const byKey = new Map();
-  const activeSettingKeys = new Set(settings.map((setting) => [
-    normalize(setting.mrAccId),
-    normalize(setting.sn),
-  ].join("|")));
+  const rows = [];
 
-  existing.forEach((row) => {
-    const normalized = { ...row, date: toMonthStartKey(row.date) || row.date };
-    const key = getScheduleIdentity(normalized);
-    if (!key.replace(/\|/g, "")) return;
-    const settingKey = [normalize(normalized.mrAccId), normalize(normalized.sn || normalized.msn)].join("|");
-    if (!activeSettingKeys.has(settingKey)) return;
-    byKey.set(key, normalized);
-  });
+  const manualRows = existing.filter((row) => !isGeneratedScheduleRow(row));
+  manualRows.forEach((row) => rows.push(row));
 
   settings.forEach((setting) => {
     const startDate = parseDate(setting.asOnDate);
     const endDate = parseDate(setting.endDate || setting.asOnDate);
     if (!startDate || !endDate || !setting.mrAccId) return;
-    const cursor = getUtcMonthStart(startDate);
-    const endMonth = getUtcMonthStart(endDate);
-    let previousClosing = toNumber(setting.setBalance);
 
-    for (
-      let monthDate = new Date(cursor);
-      monthDate <= endMonth;
-      monthDate = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 1))
-    ) {
+    const openingBalance = toNumber(setting.setBalance);
+    rows.push({
+      date: toDayKey(startDate),
+      mrAccId: setting.mrAccId,
+      schMxEvent: setting.schMxEvent || "",
+      schMxEventAccount: setting.schMxEvent || "",
+      acftRegn: setting.acftRegn || "",
+      acftReg: setting.acftRegn || "",
+      pn: setting.pn || "",
+      sn: setting.sn || "",
+      msn: setting.sn || "",
+      driver: setting.driver || "",
+      rate: round2(setting.setRate),
+      driverValue: null,
+      monthNumber: null,
+      contribution: null,
+      openingBalance,
+      openingBal: openingBalance,
+      drawdown: null,
+      mrDrawdown: null,
+      closingBalance: openingBalance,
+      closingBal: openingBalance,
+      balance: openingBalance,
+      ccy: setting.ccy || "",
+      source: "generated",
+      transactionType: "Opening Balance",
+      notes: "",
+    });
+
+    generateMonthlyDates(setting.asOnDate, setting.endDate || setting.asOnDate).forEach((monthDate) => {
       const date = toDayKey(monthDate);
-      const generated = {
+      rows.push({
         date,
         mrAccId: setting.mrAccId,
         schMxEvent: setting.schMxEvent || "",
@@ -1186,54 +1366,29 @@ const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingSche
         msn: setting.sn || "",
         driver: setting.driver || "",
         rate: getEscalatedReserveRate(setting, date),
+        driverValue: normalizeMetric(setting.driver) === "MONTH" ? 1 : 0,
+        monthNumber: normalizeMetric(setting.driver) === "MONTH" ? 1 : 0,
         contribution: 0,
-        openingBalance: previousClosing,
-        openingBal: previousClosing,
         drawdown: 0,
         mrDrawdown: 0,
-        closingBalance: previousClosing,
-        closingBal: previousClosing,
-        balance: previousClosing,
         ccy: setting.ccy || "",
         source: "generated",
+        transactionType: "Monthly Contribution",
         notes: "",
-      };
-      const key = getScheduleIdentity(generated);
-      const existingRow = byKey.get(key);
-      if (!existingRow) {
-        byKey.set(key, generated);
-        previousClosing = generated.closingBalance;
-        continue;
-      }
-      if (normalize(existingRow.source) === "GENERATED") {
-        const contribution = toNumber(existingRow.contribution);
-        const drawdown = toNumber(existingRow.drawdown || existingRow.mrDrawdown);
-        const openingBalance = existingRow.openingBalance || existingRow.openingBal || previousClosing;
-        const closingBalance = round2(toNumber(openingBalance) + contribution - drawdown);
-        byKey.set(key, {
-          ...existingRow,
-          ...generated,
-          contribution,
-          drawdown,
-          mrDrawdown: drawdown,
-          openingBalance,
-          openingBal: openingBalance,
-          closingBalance,
-          closingBal: closingBalance,
-          balance: closingBalance,
-          notes: existingRow.notes || generated.notes,
-        });
-        previousClosing = closingBalance;
-      }
-      previousClosing = toNumber(existingRow.closingBalance || existingRow.closingBal || existingRow.balance || previousClosing);
-    }
+      });
+    });
+
+    buildMaintenanceReserveDrawdownRows(setting, maintenanceEvents).forEach((row) => rows.push(row));
   });
 
-  return Array.from(byKey.values()).sort((a, b) => (
-    String(a.mrAccId || "").localeCompare(String(b.mrAccId || "")) ||
-    String(a.sn || a.msn || "").localeCompare(String(b.sn || b.msn || "")) ||
-    String(a.date || "").localeCompare(String(b.date || ""))
-  ));
+  const deduped = new Map();
+  rows.forEach((row) => {
+    const key = getScheduleIdentity(row);
+    if (!key.replace(/\|/g, "")) return;
+    deduped.set(key, row);
+  });
+
+  return calculateRunningMaintenanceReserveBalance(Array.from(deduped.values()));
 };
 
 const normalizeSchMxEvents = (rows = []) => rows.map((row) => ({
@@ -1334,21 +1489,27 @@ const hydrateSchMxEvents = (rows = [], {
 
     const drawdownDateKey = toDayKey(next.drawdownDate);
     if (isBlankValue(next.openingBal) && drawdownDateKey && !isBlankValue(next.mrAccId)) {
-      const reserveKeys = buildReserveLookupKeys({
-        date: next.drawdownDate,
-        mrAccId: next.mrAccId,
-        msn: next.msnEsnApun,
-        acftReg: next.acftRegn,
-      });
-      const reserve = reserveKeys.map((key) => reserveLookup.get(key)).find(Boolean);
-      if (reserve && !isBlankValue(reserve.closingBal)) {
-        next.openingBal = toNumber(reserve.closingBal);
+      const asOfBalance = getOpeningBalanceAsOfDate(maintenanceReserveRows, next.mrAccId, next.drawdownDate);
+      if (!isBlankValue(asOfBalance)) {
+        next.openingBal = toNumber(asOfBalance);
         hydratedFields.add("openingBal");
+      } else {
+        const reserveKeys = buildReserveLookupKeys({
+          date: next.drawdownDate,
+          mrAccId: next.mrAccId,
+          msn: next.msnEsnApun,
+          acftReg: next.acftRegn,
+        });
+        const reserve = reserveKeys.map((key) => reserveLookup.get(key)).find(Boolean);
+        if (reserve && !isBlankValue(reserve.closingBal)) {
+          next.openingBal = toNumber(reserve.closingBal);
+          hydratedFields.add("openingBal");
+        }
       }
     }
 
-    if (isBlankValue(next.remaining) && !isBlankValue(next.openingBal) && !isBlankValue(next.mrDrawdown)) {
-      next.remaining = round2(toNumber(next.openingBal) - toNumber(next.mrDrawdown));
+    if (isBlankValue(next.remaining) && !isBlankValue(next.mrDrawdown)) {
+      next.remaining = round2(toNumber(next.cost) - toNumber(next.mrDrawdown));
       hydratedFields.add("remaining");
     }
 
@@ -1924,14 +2085,38 @@ const scheduleRowMatchesReserveSetting = (row = {}, setting = {}) => {
   return Boolean(settingMrAccId || setting.acftRegn || settingSn);
 };
 
+const getOpeningBalanceExpenseRows = (settings = [], scheduleRows = []) => {
+  const openingRows = [];
+  const rows = Array.isArray(scheduleRows) ? scheduleRows : [];
+
+  (Array.isArray(settings) ? settings : []).forEach((setting) => {
+    const activeRows = rows
+      .filter((row) => (
+        isGeneratedScheduleRow(row) &&
+        normalizeMetric(row.driver || setting.driver) !== "MONTH" &&
+        toNumber(row.contribution) > 0 &&
+        toNumber(row.openingBalance || row.openingBal) > 0 &&
+        scheduleRowMatchesReserveSetting(row, setting)
+      ))
+      .sort((a, b) => (parseDate(a.date)?.getTime() || 0) - (parseDate(b.date)?.getTime() || 0));
+
+    if (activeRows.length > 0) {
+      openingRows.push({ setting, row: activeRows[0] });
+    }
+  });
+
+  return openingRows;
+};
+
 const getFlightsForReserveScheduleRow = (flights = [], setting = {}, row = {}, aircraftOnwing = []) => {
+  if (normalize(row.transactionType) !== "MONTHLY CONTRIBUTION") return [];
   const rowDate = parseDate(row.date);
   if (!rowDate) return [];
-  const rowTime = rowDate.getTime();
+  const period = getPreviousUtilisationPeriod(rowDate, setting.asOnDate);
 
   return (Array.isArray(flights) ? flights : []).filter((flight) => {
-    const lookupDate = getFirstDayOfNextMonth(getFlightDate(flight));
-    if (!lookupDate || lookupDate.getTime() !== rowTime) return false;
+    const flightDate = getFlightDate(flight);
+    if (!flightDate || !period.from || !period.to || flightDate < period.from || flightDate > period.to) return false;
     const snContext = getFlightSnContext(flight, aircraftOnwing);
     return reserveSettingMatchesFlight(setting, flight, snContext.snList || []);
   });
@@ -1944,7 +2129,7 @@ const generateMaintenanceReserveScheduleWithContributions = (
   config = {}
 ) => {
   const settings = normalizeLeasedReserve(leasedReserveRows);
-  const schedule = generateMaintenanceReserveSchedule(settings, existingScheduleRows);
+  const schedule = generateMaintenanceReserveSchedule(settings, existingScheduleRows, config.schMxEvents || config.maintenanceEvents || []);
   const aircraftOnwing = normalizeAircraftOnwing(config.aircraftOnwing || []);
 
   settings.forEach((setting) => {
@@ -1970,9 +2155,7 @@ const generateMaintenanceReserveScheduleWithContributions = (
       const driverValue = driver === "MONTH"
         ? toNumber(row.driverValue || row.monthNumber)
         : round2(matchedFlights.reduce((sum, flight) => sum + getMaintenanceReserveDriverValue(driver, flight), 0));
-      const contribution = driver === "MONTH"
-        ? toNumber(row.contribution)
-        : round2(rate * driverValue);
+      const contribution = round2(rate * driverValue);
       const drawdown = toNumber(row.drawdown || row.mrDrawdown);
       const openingBalance = previousClosing;
       const closingBalance = round2(openingBalance + contribution - drawdown);
@@ -2767,6 +2950,21 @@ const enrichAllocatedCosts = (flights, config) => {
         });
       });
     });
+  });
+
+  getOpeningBalanceExpenseRows(config.leasedReserve, config.maintenanceReserveSchedule).forEach(({ setting, row }) => {
+    const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, config.aircraftOnwing || []);
+    distributePool(
+      matchedFlights,
+      "maintenanceReserveContribution",
+      toNumber(row.openingBalance || row.openingBal),
+      row.ccy || setting.ccy,
+      config.reportingCurrency,
+      normalizeMetric(row.driver || setting.driver) || getAllocationBasis(config, "MRMONTHLY"),
+      0,
+      config.fxRates || [],
+      parseDate(row.date) || undefined
+    );
   });
 
   const monthlyReserveRows = (config.maintenanceReserveSchedule || []).filter((row) => normalizeMetric(row.driver) === "MONTH" && toNumber(row.contribution) > 0);
