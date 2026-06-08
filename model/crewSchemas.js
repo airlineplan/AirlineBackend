@@ -31,6 +31,7 @@ const CrewUploadBatchSchema = new Schema(
     rowsRead: { type: Number, default: 0 },
     rowsInserted: { type: Number, default: 0 },
     rowsUpdated: { type: Number, default: 0 },
+    rowsDeleted: { type: Number, default: 0 },
     invalidRows: { type: Number, default: 0 },
     warnings: { type: Array, default: [] },
     validationErrors: { type: Array, default: [] },

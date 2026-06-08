@@ -162,6 +162,7 @@ const finishBatch = async (batch, summary) => {
     rowsRead: summary.rowsRead,
     rowsInserted: summary.rowsInserted,
     rowsUpdated: summary.rowsUpdated,
+    rowsDeleted: summary.rowsDeleted,
     invalidRows: summary.invalidRows,
     warnings: summary.warnings,
     validationErrors: summary.errors,
@@ -174,6 +175,7 @@ const defaultSummary = (batch) => ({
   rowsRead: 0,
   rowsInserted: 0,
   rowsUpdated: 0,
+  rowsDeleted: 0,
   invalidRows: 0,
   warnings: [],
   errors: [],
@@ -251,17 +253,19 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
 
   const validCrewCodes = validMembers.map((member) => member.crewCode);
   if (validCrewCodes.length > 0) {
-    await Promise.all([
+    const [memberDeleteResult] = await Promise.all([
       CrewMember.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
       CrewFlightAssignment.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
       CrewOtherDuty.deleteMany({ userId, crewCode: { $nin: validCrewCodes } }),
     ]);
+    summary.rowsDeleted = Number(memberDeleteResult?.deletedCount || 0);
   } else {
-    await Promise.all([
+    const [memberDeleteResult] = await Promise.all([
       CrewMember.deleteMany({ userId }),
       CrewFlightAssignment.deleteMany({ userId }),
       CrewOtherDuty.deleteMany({ userId }),
     ]);
+    summary.rowsDeleted = Number(memberDeleteResult?.deletedCount || 0);
   }
 
   for (const member of validMembers) {
@@ -453,7 +457,8 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
     return summary;
   }
 
-  await CrewFlightAssignment.deleteMany({ userId });
+  const deleteResult = await CrewFlightAssignment.deleteMany({ userId });
+  summary.rowsDeleted = Number(deleteResult?.deletedCount || 0);
   for (const assignment of validAssignments) {
     await CrewFlightAssignment.findOneAndUpdate(
       {
@@ -602,7 +607,8 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
     return summary;
   }
 
-  await CrewOtherDuty.deleteMany({ userId });
+  const deleteResult = await CrewOtherDuty.deleteMany({ userId });
+  summary.rowsDeleted = Number(deleteResult?.deletedCount || 0);
   for (const duty of validDuties) {
     await CrewOtherDuty.findOneAndUpdate(
       {

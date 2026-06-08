@@ -265,6 +265,7 @@ test("blank Flight Duty roster upload clears prior flight assignments", async ()
 
     assert.equal(summary.rowsRead, 0);
     assert.equal(summary.invalidRows, 0);
+    assert.equal(summary.rowsDeleted, 4);
     assert.deepEqual(deleted, [{ userId: "user-1" }]);
   });
 });
@@ -290,6 +291,7 @@ test("blank Other Duty roster upload clears prior other duties", async () => {
 
     assert.equal(summary.rowsRead, 0);
     assert.equal(summary.invalidRows, 0);
+    assert.equal(summary.rowsDeleted, 1);
     assert.deepEqual(deleted, [{ userId: "user-1" }]);
   });
 });

@@ -420,7 +420,9 @@ const deletePositioningCostRule = async (req, res) => {
 
 const sendUploadSummary = (res, summary, label) => {
   const invalidRows = Number(summary?.invalidRows || 0);
-  const changedRows = Number(summary?.rowsInserted || 0) + Number(summary?.rowsUpdated || 0);
+  const rowsRead = Number(summary?.rowsRead || 0);
+  const deletedRows = Number(summary?.rowsDeleted || 0);
+  const changedRows = Number(summary?.rowsInserted || 0) + Number(summary?.rowsUpdated || 0) + deletedRows;
 
   if (invalidRows > 0 && changedRows === 0) {
     return res.status(422).json({
@@ -436,6 +438,10 @@ const sendUploadSummary = (res, summary, label) => {
       data: summary,
       message: `${label} imported with ${invalidRows} invalid row${invalidRows === 1 ? "" : "s"}.`,
     });
+  }
+
+  if (rowsRead === 0 && deletedRows > 0) {
+    return res.status(200).json({ success: true, data: summary, message: `${label} cleared.` });
   }
 
   return res.status(200).json({ success: true, data: summary, message: `${label} import completed.` });
