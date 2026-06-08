@@ -8,7 +8,6 @@ const maintenanceCalendarSchema = new Schema({
     schEvent: { type: String, trim: true },
     calPn: { type: String, trim: true },
     snBn: { type: String, trim: true },
-    applyToAllSnBn: { type: Boolean, default: false },
     triggerRelationship: {
         type: String,
         enum: ["EARLIEST_OF_EVERY"],
