@@ -155,6 +155,8 @@ user.delete("/crew/positioning-cost-rules/:id", ...featureAccess("crew", "edit")
 user.post("/crew/upload/members", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadCrewInformation);
 user.post("/crew/upload/flight-duties", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadFlightDuties);
 user.post("/crew/upload/other-duties", ...featureAccess("crew", "edit"), upload.single("file"), crewController.uploadOtherDuties);
+user.delete("/crew/clear/details", ...featureAccess("crew", "edit"), crewController.clearCrewDetailsData);
+user.delete("/crew/clear/duty-roster", ...featureAccess("crew", "edit"), crewController.clearDutyRosterData);
 user.post("/crew/update-plan", ...featureAccess("crew", "edit"), jsonParser, crewController.updatePlan);
 user.get("/crew/calculation-runs/latest", ...featureAccess("crew"), crewController.getLatestRun);
 user.get("/crew/diary", ...featureAccess("crew"), crewController.getCrewDiary);

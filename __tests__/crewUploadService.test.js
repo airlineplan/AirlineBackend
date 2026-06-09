@@ -6,6 +6,8 @@ const { test } = require("node:test");
 const xlsx = require("xlsx");
 
 const {
+  clearCrewDetails,
+  clearDutyRoster,
   importCrewMembers,
   importFlightDuties,
   importOtherDuties,
@@ -20,7 +22,10 @@ const {
 const { dateKey, diffMinutes, getRowValue, parseExcelDate } = require("../services/crewTimeUtils");
 const Flight = require("../model/flight");
 const {
+  CrewCalculationRun,
+  CrewDiaryEvent,
   CrewFlightAssignment,
+  CrewKpiSummary,
   CrewMember,
   CrewOtherDuty,
   CrewUploadBatch,
@@ -59,6 +64,12 @@ const patchUploadBatch = () => [
     _id: "batch-1",
     save: async () => {},
   }),
+];
+
+const patchGeneratedCrewOutputDeletes = (deleted = []) => [
+  [CrewDiaryEvent, "deleteMany", async (filter) => { deleted.push(["diary", filter]); return { deletedCount: 0 }; }],
+  [CrewKpiSummary, "deleteMany", async (filter) => { deleted.push(["kpi", filter]); return { deletedCount: 0 }; }],
+  [CrewCalculationRun, "deleteMany", async (filter) => { deleted.push(["runs", filter]); return { deletedCount: 0 }; }],
 ];
 
 test("crew member upload accepts abbreviated allowance headers", () => {
@@ -274,6 +285,7 @@ test("blank Crew Information upload replaces prior crew data", async () => {
     [CrewMember, "deleteMany", async (filter) => { deleted.push(["members", filter]); return { deletedCount: 2 }; }],
     [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(["flight", filter]); return { deletedCount: 4 }; }],
     [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(["other", filter]); return { deletedCount: 3 }; }],
+    ...patchGeneratedCrewOutputDeletes(),
   ], async () => {
     const summary = await importCrewMembers({
       userId: "user-1",
@@ -303,6 +315,7 @@ test("blank Flight Duty roster upload clears prior flight assignments", async ()
     patchUploadBatch(),
     [CrewMember, "find", () => queryResult([])],
     [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(filter); return { deletedCount: 4 }; }],
+    ...patchGeneratedCrewOutputDeletes(),
   ], async () => {
     const summary = await importFlightDuties({
       userId: "user-1",
@@ -329,6 +342,7 @@ test("blank Other Duty roster upload clears prior other duties", async () => {
     patchUploadBatch(),
     [CrewMember, "find", () => queryResult([])],
     [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(filter); return { deletedCount: 1 }; }],
+    ...patchGeneratedCrewOutputDeletes(),
   ], async () => {
     const summary = await importOtherDuties({
       userId: "user-1",
@@ -365,5 +379,62 @@ test("fully invalid Other Duty roster does not clear prior other duties", async 
     assert.equal(summary.rowsRead, 1);
     assert.equal(summary.invalidRows, 1);
     assert.equal(deleteCalled, false);
+  });
+});
+
+test("clear Crew details removes crew source data and generated outputs", async () => {
+  const deleted = [];
+
+  await withPatchedMethods([
+    [CrewMember, "deleteMany", async (filter) => { deleted.push(["members", filter]); return { deletedCount: 2 }; }],
+    [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(["flight", filter]); return { deletedCount: 4 }; }],
+    [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(["other", filter]); return { deletedCount: 3 }; }],
+    ...patchGeneratedCrewOutputDeletes(deleted),
+  ], async () => {
+    const summary = await clearCrewDetails({ userId: "user-1" });
+
+    assert.deepEqual(summary, {
+      crewMembersDeleted: 2,
+      flightDutiesDeleted: 4,
+      otherDutiesDeleted: 3,
+      diaryEventsDeleted: 0,
+      kpiSummariesDeleted: 0,
+      calculationRunsDeleted: 0,
+    });
+    assert.deepEqual(deleted, [
+      ["members", { userId: "user-1" }],
+      ["flight", { userId: "user-1" }],
+      ["other", { userId: "user-1" }],
+      ["diary", { userId: "user-1" }],
+      ["kpi", { userId: "user-1" }],
+      ["runs", { userId: "user-1" }],
+    ]);
+  });
+});
+
+test("clear duty roster removes flight, non-flight, and generated diary data", async () => {
+  const deleted = [];
+
+  await withPatchedMethods([
+    [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(["flight", filter]); return { deletedCount: 4 }; }],
+    [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(["other", filter]); return { deletedCount: 3 }; }],
+    ...patchGeneratedCrewOutputDeletes(deleted),
+  ], async () => {
+    const summary = await clearDutyRoster({ userId: "user-1" });
+
+    assert.deepEqual(summary, {
+      flightDutiesDeleted: 4,
+      otherDutiesDeleted: 3,
+      diaryEventsDeleted: 0,
+      kpiSummariesDeleted: 0,
+      calculationRunsDeleted: 0,
+    });
+    assert.deepEqual(deleted, [
+      ["flight", { userId: "user-1" }],
+      ["other", { userId: "user-1" }],
+      ["diary", { userId: "user-1" }],
+      ["kpi", { userId: "user-1" }],
+      ["runs", { userId: "user-1" }],
+    ]);
   });
 });

@@ -23,6 +23,8 @@ const {
   validatePreconditions,
 } = require("../services/crewCalculationService");
 const {
+  clearCrewDetails,
+  clearDutyRoster,
   importCrewMembers,
   importFlightDuties,
   importOtherDuties,
@@ -528,6 +530,34 @@ const uploadOtherDuties = async (req, res) => {
   }
 };
 
+const clearCrewDetailsData = async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const summary = await clearCrewDetails({ userId });
+    return res.status(200).json({
+      success: true,
+      data: summary,
+      message: "Crew details cleared.",
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to clear Crew details");
+  }
+};
+
+const clearDutyRosterData = async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const summary = await clearDutyRoster({ userId });
+    return res.status(200).json({
+      success: true,
+      data: summary,
+      message: "Duty roster cleared.",
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to clear duty roster");
+  }
+};
+
 const updatePlan = async (req, res) => {
   try {
     const userId = requireUserId(req);
@@ -745,6 +775,8 @@ module.exports = {
   bulkSaveLayoverRules,
   bulkSavePositioningCostRules,
   bulkSaveUtilisationTargets,
+  clearCrewDetailsData,
+  clearDutyRosterData,
   deleteLayoverRule,
   deletePositioningCostRule,
   deleteUtilisationTarget,

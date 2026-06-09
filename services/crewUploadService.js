@@ -2,7 +2,10 @@ const xlsx = require("xlsx");
 const moment = require("moment");
 const Flight = require("../model/flight");
 const {
+  CrewCalculationRun,
+  CrewDiaryEvent,
   CrewFlightAssignment,
+  CrewKpiSummary,
   CrewMember,
   CrewOtherDuty,
   CrewUploadBatch,
@@ -187,6 +190,58 @@ const shouldApplyReplacement = (rows, validRows, summary) => (
   rows.length === 0 || validRows.length > 0 || summary.invalidRows === 0
 );
 
+const clearGeneratedCrewOutputs = async (userId) => {
+  const [diaryEvents, kpiSummaries, calculationRuns] = await Promise.all([
+    CrewDiaryEvent.deleteMany({ userId }),
+    CrewKpiSummary.deleteMany({ userId }),
+    CrewCalculationRun.deleteMany({ userId }),
+  ]);
+  return {
+    diaryEventsDeleted: Number(diaryEvents?.deletedCount || 0),
+    kpiSummariesDeleted: Number(kpiSummaries?.deletedCount || 0),
+    calculationRunsDeleted: Number(calculationRuns?.deletedCount || 0),
+  };
+};
+
+const clearCrewDetails = async ({ userId }) => {
+  const [
+    crewMembers,
+    flightDuties,
+    otherDuties,
+    generated,
+  ] = await Promise.all([
+    CrewMember.deleteMany({ userId }),
+    CrewFlightAssignment.deleteMany({ userId }),
+    CrewOtherDuty.deleteMany({ userId }),
+    clearGeneratedCrewOutputs(userId),
+  ]);
+
+  return {
+    crewMembersDeleted: Number(crewMembers?.deletedCount || 0),
+    flightDutiesDeleted: Number(flightDuties?.deletedCount || 0),
+    otherDutiesDeleted: Number(otherDuties?.deletedCount || 0),
+    ...generated,
+  };
+};
+
+const clearDutyRoster = async ({ userId }) => {
+  const [
+    flightDuties,
+    otherDuties,
+    generated,
+  ] = await Promise.all([
+    CrewFlightAssignment.deleteMany({ userId }),
+    CrewOtherDuty.deleteMany({ userId }),
+    clearGeneratedCrewOutputs(userId),
+  ]);
+
+  return {
+    flightDutiesDeleted: Number(flightDuties?.deletedCount || 0),
+    otherDutiesDeleted: Number(otherDuties?.deletedCount || 0),
+    ...generated,
+  };
+};
+
 const importCrewMembers = async ({ userId, file, uploadedBy }) => {
   const batch = await buildBatch({
     userId,
@@ -292,6 +347,7 @@ const importCrewMembers = async ({ userId, file, uploadedBy }) => {
     else summary.rowsInserted += 1;
   }
 
+  await clearGeneratedCrewOutputs(userId);
   await finishBatch(batch, summary);
   return summary;
 };
@@ -501,6 +557,7 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
     );
   }
 
+  await clearGeneratedCrewOutputs(userId);
   await finishBatch(batch, summary);
   return summary;
 };
@@ -648,12 +705,15 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
     );
   }
 
+  await clearGeneratedCrewOutputs(userId);
   await finishBatch(batch, summary);
   summary.rowsInserted = roundMoney(summary.rowsInserted);
   return summary;
 };
 
 module.exports = {
+  clearCrewDetails,
+  clearDutyRoster,
   importCrewMembers,
   importFlightDuties,
   importOtherDuties,

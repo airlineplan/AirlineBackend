@@ -255,12 +255,12 @@ const findPositioningCostRule = (rules, departureStation, arrivalStation, role) 
     .sort((a, b) => b.score - a.score)[0]?.rule || null;
 };
 
-const isBeforeCutoff = (date, clock) => {
+const isAtOrBeforeCutoff = (date, clock) => {
   const cutoffMinutes = clockToMinutes(clock);
   if (cutoffMinutes === null) return false;
   const current = moment.utc(date);
   const currentMinutes = current.hour() * 60 + current.minute();
-  return currentMinutes < cutoffMinutes;
+  return currentMinutes <= cutoffMinutes;
 };
 
 const isPositioningActivity = (activity) => (
@@ -455,6 +455,33 @@ const addPositioningEvent = ({
   return end;
 };
 
+const addTransferEvent = ({
+  events,
+  crewMember,
+  start,
+  duration,
+  location,
+  subCategory,
+  withinFdp,
+  reasonText,
+}) => {
+  if (duration <= 0) return start;
+  const end = addMinutes(start, duration);
+  events.push(makeEvent({
+    crewMember,
+    start,
+    end,
+    location,
+    category: "Positioning",
+    subCategory,
+    sourceType: "SYSTEM_POSITIONING",
+    dpMinutes: duration,
+    fdpMinutes: withinFdp ? duration : 0,
+    reasonText,
+  }));
+  return end;
+};
+
 const normalizeActivities = ({ flightAssignments, otherDuties }) => {
   const flights = (flightAssignments || []).map((assignment) => ({
     type: "FLIGHT",
@@ -563,20 +590,16 @@ const calculateCrewMemberEvents = ({
         currentLocation = departure;
       } else if (leadIn.needsPositioning) {
         if (leadIn.transferMinutes > 0) {
-          const transferEnd = addMinutes(cursor, leadIn.transferMinutes);
-          events.push(makeEvent({
+          cursor = addTransferEvent({
             crewMember,
+            events,
             start: cursor,
-            end: transferEnd,
+            duration: leadIn.transferMinutes,
             location: currentLocation,
-            category: "Positioning",
             subCategory: "HOTAC to Airport Transfer",
-            sourceType: "SYSTEM_POSITIONING",
-            dpMinutes: leadIn.transferMinutes,
-            fdpMinutes: leadIn.transferMinutes,
+            withinFdp: true,
             reasonText: "Airport transfer inserted before positioning from HOTAC/rest station.",
-          }));
-          cursor = transferEnd;
+          });
         }
         positioningStart = cursor;
         cursor = addPositioningEvent({
@@ -712,12 +735,12 @@ const calculateCrewMemberEvents = ({
         currentLocation !== baseStation &&
         activityDeparture !== baseStation &&
         currentLocation !== activityDeparture &&
-        isBeforeCutoff(lastDutyEnd, posSettings.hotacCutoffLocalTime)
+        isAtOrBeforeCutoff(restStart, posSettings.hotacCutoffLocalTime)
       );
 
       if (shouldReturnBase || shouldCutoffPosition) {
         const toStation = shouldReturnBase ? baseStation : activityDeparture;
-        const posEnd = addPositioningEvent({
+        let posEnd = addPositioningEvent({
           events,
           crewMember,
           start: restStart,
@@ -728,8 +751,20 @@ const calculateCrewMemberEvents = ({
           withinFdp: false,
           reasonText: shouldReturnBase
             ? "Return-to-base positioning inserted because a qualifying rest follows and the next duty starts at crew base."
-            : "HOTAC cutoff positioning inserted before rest because FDP ended before the configured cutoff and next duty starts at another non-base station.",
+            : "HOTAC cutoff positioning inserted before rest because FDP ended at or before the configured cutoff and next duty starts at another non-base station.",
         });
+        if (shouldCutoffPosition && Number(posSettings.hotacToAirportTransferMinutes || 0) > 0) {
+          posEnd = addTransferEvent({
+            events,
+            crewMember,
+            start: posEnd,
+            duration: Number(posSettings.hotacToAirportTransferMinutes || 0),
+            location: toStation,
+            subCategory: "Airport to HOTAC Transfer",
+            withinFdp: false,
+            reasonText: "Airport transfer inserted after cutoff positioning so rest starts at HOTAC in the next duty station.",
+          });
+        }
         currentLocation = toStation;
         restStart = posEnd;
       }
@@ -1318,6 +1353,7 @@ module.exports = {
     findLayoverRule,
     findPositioningCostRule,
     getTargetForRole,
+    isAtOrBeforeCutoff,
     normalizeActivities,
     splitEventByUtcDay,
   },

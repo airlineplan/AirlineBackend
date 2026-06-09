@@ -189,6 +189,45 @@ test("crew diary inserts return-to-base positioning when the next duty begins at
   assert.equal(rtb.ftMinutes, 0);
 });
 
+test("crew diary positions before rest when non-base cutoff is met at FDP end", () => {
+  const events = calculateCrewMemberEvents({
+    crewMember,
+    flightAssignments: [
+      { _id: "cutoff-1", std: d("2026-04-03T17:30:00"), sta: d("2026-04-03T19:30:00"), flightNumber: "C100", departureStation: "DEL", arrivalStation: "BOM" },
+      { _id: "cutoff-2", std: d("2026-04-04T11:00:00"), sta: d("2026-04-04T13:00:00"), flightNumber: "C101", departureStation: "MAA", arrivalStation: "DEL" },
+    ],
+    dutySettings,
+    positioningSettings: {
+      ...positioningSettings,
+      hotacCutoffEnabled: true,
+      hotacCutoffLocalTime: "20:00",
+    },
+    layoverRules,
+    positioningCostRules: [],
+  });
+
+  const postflight = events.find((event) => event.sourceType === "SYSTEM_POST_FLIGHT" && event.location === "BOM");
+  assert.equal(postflight.endDateTime.toISOString(), "2026-04-03T20:00:00.000Z");
+
+  const cutoffPositioning = events.find((event) => (
+    event.sourceType === "SYSTEM_POSITIONING" &&
+    event.departureStation === "BOM" &&
+    event.arrivalStation === "MAA"
+  ));
+  assert.equal(cutoffPositioning.startDateTime.toISOString(), "2026-04-03T20:00:00.000Z");
+  assert.equal(cutoffPositioning.fdpMinutes, 0);
+
+  const hotelTransfer = events.find((event) => event.subCategory === "Airport to HOTAC Transfer" && event.location === "MAA");
+  assert.equal(hotelTransfer.startDateTime.toISOString(), cutoffPositioning.endDateTime.toISOString());
+  assert.equal(hotelTransfer.dpMinutes, 60);
+  assert.equal(hotelTransfer.fdpMinutes, 0);
+
+  const maaRest = events.find((event) => event.sourceType === "SYSTEM_REST" && event.location === "MAA");
+  assert.equal(maaRest.startDateTime.toISOString(), hotelTransfer.endDateTime.toISOString());
+  assert.equal(maaRest.subCategory, "Layover HOTAC");
+  assert.equal(events.find((event) => event.sourceType === "SYSTEM_REST" && event.location === "BOM"), undefined);
+});
+
 test("crew diary does not duplicate user-uploaded positioning duties", () => {
   const events = calculateCrewMemberEvents({
     crewMember,
