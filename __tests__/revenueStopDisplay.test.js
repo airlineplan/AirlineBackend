@@ -41,6 +41,23 @@ test("revenue stop display uses the common station for connection traffic", () =
   assert.equal(getRevenueStopDisplayValue(connectionRows[1]), "BOM");
 });
 
+test("revenue stop display derives the common station from OD when endpoint fields are absent", () => {
+  assert.equal(getRevenueStopDisplayValue({
+    trafficType: "behind",
+    stops: 1,
+    poo: "BOM",
+    od: "DEL-MAA",
+    sector: "DEL-BOM",
+  }), "BOM");
+  assert.equal(getRevenueStopDisplayValue({
+    trafficType: "beyond",
+    stops: 1,
+    poo: "BOM",
+    od: "DEL-MAA",
+    sector: "BOM-MAA",
+  }), "BOM");
+});
+
 test("revenue stop filter matches derived stop station values", () => {
   assert.equal(rowMatchesRevenueStopFilter(connectionRows[0], ["BOM"]), true);
   assert.equal(rowMatchesRevenueStopFilter(connectionRows[1], ["BOM"]), true);

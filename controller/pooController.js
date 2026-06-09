@@ -94,14 +94,20 @@ function roundToWhole(value) {
 
 function getRevenueStopDisplayValue(row = {}) {
     const stops = parseNumber(row.stops);
-    if (stops === 0 || row.trafficType === TRAFFIC_TYPES.LEG) return "0";
+    if (stops === 0 || normalizeStation(row.trafficType).toLowerCase() === TRAFFIC_TYPES.LEG) return "0";
 
+    const odStations = String(row.od || "")
+        .split("-")
+        .map(normalizeStation)
+        .filter(Boolean);
     const odEndpoints = new Set([
         normalizeStation(row.odOrigin),
         normalizeStation(row.odDestination),
+        ...odStations,
     ].filter(Boolean));
 
-    const sectorStations = String(row.sector || "")
+    const sectorValue = row.sector || [row.depStn, row.arrStn].filter(Boolean).join("-");
+    const sectorStations = String(sectorValue || "")
         .split("-")
         .map(normalizeStation)
         .filter(Boolean);
@@ -235,7 +241,7 @@ function throwValidationIssue(issue) {
 
 function normalizeGroupByField(field) {
     const normalized = String(field || "").trim();
-    if (normalized === "stop") return "stops";
+    if (normalized === "stop") return "displayStop";
     return normalized;
 }
 

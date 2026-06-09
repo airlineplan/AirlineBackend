@@ -186,12 +186,18 @@ const getRevenueStopDisplayValue = (row = {}) => {
   const stops = parseDashboardNumber(row.stops);
   if (stops === 0 || String(row.trafficType || "").trim().toLowerCase() === "leg") return "0";
 
+  const odStations = String(row.od || "")
+    .split("-")
+    .map(normalizeDashboardStation)
+    .filter(Boolean);
   const odEndpoints = new Set([
     normalizeDashboardStation(row.odOrigin),
     normalizeDashboardStation(row.odDestination),
+    ...odStations,
   ].filter(Boolean));
 
-  const sectorStations = String(row.sector || "")
+  const sectorValue = row.sector || [row.depStn, row.arrStn].filter(Boolean).join("-");
+  const sectorStations = String(sectorValue || "")
     .split("-")
     .map(normalizeDashboardStation)
     .filter(Boolean);
@@ -203,6 +209,17 @@ const getRevenueStopDisplayValue = (row = {}) => {
 
   return String(stops);
 };
+
+const formatRevenueStopOptions = (rows = []) =>
+  normalizeDropdownValueList(
+    rows.map((row) => {
+      const value = getRevenueStopDisplayValue(row);
+      return value && value !== BLANK_OPTION_VALUE && value !== "(blank)" ? value : "0";
+    })
+  ).map((value) => ({
+    value,
+    label: value,
+  }));
 
 
 const {
@@ -336,14 +353,9 @@ const populateDashboardDropDowns = async (req, res) => {
     ]);
 
     const stopRows = await PooTable.find({ userId })
-      .select("stops trafficType poo odOrigin odDestination sector")
+      .select("stops trafficType poo od odOrigin odDestination sector depStn arrStn")
       .lean();
-    const stopOptions = normalizeDropdownValueList(
-      stopRows.map(getRevenueStopDisplayValue)
-    ).map((value) => ({
-      value,
-      label: value,
-    }));
+    const stopOptions = formatRevenueStopOptions(stopRows);
 
     const data = {
       flight: formatOptions(
