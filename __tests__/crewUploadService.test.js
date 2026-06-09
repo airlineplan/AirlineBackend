@@ -11,12 +11,14 @@ const {
   importOtherDuties,
   readRows,
   __testables__: {
+    buildFlightTimes,
     normalizeCrewMemberUploadRow,
     otherDutyColumnAliases,
     parseOtherDutyTimes,
   },
 } = require("../services/crewUploadService");
-const { dateKey, diffMinutes, getRowValue } = require("../services/crewTimeUtils");
+const { dateKey, diffMinutes, getRowValue, parseExcelDate } = require("../services/crewTimeUtils");
+const Flight = require("../model/flight");
 const {
   CrewFlightAssignment,
   CrewMember,
@@ -179,6 +181,51 @@ test("required Flight Duty workbook format parses roster columns after title row
   assert.equal(getRowValue(row, ["fo"]), "2");
   assert.equal(getRowValue(row, ["cc1"]), "3");
   assert.equal(getRowValue(row, ["cc2"]), "4");
+});
+
+test("flight duty date parser keeps uploaded calendar date from Excel formats", () => {
+  assert.equal(dateKey(parseExcelDate("14-Jun-26")), "2026-06-14");
+  assert.equal(dateKey(parseExcelDate("14/06/26")), "2026-06-14");
+  assert.equal(dateKey(parseExcelDate("6/14/26")), "2026-06-14");
+  assert.equal(dateKey(parseExcelDate(new Date("2026-06-13T18:29:50.000Z"))), "2026-06-14");
+});
+
+test("flight duty matching tolerates existing timezone-shifted network schedule dates", async () => {
+  const shiftedSundayFlight = {
+    _id: "flight-601",
+    date: new Date("2026-06-13T18:30:00.000Z"),
+    day: "Sun",
+    flight: "9I601",
+    depStn: "BOM",
+    arrStn: "JLG",
+    std: "14:30",
+    sta: "15:50",
+  };
+  let findCalls = 0;
+
+  await withPatchedMethods([
+    [Flight, "find", () => {
+      findCalls += 1;
+      return queryResult(findCalls === 1 ? [] : [shiftedSundayFlight]);
+    }],
+  ], async () => {
+    const result = await buildFlightTimes({
+      userId: "user-1",
+      date: parseExcelDate("14-Jun-26"),
+      flightNumber: "9I601",
+      departureStation: "BOM",
+      arrivalStation: "JLG",
+      row: {},
+    });
+
+    assert.equal(result.scheduleFlight, shiftedSundayFlight);
+    assert.equal(dateKey(result.std), "2026-06-14");
+    assert.equal(result.std.getUTCHours(), 14);
+    assert.equal(result.std.getUTCMinutes(), 30);
+    assert.equal(result.sta.getUTCHours(), 15);
+    assert.equal(result.sta.getUTCMinutes(), 50);
+    assert.equal(result.warning, "");
+  });
 });
 
 test("other duty roster uses Crew ID for crew and ID for the roster row", () => {

@@ -312,6 +312,44 @@ test("crew diary splits rest by calendar day and covers the calculation window",
   assert.ok(postLastDutyRest);
 });
 
+test("crew diary stores multi-day rest as one row per calendar date", () => {
+  const { splitEventByUtcDay } = __testables__;
+  const rows = splitEventByUtcDay({
+    crewMemberId: "crew-2",
+    crewCode: "2",
+    crewName: "Vijay",
+    role: "FO",
+    startDateTime: d("2026-06-03T19:30:00"),
+    endDateTime: d("2026-06-05T12:35:00"),
+    displayDate: "2026-06-03",
+    location: "BOM",
+    category: "Rest",
+    subCategory: "Rest at Base",
+    sourceType: "SYSTEM_REST",
+    dpMinutes: 0,
+    fdpMinutes: 0,
+    ftMinutes: 0,
+    rpMinutes: 2465,
+    dpCost: 0,
+    fdpCost: 0,
+    ftCost: 0,
+    layoverCost: 0,
+    positioningCost: 0,
+    currency: "INR",
+  });
+
+  assert.deepEqual(rows.map((row) => [
+    row.displayDate,
+    row.startDateTime.toISOString(),
+    row.endDateTime.toISOString(),
+    row.rpMinutes,
+  ]), [
+    ["2026-06-03", "2026-06-03T19:30:00.000Z", "2026-06-04T00:00:00.000Z", 270],
+    ["2026-06-04", "2026-06-04T00:00:00.000Z", "2026-06-05T00:00:00.000Z", 1440],
+    ["2026-06-05", "2026-06-05T00:00:00.000Z", "2026-06-05T12:35:00.000Z", 755],
+  ]);
+});
+
 test("crew KPI values aggregate from diary events without mixing currencies", () => {
   const events = sampleEvents().map((event) => ({
     ...event,

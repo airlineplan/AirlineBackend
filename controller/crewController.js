@@ -29,14 +29,62 @@ const {
 } = require("../services/crewUploadService");
 const {
   CLOCK_REGEX,
+  dateKey,
+  diffMinutes,
   normalizeText,
   normalizeUpper,
+  roundMoney,
 } = require("../services/crewTimeUtils");
 
 const asArray = (value) => {
   if (!value) return [];
   if (Array.isArray(value)) return value.filter(Boolean);
   return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+};
+
+const startOfNextUtcDay = (date) => moment.utc(date).add(1, "day").startOf("day").toDate();
+
+const splitDiaryEventForDisplay = (event, rangeStart = null, rangeEnd = null) => {
+  const eventStart = new Date(event.startDateTime);
+  const eventEnd = new Date(event.endDateTime);
+  const start = rangeStart && eventStart < rangeStart ? rangeStart : eventStart;
+  const end = rangeEnd && eventEnd > rangeEnd ? rangeEnd : eventEnd;
+  const originalDuration = diffMinutes(eventStart, eventEnd);
+  if (originalDuration <= 0 || diffMinutes(start, end) <= 0) return [];
+
+  const minuteFields = ["dpMinutes", "fdpMinutes", "ftMinutes", "rpMinutes"];
+  const costFields = ["dpCost", "fdpCost", "ftCost", "layoverCost", "positioningCost"];
+  const rows = [];
+  let cursor = start;
+  let index = 1;
+
+  while (cursor < end) {
+    const nextMidnight = startOfNextUtcDay(cursor);
+    const segmentEnd = nextMidnight < end ? nextMidnight : end;
+    const segmentDuration = diffMinutes(cursor, segmentEnd);
+    if (segmentDuration > 0) {
+      const factor = segmentDuration / originalDuration;
+      const row = {
+        ...event,
+        _id: `${event._id || `${event.crewCode}-${event.startDateTime}`}-${index}`,
+        startDateTime: cursor,
+        endDateTime: segmentEnd,
+        displayDate: dateKey(cursor),
+      };
+
+      minuteFields.forEach((field) => {
+        row[field] = Math.round((Number(event[field]) || 0) * factor);
+      });
+      costFields.forEach((field) => {
+        row[field] = roundMoney((Number(event[field]) || 0) * factor);
+      });
+      rows.push(row);
+    }
+    cursor = segmentEnd;
+    index += 1;
+  }
+
+  return rows;
 };
 
 const sendError = (res, error, fallback = "Crew module request failed") => {
@@ -527,16 +575,18 @@ const getCrewDiary = async (req, res) => {
     }
 
     const query = { userId, calculationRunId: latestRun._id };
+    let rangeStart = null;
+    let rangeEnd = null;
     if (req.query.startDate || req.query.endDate) {
-      const startDate = req.query.startDate ? moment.utc(req.query.startDate).startOf("day").toDate() : null;
-      const endDate = req.query.endDate ? moment.utc(req.query.endDate).add(1, "day").startOf("day").toDate() : null;
-      if (startDate && endDate) {
-        query.startDateTime = { $lt: endDate };
-        query.endDateTime = { $gt: startDate };
-      } else if (startDate) {
-        query.endDateTime = { $gt: startDate };
-      } else if (endDate) {
-        query.startDateTime = { $lt: endDate };
+      rangeStart = req.query.startDate ? moment.utc(req.query.startDate).startOf("day").toDate() : null;
+      rangeEnd = req.query.endDate ? moment.utc(req.query.endDate).add(1, "day").startOf("day").toDate() : null;
+      if (rangeStart && rangeEnd) {
+        query.startDateTime = { $lt: rangeEnd };
+        query.endDateTime = { $gt: rangeStart };
+      } else if (rangeStart) {
+        query.endDateTime = { $gt: rangeStart };
+      } else if (rangeEnd) {
+        query.startDateTime = { $lt: rangeEnd };
       }
     }
     if (req.query.crewCode) query.crewCode = new RegExp(normalizeText(req.query.crewCode), "i");
@@ -546,14 +596,19 @@ const getCrewDiary = async (req, res) => {
     if (req.query.subCategory) query.subCategory = new RegExp(normalizeText(req.query.subCategory), "i");
     if (req.query.location) query.location = new RegExp(normalizeText(req.query.location), "i");
 
-    const [data, total] = await Promise.all([
-      CrewDiaryEvent.find(query)
-        .sort({ startDateTime: 1, crewCode: 1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .lean(),
-      CrewDiaryEvent.countDocuments(query),
-    ]);
+    const rawData = await CrewDiaryEvent.find(query)
+      .sort({ startDateTime: 1, crewCode: 1 })
+      .lean();
+
+    const visibleRows = rawData
+      .flatMap((event) => splitDiaryEventForDisplay(event, rangeStart, rangeEnd))
+      .sort((left, right) => {
+        const startDiff = new Date(left.startDateTime).getTime() - new Date(right.startDateTime).getTime();
+        if (startDiff !== 0) return startDiff;
+        return String(left.crewCode || "").localeCompare(String(right.crewCode || ""));
+      });
+    const total = visibleRows.length;
+    const data = visibleRows.slice((page - 1) * limit, page * limit);
 
     return res.status(200).json({
       success: true,

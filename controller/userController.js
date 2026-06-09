@@ -3117,10 +3117,12 @@ const addRotationDetailsFlgtChange = async (req, res) => {
 
     // Generate dates within the range and filter based on daysOfWeek
     while (currentDate <= endEffDate) {
-      if (daysOfWeek.includes(currentDate.getDay() + 1)) {
+      const jsDay = currentDate.getUTCDay();
+      const systemDay = jsDay === 0 ? 7 : jsDay;
+      if (daysOfWeek.includes(systemDay)) {
         datesInRange.push(new Date(currentDate));
       }
-      currentDate.setDate(currentDate.getDate() + 1);
+      currentDate.setUTCDate(currentDate.getUTCDate() + 1);
     }
 
     //correction for end Dates

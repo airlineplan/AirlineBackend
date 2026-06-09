@@ -58,7 +58,7 @@ const clockToMinutes = (value) => {
 const parseExcelDate = (value) => {
   if (!value && value !== 0) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return moment.utc(moment(value).format("YYYY-MM-DD")).startOf("day").toDate();
+    return moment.utc(value).add(12, "hours").startOf("day").toDate();
   }
   if (typeof value === "number" && Number.isFinite(value)) {
     const excelEpoch = Date.UTC(1899, 11, 30);
@@ -74,8 +74,12 @@ const parseExcelDate = (value) => {
     "D-MM-YYYY",
     "DD/MM/YYYY",
     "D/M/YYYY",
+    "DD/MM/YY",
+    "D/M/YY",
     "MM/DD/YYYY",
     "M/D/YYYY",
+    "MM/DD/YY",
+    "M/D/YY",
     "DD-MMM-YYYY",
     "D-MMM-YYYY",
     "DD-MMM-YY",

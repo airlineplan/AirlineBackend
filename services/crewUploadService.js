@@ -314,18 +314,33 @@ const findScheduleFlight = async ({ userId, date, flightNumber, departureStation
   const start = moment.utc(date).startOf("day").toDate();
   const end = moment.utc(date).endOf("day").toDate();
   const flightRegex = new RegExp(`^${String(flightNumber).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-  const candidates = await Flight.find({
+  const pickMatchingFlight = (candidates = []) => (
+    candidates.find((flight) => (
+      (!departureStation || normalizeUpper(flight.depStn) === departureStation) &&
+      (!arrivalStation || normalizeUpper(flight.arrStn) === arrivalStation)
+    )) || candidates[0] || null
+  );
+  const exactCandidates = await Flight.find({
     userId,
     date: { $gte: start, $lte: end },
     flight: flightRegex,
   }).lean();
 
-  if (candidates.length === 0) return null;
+  const exactMatch = pickMatchingFlight(exactCandidates);
+  if (exactMatch) return exactMatch;
 
-  return candidates.find((flight) => (
-    (!departureStation || normalizeUpper(flight.depStn) === departureStation) &&
-    (!arrivalStation || normalizeUpper(flight.arrStn) === arrivalStation)
-  )) || candidates[0];
+  const rosterDay = moment.utc(date).format("ddd").toLowerCase();
+  const nearbyCandidates = await Flight.find({
+    userId,
+    date: {
+      $gte: moment.utc(date).subtract(1, "day").startOf("day").toDate(),
+      $lte: moment.utc(date).add(1, "day").endOf("day").toDate(),
+    },
+    flight: flightRegex,
+  }).lean();
+  return pickMatchingFlight(nearbyCandidates.filter((flight) => (
+    !normalizeText(flight.day) || normalizeText(flight.day).slice(0, 3).toLowerCase() === rosterDay
+  )));
 };
 
 const buildFlightTimes = async ({ userId, date, flightNumber, departureStation, arrivalStation, row }) => {

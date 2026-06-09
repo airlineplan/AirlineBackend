@@ -118,6 +118,38 @@ const splitByUtcDay = (start, end) => {
   return periods;
 };
 
+const splitEventByUtcDay = (event) => {
+  const duration = eventDuration(event);
+  if (duration <= 0) return [event];
+
+  const periods = splitByUtcDay(event.startDateTime, event.endDateTime);
+  if (periods.length <= 1) return [event];
+
+  const minuteFields = ["dpMinutes", "fdpMinutes", "ftMinutes", "rpMinutes"];
+  const costFields = ["dpCost", "fdpCost", "ftCost", "layoverCost", "positioningCost"];
+
+  return periods.map((period, index) => {
+    const segmentDuration = diffMinutes(period.start, period.end);
+    const factor = segmentDuration / duration;
+    const segment = {
+      ...event,
+      startDateTime: period.start,
+      endDateTime: period.end,
+      displayDate: dateKey(period.start),
+    };
+
+    minuteFields.forEach((field) => {
+      segment[field] = Math.round((Number(event[field]) || 0) * factor);
+    });
+    costFields.forEach((field) => {
+      segment[field] = roundMoney((Number(event[field]) || 0) * factor);
+    });
+
+    if (event._id) segment._id = `${event._id}-${index + 1}`;
+    return segment;
+  });
+};
+
 const makeEvent = ({
   crewMember,
   start,
@@ -789,7 +821,9 @@ const calculateCrewMemberEvents = ({
     }
   }
 
-  return events.sort((a, b) => new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime());
+  return events
+    .flatMap(splitEventByUtcDay)
+    .sort((a, b) => new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime());
 };
 
 const loadSettings = async (userId) => {
@@ -1285,5 +1319,6 @@ module.exports = {
     findPositioningCostRule,
     getTargetForRole,
     normalizeActivities,
+    splitEventByUtcDay,
   },
 };

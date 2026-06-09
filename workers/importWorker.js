@@ -4,6 +4,7 @@ const { workerData, parentPort } = require("worker_threads");
 const mongoose = require("mongoose");
 const xlsx = require("xlsx");
 const fs = require("fs");
+const moment = require("moment");
 
 const Data = require("../model/dataSchema");
 const Sector = require("../model/sectorSchema");
@@ -184,15 +185,46 @@ function parseExcelTime(excelTime) {
     return String(excelTime);
 }
 
+function toUtcDateOnly(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    const noonAnchored = new Date(date.getTime() + (12 * 60 * 60 * 1000));
+    return new Date(Date.UTC(noonAnchored.getUTCFullYear(), noonAnchored.getUTCMonth(), noonAnchored.getUTCDate()));
+}
+
 function parseExcelDate(excelValue) {
     if (!excelValue) return null;
-    if (typeof excelValue === "string") return new Date(excelValue);
-    if (typeof excelValue === "number") {
-        const date = new Date(Math.round((excelValue - 25569) * 86400 * 1000));
-        date.setMinutes(date.getMinutes() + date.getTimezoneOffset());
-        return date;
+    if (typeof excelValue === "string") {
+        const parsed = moment.utc(excelValue.trim(), [
+            "YYYY-MM-DD",
+            "DD-MM-YYYY",
+            "D-MM-YYYY",
+            "DD/MM/YYYY",
+            "D/M/YYYY",
+            "DD/MM/YY",
+            "D/M/YY",
+            "MM/DD/YYYY",
+            "M/D/YYYY",
+            "MM/DD/YY",
+            "M/D/YY",
+            "DD-MMM-YYYY",
+            "D-MMM-YYYY",
+            "DD-MMM-YY",
+            "D-MMM-YY",
+            "DD MMM YYYY",
+            "D MMM YYYY",
+            "DD MMM YY",
+            "D MMM YY",
+        ], true);
+        if (parsed.isValid()) return parsed.startOf("day").toDate();
+        return toUtcDateOnly(excelValue);
     }
-    return new Date(excelValue);
+    if (typeof excelValue === "number") {
+        const parsed = xlsx.SSF.parse_date_code(excelValue);
+        if (parsed) return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+        return null;
+    }
+    return toUtcDateOnly(excelValue);
 }
 
 function formatDecimal(value) {
@@ -291,8 +323,9 @@ async function generateFlightsBulk(dataDocs) {
     const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; 
 
     for (const doc of dataDocs) {
-        const startDate = new Date(doc.effFromDt);
-        const endDate = new Date(doc.effToDt);
+        const startDate = toUtcDateOnly(doc.effFromDt);
+        const endDate = toUtcDateOnly(doc.effToDt);
+        if (!startDate || !endDate) continue;
         const allowedDays = String(doc.dow).split("").map(Number);
         let currentDate = new Date(startDate);
 
@@ -303,14 +336,15 @@ async function generateFlightsBulk(dataDocs) {
         const cargoLF = doc.cargoLF || 0;
 
         while (currentDate <= endDate) {
-            const currentDay = currentDate.getDay() !== 0 ? currentDate.getDay() : 7;
+            const jsDay = currentDate.getUTCDay();
+            const currentDay = jsDay === 0 ? 7 : jsDay;
 
             if (allowedDays.includes(currentDay)) {
                 flightBulk.push({
                     insertOne: {
                         document: {
                             date: new Date(currentDate),
-                            day: dayNames[currentDate.getDay()], // 👈 ADDED THIS LINE
+                            day: dayNames[jsDay],
                             flight: doc.flight,
                             depStn: doc.depStn,
                             std: doc.std,
@@ -352,7 +386,7 @@ async function generateFlightsBulk(dataDocs) {
                     }
                 });
             }
-            currentDate.setDate(currentDate.getDate() + 1);
+            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
         }
     }
 
