@@ -1000,8 +1000,45 @@ test("default one-stop proration uses each row sector GCD when no explicit ratio
     assert.equal(behind.legRate, 60);
     assert.equal(beyond.legFare, 300);
     assert.equal(beyond.legRate, 30);
-    assert.equal(behind.odPaxRev, 9000);
-    assert.equal(beyond.odPaxRev, 9000);
+    assert.equal(behind.odPaxRev, 6000);
+    assert.equal(beyond.odPaxRev, 3000);
+    assert.equal(behind.fnlRccyTotalRev + beyond.fnlRccyTotalRev, 99000);
+});
+
+test("allocates one-stop OD revenue by prorate ratio for both transit legs", () => {
+    const firstLeg = recalculateRevenue({
+        stops: 1,
+        trafficType: "transit_fl",
+        pax: 10,
+        cargoT: 1,
+        sectorGcd: 1200,
+        odViaGcd: 1800,
+        odFare: 1000,
+        odRate: 10,
+        fareProrateRatioL1L2: 0.75,
+        rateProrateRatioL1L2: 0.4,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+    const secondLeg = recalculateRevenue({
+        ...firstLeg,
+        trafficType: "transit_sl",
+        legFare: 0,
+        legRate: 0,
+    });
+
+    assert.equal(firstLeg.legFare, 750);
+    assert.equal(firstLeg.legRate, 4);
+    assert.equal(firstLeg.odPaxRev, 7500);
+    assert.equal(firstLeg.odCargoRev, 4000);
+    assert.equal(firstLeg.fnlRccyTotalRev, 11500);
+    assert.equal(secondLeg.legFare, 250);
+    assert.equal(secondLeg.legRate, 6);
+    assert.equal(secondLeg.odPaxRev, 2500);
+    assert.equal(secondLeg.odCargoRev, 6000);
+    assert.equal(secondLeg.fnlRccyTotalRev, 8500);
+    assert.equal(firstLeg.odPaxRev + secondLeg.odPaxRev, 10000);
+    assert.equal(firstLeg.odCargoRev + secondLeg.odCargoRev, 10000);
 });
 
 test("missing one-stop GCD defaults leg proration to 50/50", () => {

@@ -752,8 +752,10 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
         : parseNumber(row.odRate);
     next.odFare = odFare;
     next.odRate = odRate;
-    next.odPaxRev = roundToTwo(parseNumber(next.pax) * odFare);
-    next.odCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, odRate));
+    const odFareShare = isDirectLegTraffic ? 1 : fareShare;
+    const odRateShare = isDirectLegTraffic ? 1 : rateShare;
+    next.odPaxRev = roundToTwo(parseNumber(next.pax) * odFare * odFareShare);
+    next.odCargoRev = roundToTwo(calculateCargoRevenue(next.cargoT, odRate) * odRateShare);
     next.odTotalRev = roundToTwo(next.odPaxRev + next.odCargoRev);
 
     const reportingCurrency = normalizeCurrencyCode(config?.reportingCurrency || row.reportingCurrency) || "INR";
