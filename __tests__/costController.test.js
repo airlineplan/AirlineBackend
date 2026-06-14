@@ -11,6 +11,7 @@ const CostConfig = require("../model/costConfigSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
 const Flight = require("../model/flight");
 const Fleet = require("../model/fleet");
+const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
 const costController = require("../controller/costController");
 const pooController = require("../controller/pooController");
 
@@ -239,6 +240,81 @@ test("cost config rejects additional APU usage rows without Stn", async () => {
   assert.equal(res.body.success, false);
   assert.match(res.body.message, /Stn is required/);
   assert.equal(await CostConfig.countDocuments({ userId: USER_ID }), 0);
+});
+
+test("cost config populates generated scheduled maintenance occurrences and preserves entered costs", async () => {
+  const calendar = await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "1600",
+    calPn: "ATR72",
+    snBn: "1600",
+    schEvent: "48mo SI",
+    generatedOccurrences: [
+      {
+        occurrenceNumber: 1,
+        triggerDate: utcDate(2026, 6, 11),
+        groundStartDate: utcDate(2026, 6, 11),
+        groundEndDate: utcDate(2026, 6, 20),
+        downtimeApplied: 10,
+      },
+    ],
+  });
+
+  await CostConfig.create({
+    userId: USER_ID,
+    schMxEvents: [
+      {
+        date: "2026-06-10",
+        msnEsnApun: "1600",
+        event: "48mo SI",
+        pn: "ATR72",
+        snBn: "1600",
+        source: "SCHEDULED_MAINTENANCE",
+        eventSeriesId: String(calendar._id),
+        occurrenceNumber: 1,
+        occurrenceId: `${calendar._id}:1`,
+        cost: 250000,
+        ccy: "INR",
+      },
+      {
+        date: "2026-07-01",
+        msnEsnApun: "1600",
+        event: "Stale generated event",
+        source: "SCHEDULED_MAINTENANCE",
+        eventSeriesId: String(calendar._id),
+        occurrenceNumber: 99,
+        occurrenceId: `${calendar._id}:99`,
+      },
+      {
+        date: "2026-08-01",
+        msnEsnApun: "1600",
+        event: "Manual event",
+        cost: 1000,
+        ccy: "INR",
+      },
+    ],
+  });
+
+  const res = createMockResponse();
+  await costController.getCostConfig({ user: { id: USER_ID } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.data.schMxEvents.length, 2);
+
+  const generated = res.body.data.schMxEvents.find((row) => row.event === "48mo SI");
+  assert.equal(generated.date, "2026-06-11");
+  assert.equal(generated.msnEsnApun, "1600");
+  assert.equal(generated.pn, "ATR72");
+  assert.equal(generated.snBn, "1600");
+  assert.equal(generated.cost, 250000);
+  assert.equal(generated.ccy, "INR");
+  assert.equal(generated.source, "SCHEDULED_MAINTENANCE");
+  ["date", "event", "msnEsnApun", "pn", "snBn"].forEach((field) => {
+    assert.ok(generated._hydratedFields.includes(field), `${field} should be marked as auto-populated`);
+  });
+  assert.ok(res.body.data.schMxEvents.some((row) => row.event === "Manual event"));
+  assert.ok(!res.body.data.schMxEvents.some((row) => row.event === "Stale generated event"));
 });
 
 test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {

@@ -3,6 +3,7 @@ const RevenueConfig = require("../model/revenueConfigSchema");
 const Flights = require("../model/flight");
 const Utilisation = require("../model/utilisation");
 const MaintenanceReserve = require("../model/maintenanceReserveSchema");
+const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
 const Fleet = require("../model/fleet");
 const {
   normalizeCostConfig,
@@ -31,6 +32,103 @@ const {
 } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const moment = require("moment");
+
+const SCHEDULED_MAINTENANCE_SOURCE = "SCHEDULED_MAINTENANCE";
+
+const getScheduledMaintenanceOccurrenceKey = (row = {}) => {
+  const occurrenceId = String(row?.occurrenceId || "").trim();
+  if (occurrenceId) return `occurrence:${occurrenceId}`;
+
+  const eventSeriesId = String(row?.eventSeriesId || "").trim();
+  const occurrenceNumber = String(row?.occurrenceNumber ?? "").trim();
+  if (eventSeriesId && occurrenceNumber) {
+    return `series:${eventSeriesId}:${occurrenceNumber}`;
+  }
+
+  return "";
+};
+
+const getScheduledMaintenanceDetailKey = (row = {}) => [
+  moment.utc(row?.date).isValid() ? moment.utc(row.date).format("YYYY-MM-DD") : "",
+  String(row?.msnEsnApun || row?.msn || "").trim().toUpperCase(),
+  String(row?.event || row?.schMxEvent || row?.schEvent || "").trim().toUpperCase(),
+  String(row?.pn || "").trim().toUpperCase(),
+  String(row?.snBn || row?.sn || "").trim().toUpperCase(),
+].join("|");
+
+const isGeneratedScheduledMaintenanceEvent = (row = {}) => (
+  String(row?.source || "").trim().toUpperCase() === SCHEDULED_MAINTENANCE_SOURCE
+);
+
+const buildScheduledMaintenanceEventsForUser = async (userId) => {
+  const calendars = await MaintenanceCalendar.find({ userId: String(userId) })
+    .select("calMsn schEvent calPn snBn generatedOccurrences")
+    .lean();
+
+  return calendars.flatMap((calendar) => {
+    const eventSeriesId = String(calendar?._id || "");
+    return (Array.isArray(calendar?.generatedOccurrences) ? calendar.generatedOccurrences : [])
+      .map((occurrence) => {
+        const dateValue = occurrence?.groundStartDate || occurrence?.triggerDate;
+        const date = moment.utc(dateValue);
+        if (!date.isValid()) return null;
+
+        const occurrenceNumber = Number(occurrence?.occurrenceNumber || 0);
+        const occurrenceId = `${eventSeriesId}:${occurrenceNumber}`;
+        return {
+          date: date.format("YYYY-MM-DD"),
+          msnEsnApun: String(calendar?.calMsn || "").trim(),
+          event: String(calendar?.schEvent || "").trim(),
+          pn: String(calendar?.calPn || "").trim(),
+          snBn: String(calendar?.snBn || "").trim(),
+          source: SCHEDULED_MAINTENANCE_SOURCE,
+          eventSeriesId,
+          occurrenceNumber,
+          occurrenceId,
+          _hydratedFields: ["date", "msnEsnApun", "event", "pn", "snBn"],
+        };
+      })
+      .filter(Boolean);
+  });
+};
+
+const mergeScheduledMaintenanceEvents = (savedRows = [], generatedRows = []) => {
+  const saved = Array.isArray(savedRows) ? savedRows : [];
+  const generated = Array.isArray(generatedRows) ? generatedRows : [];
+  const savedByOccurrence = new Map();
+  const savedByDetails = new Map();
+
+  saved.forEach((row, index) => {
+    const occurrenceKey = getScheduledMaintenanceOccurrenceKey(row);
+    const detailKey = getScheduledMaintenanceDetailKey(row);
+    if (occurrenceKey && !savedByOccurrence.has(occurrenceKey)) savedByOccurrence.set(occurrenceKey, { row, index });
+    if (detailKey.replace(/\|/g, "") && !savedByDetails.has(detailKey)) savedByDetails.set(detailKey, { row, index });
+  });
+
+  const consumedSavedIndexes = new Set();
+  const mergedGeneratedRows = generated.map((generatedRow) => {
+    const match = savedByOccurrence.get(getScheduledMaintenanceOccurrenceKey(generatedRow))
+      || savedByDetails.get(getScheduledMaintenanceDetailKey(generatedRow));
+    if (match) consumedSavedIndexes.add(match.index);
+
+    const hydratedFields = new Set([
+      ...(Array.isArray(match?.row?._hydratedFields) ? match.row._hydratedFields : []),
+      ...(Array.isArray(generatedRow?._hydratedFields) ? generatedRow._hydratedFields : []),
+    ]);
+
+    return {
+      ...(match?.row || {}),
+      ...generatedRow,
+      _hydratedFields: [...hydratedFields],
+    };
+  });
+
+  const preservedRows = saved.filter((row, index) => (
+    !consumedSavedIndexes.has(index) && !isGeneratedScheduledMaintenanceEvent(row)
+  ));
+
+  return [...preservedRows, ...mergedGeneratedRows];
+};
 
 const buildExactDayDates = (schMxEvents = []) => {
   const exactDates = new Map();
@@ -260,11 +358,17 @@ exports.getCostConfig = async (req, res) => {
           schMxEvents: config.schMxEvents || [],
         }
       );
-      config.schMxEvents = await hydrateSchMxEventsForUser(userId, config.schMxEvents || [], config.maintenanceReserveSchedule || []);
       config.navMtowTiers = normalizeNavMtowTiers(config.navMtowTiers);
       config.navEnr = serializeNavigationCostRows(config.navEnr || [], "sector", config.navMtowTiers);
       config.navTerm = serializeNavigationCostRows(config.navTerm || [], "arrStn", config.navMtowTiers);
     }
+    const generatedSchMxEvents = await buildScheduledMaintenanceEventsForUser(userId);
+    config.schMxEvents = mergeScheduledMaintenanceEvents(config.schMxEvents || [], generatedSchMxEvents);
+    config.schMxEvents = await hydrateSchMxEventsForUser(
+      userId,
+      config.schMxEvents,
+      config.maintenanceReserveSchedule || []
+    );
     res.status(200).json({ success: true, data: config });
   } catch (error) {
     console.error("Error getting cost config:", error);
