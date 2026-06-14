@@ -179,6 +179,7 @@ const defaultSummary = (batch) => ({
   rowsInserted: 0,
   rowsUpdated: 0,
   rowsDeleted: 0,
+  dutyRosterCleared: false,
   invalidRows: 0,
   warnings: [],
   errors: [],
@@ -426,6 +427,14 @@ const importFlightDuties = async ({ userId, file, uploadedBy }) => {
   const summary = defaultSummary(batch);
   const rows = readRows(file.path);
   summary.rowsRead = rows.length;
+  if (rows.length === 0) {
+    const cleared = await clearDutyRoster({ userId });
+    summary.rowsDeleted = cleared.flightDutiesDeleted + cleared.otherDutiesDeleted;
+    summary.dutyRosterCleared = true;
+    await finishBatch(batch, summary);
+    return summary;
+  }
+
   const crewMembers = await CrewMember.find({ userId }).lean();
   const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
   const validAssignments = [];
@@ -606,6 +615,14 @@ const importOtherDuties = async ({ userId, file, uploadedBy }) => {
   const summary = defaultSummary(batch);
   const rows = readRows(file.path);
   summary.rowsRead = rows.length;
+  if (rows.length === 0) {
+    const cleared = await clearDutyRoster({ userId });
+    summary.rowsDeleted = cleared.flightDutiesDeleted + cleared.otherDutiesDeleted;
+    summary.dutyRosterCleared = true;
+    await finishBatch(batch, summary);
+    return summary;
+  }
+
   const crewMembers = await CrewMember.find({ userId }).lean();
   const crewByCode = new Map(crewMembers.map((member) => [member.crewCode, member]));
   const validDuties = [];

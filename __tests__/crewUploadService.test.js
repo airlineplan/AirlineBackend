@@ -418,7 +418,7 @@ test("blank Crew Information upload replaces prior crew data", async () => {
   });
 });
 
-test("blank Flight Duty roster upload clears prior flight assignments", async () => {
+test("blank Flight Duty roster upload clears all duties and generated Crew Diary data", async () => {
   const filePath = writeWorkbook([
     ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
     ["ID", "Date", "Day", "Flight #", "Dep Stn", "Arr Stn", "Sector", "Captain", "FO", "CC1", "CC2", "CC3", "CC4"],
@@ -428,9 +428,9 @@ test("blank Flight Duty roster upload clears prior flight assignments", async ()
 
   await withPatchedMethods([
     patchUploadBatch(),
-    [CrewMember, "find", () => queryResult([])],
-    [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(filter); return { deletedCount: 4 }; }],
-    ...patchGeneratedCrewOutputDeletes(),
+    [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(["flight", filter]); return { deletedCount: 4 }; }],
+    [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(["other", filter]); return { deletedCount: 1 }; }],
+    ...patchGeneratedCrewOutputDeletes(deleted),
   ], async () => {
     const summary = await importFlightDuties({
       userId: "user-1",
@@ -440,12 +440,46 @@ test("blank Flight Duty roster upload clears prior flight assignments", async ()
 
     assert.equal(summary.rowsRead, 0);
     assert.equal(summary.invalidRows, 0);
-    assert.equal(summary.rowsDeleted, 4);
-    assert.deepEqual(deleted, [{ userId: "user-1" }]);
+    assert.equal(summary.rowsDeleted, 5);
+    assert.equal(summary.dutyRosterCleared, true);
+    assert.deepEqual(deleted, [
+      ["flight", { userId: "user-1" }],
+      ["other", { userId: "user-1" }],
+      ["diary", { userId: "user-1" }],
+      ["kpi", { userId: "user-1" }],
+      ["runs", { userId: "user-1" }],
+    ]);
   });
 });
 
-test("blank Other Duty roster upload clears prior other duties", async () => {
+test("fully invalid Flight Duty roster does not clear existing duty data", async () => {
+  const filePath = writeWorkbook([
+    ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["ID", "Date", "Day", "Flight #", "Dep Stn", "Arr Stn", "Sector", "Captain", "FO", "CC1", "CC2", "CC3", "CC4"],
+    ["2", "14-Jun-26", "Sun", "9I601", "BOM", "JLG", "BOM-JLG", "", "", "", "", "", ""],
+  ]);
+  let deleteCalled = false;
+
+  await withPatchedMethods([
+    patchUploadBatch(),
+    [CrewMember, "find", () => queryResult([])],
+    [CrewFlightAssignment, "deleteMany", async () => { deleteCalled = true; return { deletedCount: 4 }; }],
+    [CrewOtherDuty, "deleteMany", async () => { deleteCalled = true; return { deletedCount: 1 }; }],
+  ], async () => {
+    const summary = await importFlightDuties({
+      userId: "user-1",
+      file: { path: filePath, originalname: "Flight.xlsx" },
+      uploadedBy: "tester@example.com",
+    });
+
+    assert.equal(summary.rowsRead, 1);
+    assert.equal(summary.invalidRows, 1);
+    assert.equal(summary.dutyRosterCleared, false);
+    assert.equal(deleteCalled, false);
+  });
+});
+
+test("blank Other Duty roster upload clears flight, training, and generated Crew Diary data", async () => {
   const filePath = writeWorkbook([
     ["Non-flight / additional duty period", "", "", "", "", "", "", "", "", "", "", ""],
     ["ID", "Date", "Day", "Crew ID", "Location", "Category", "Sub-category", "Start date", "Start time", "Duty time", "Finish date", "Finish time"],
@@ -455,9 +489,9 @@ test("blank Other Duty roster upload clears prior other duties", async () => {
 
   await withPatchedMethods([
     patchUploadBatch(),
-    [CrewMember, "find", () => queryResult([])],
-    [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(filter); return { deletedCount: 1 }; }],
-    ...patchGeneratedCrewOutputDeletes(),
+    [CrewFlightAssignment, "deleteMany", async (filter) => { deleted.push(["flight", filter]); return { deletedCount: 4 }; }],
+    [CrewOtherDuty, "deleteMany", async (filter) => { deleted.push(["other", filter]); return { deletedCount: 1 }; }],
+    ...patchGeneratedCrewOutputDeletes(deleted),
   ], async () => {
     const summary = await importOtherDuties({
       userId: "user-1",
@@ -467,8 +501,15 @@ test("blank Other Duty roster upload clears prior other duties", async () => {
 
     assert.equal(summary.rowsRead, 0);
     assert.equal(summary.invalidRows, 0);
-    assert.equal(summary.rowsDeleted, 1);
-    assert.deepEqual(deleted, [{ userId: "user-1" }]);
+    assert.equal(summary.rowsDeleted, 5);
+    assert.equal(summary.dutyRosterCleared, true);
+    assert.deepEqual(deleted, [
+      ["flight", { userId: "user-1" }],
+      ["other", { userId: "user-1" }],
+      ["diary", { userId: "user-1" }],
+      ["kpi", { userId: "user-1" }],
+      ["runs", { userId: "user-1" }],
+    ]);
   });
 });
 

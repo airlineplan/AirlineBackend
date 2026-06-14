@@ -474,6 +474,14 @@ const sendUploadSummary = (res, summary, label) => {
   const deletedRows = Number(summary?.rowsDeleted || 0);
   const changedRows = Number(summary?.rowsInserted || 0) + Number(summary?.rowsUpdated || 0) + deletedRows;
 
+  if (summary?.dutyRosterCleared) {
+    return res.status(200).json({
+      success: true,
+      data: summary,
+      message: `${label} cleared. All flight and non-flight duties removed.`,
+    });
+  }
+
   if (invalidRows > 0 && changedRows === 0) {
     return res.status(422).json({
       success: false,
