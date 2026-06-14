@@ -2115,7 +2115,7 @@ function applyTrafficUpdates(stateRows, requestedEdits, revenueConfig = null) {
 }
 
 async function ensureTransitRows({ userId, date, transitDraft }) {
-    if (!transitDraft || !transitDraft.poo) {
+    if (!transitDraft) {
         return { rows: [], createdRowKeys: [] };
     }
 
@@ -2162,8 +2162,9 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
 
     const firstSnapshot = buildFlightSnapshot(firstFlight, sectorMap);
     const secondSnapshot = buildFlightSnapshot(secondFlight, sectorMap);
+    const transitPoo = resolveTransitPoo(firstSnapshot);
     const transitRows = buildUserTransitRows({
-        pagePoo: normalizeStation(transitDraft.poo),
+        pagePoo: transitPoo,
         firstSnapshot,
         secondSnapshot,
         existingRowsByKey,
@@ -2171,7 +2172,7 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
             stationCurrencyMap,
             revenueConfig,
             fxRateMap,
-            poo: transitDraft.poo,
+            poo: transitPoo,
             date,
         }),
         shouldReset: false,
@@ -2203,6 +2204,10 @@ async function ensureTransitRows({ userId, date, transitDraft }) {
     });
 
     return { rows, createdRowKeys };
+}
+
+function resolveTransitPoo(firstFlight) {
+    return normalizeStation(firstFlight?.depStn);
 }
 
 function buildApplySignature(row) {
@@ -3291,6 +3296,7 @@ exports.__testables__ = {
     buildStationConnectionRuleMap,
     buildStationRuleConnectionEdges,
     mergeConnectionEdges,
+    resolveTransitPoo,
     applyTrafficUpdates,
     applyUpdatesForDate,
     assignSerialNumbers,

@@ -24,11 +24,16 @@ const {
     buildExplicitConnectionEdges,
     buildStationConnectionRuleMap,
     buildStationRuleConnectionEdges,
+    resolveTransitPoo,
     applyTrafficUpdates,
     applyUpdatesForDate,
     assignSerialNumbers,
     persistPooDatasetForDate,
 } = pooController.__testables__;
+
+test("manual transit derives its POO from the first flight origin", () => {
+    assert.equal(resolveTransitPoo({ depStn: " bhj " }), "BHJ");
+});
 
 function makeConnectionSnapshot(overrides = {}) {
     return {
