@@ -624,6 +624,43 @@ test("other mx monthly expenses prorate partial effective months by the exact ex
   });
 });
 
+test("other mx monthly expenses apply once per matching aircraft in the fleet", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "ATR1",
+      date: "2026-06-10",
+      variant: "ATR72",
+      bh: 2,
+      fh: 2,
+      aircraft: { registration: "VT-AAA" },
+    },
+    {
+      flight: "ATR2",
+      date: "2026-06-20",
+      variant: "ATR72",
+      bh: 3,
+      fh: 3,
+      aircraft: { registration: "VT-AAB" },
+    },
+  ], {
+    reportingCurrency: "INR",
+    otherMx: [
+      {
+        variant: "ATR72",
+        costPerMonth: 200,
+        ccy: "INR",
+        fromDate: "2026-06-01",
+        toDate: "2026-06-30",
+      },
+    ],
+    allocationTable: [{ costCode: "OTHERMXEXPENSES", basis: "FH" }],
+  });
+
+  assert.equal(enriched[0].otherMxExpenses, 200);
+  assert.equal(enriched[1].otherMxExpenses, 200);
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.otherMxExpenses, 0), 400);
+});
+
 test("monthly maintenance reserve uses the configured allocation-table basis", () => {
   const enriched = computeFlightCostsBatch([
     {
@@ -1583,10 +1620,74 @@ test("maintenance reserve schedule supports BH, departures, month, and missing u
   assert.equal(bhFebruary.contribution, 70);
   assert.equal(depFebruary.driverValue, 2);
   assert.equal(depFebruary.contribution, 40);
-  assert.equal(monthFebruary.driverValue, 1);
-  assert.equal(monthFebruary.contribution, 300);
+  approx(monthFebruary.driverValue, 15 / 31);
+  assert.equal(monthFebruary.contribution, 145.16);
   assert.equal(bhMarch.driverValue, 0);
   assert.equal(bhMarch.contribution, 0);
+});
+
+test("monthly maintenance reserve schedule prorates partial first and last effective months", () => {
+  const schedule = generateMaintenanceReserveScheduleWithContributions([
+    {
+      mrAccId: "MR-MONTH",
+      acftRegn: "VT-DRV",
+      setBalance: 0,
+      setRate: 100,
+      asOnDate: "2026-05-16",
+      endDate: "2026-07-21",
+      driver: "Month",
+      ccy: "USD",
+    },
+  ], [], []);
+
+  const junePosting = schedule.find((row) => row.date === "2026-06-01" && row.transactionType === "Monthly Contribution");
+  const julyPosting = schedule.find((row) => row.date === "2026-07-01" && row.transactionType === "Monthly Contribution");
+  const augustPosting = schedule.find((row) => row.date === "2026-08-01" && row.transactionType === "Monthly Contribution");
+
+  approx(junePosting.driverValue, 16 / 31);
+  assert.equal(junePosting.contribution, 51.61);
+  assert.equal(julyPosting.contribution, 100);
+  approx(augustPosting.driverValue, 21 / 31);
+  assert.equal(augustPosting.contribution, 67.74);
+});
+
+test("first scheduled maintenance event allocates its non-capitalized cost across prior flights", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "ATR1",
+      date: "2026-06-05",
+      variant: "ATR72",
+      acftType: "ATR72",
+      bh: 2,
+      aircraft: { registration: "VT-AAA", msn: "1600" },
+    },
+    {
+      flight: "ATR2",
+      date: "2026-06-10",
+      variant: "ATR72",
+      acftType: "ATR72",
+      bh: 3,
+      aircraft: { registration: "VT-AAA", msn: "1600" },
+    },
+  ], {
+    reportingCurrency: "USD",
+    schMxEvents: [
+      {
+        date: "2026-06-11",
+        event: "48MO SI",
+        msnEsnApun: "1600",
+        pn: "ATR72",
+        cost: 100000,
+        ccy: "USD",
+        capitalisation: "No",
+      },
+    ],
+    allocationTable: [{ costCode: "QUALIFYINGSCHMXEVENTS", basis: "BH" }],
+  });
+
+  assert.equal(enriched[0].qualifyingSchMxEvents, 40000);
+  assert.equal(enriched[1].qualifyingSchMxEvents, 60000);
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.qualifyingSchMxEventsRCCY, 0), 100000);
 });
 
 test("maintenance reserve schedule drives on-wing SN mapping, next-month lookup, FX, and monthly allocation", () => {

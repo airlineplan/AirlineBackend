@@ -1173,9 +1173,10 @@ const generateMonthlyDates = (asOnDateValue, endDateValue) => {
   const endDate = parseDate(endDateValue);
   if (!asOnDate || !endDate) return [];
   const dates = [];
+  const finalPostingDate = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
   for (
     let cursor = new Date(Date.UTC(asOnDate.getUTCFullYear(), asOnDate.getUTCMonth() + 1, 1));
-    cursor <= endDate;
+    cursor <= finalPostingDate;
     cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
   ) {
     dates.push(new Date(cursor));
@@ -1235,6 +1236,7 @@ const getOpeningBalanceAsOfDate = (scheduleRows = [], mrAccId = "", drawdownDate
       const rowDate = parseDate(row.date);
       if (!rowDate || rowDate.getTime() > targetTime) return false;
       if (mrAccId && normalize(row.mrAccId) !== normalize(mrAccId)) return false;
+      if (rowDate.getTime() === targetTime && normalize(row.transactionType) === "DRAWDOWN") return false;
       return true;
     })
     .sort((a, b) => (
@@ -1488,7 +1490,10 @@ const hydrateSchMxEvents = (rows = [], {
     }
 
     const drawdownDateKey = toDayKey(next.drawdownDate);
-    if (isBlankValue(next.openingBal) && drawdownDateKey && !isBlankValue(next.mrAccId)) {
+    if (!drawdownDateKey) {
+      next.openingBal = 0;
+      hydratedFields.add("openingBal");
+    } else if (!isBlankValue(next.mrAccId)) {
       const asOfBalance = getOpeningBalanceAsOfDate(maintenanceReserveRows, next.mrAccId, next.drawdownDate);
       if (!isBlankValue(asOfBalance)) {
         next.openingBal = toNumber(asOfBalance);
@@ -1501,8 +1506,14 @@ const hydrateSchMxEvents = (rows = [], {
           acftReg: next.acftRegn,
         });
         const reserve = reserveKeys.map((key) => reserveLookup.get(key)).find(Boolean);
-        if (reserve && !isBlankValue(reserve.closingBal)) {
-          next.openingBal = toNumber(reserve.closingBal);
+        if (reserve) {
+          const reserveBalance = normalize(reserve.transactionType) === "DRAWDOWN"
+            ? reserve.openingBalance ?? reserve.openingBal
+            : reserve.closingBal ?? reserve.closingBalance ?? reserve.balance;
+          next.openingBal = toNumber(reserveBalance);
+          hydratedFields.add("openingBal");
+        } else {
+          next.openingBal = 0;
           hydratedFields.add("openingBal");
         }
       }
@@ -2153,7 +2164,15 @@ const generateMaintenanceReserveScheduleWithContributions = (
       const rate = toNumber(row.rate) || getEscalatedReserveRate(setting, row.date);
       const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, aircraftOnwing);
       const driverValue = driver === "MONTH"
-        ? toNumber(row.driverValue || row.monthNumber)
+        ? getExactExampleMonthlyFactor(
+            new Date(Date.UTC(
+              parseDate(row.date).getUTCFullYear(),
+              parseDate(row.date).getUTCMonth() - 1,
+              1
+            )),
+            setting.asOnDate,
+            setting.endDate
+          )
         : round2(matchedFlights.reduce((sum, flight) => sum + getMaintenanceReserveDriverValue(driver, flight), 0));
       const contribution = round2(rate * driverValue);
       const drawdown = toNumber(row.drawdown || row.mrDrawdown);
@@ -3060,7 +3079,7 @@ const enrichAllocatedCosts = (flights, config) => {
     sorted.forEach((event, index) => {
       const previousDate = parseDate(sorted[index - 1]?.date);
       const eventDate = parseDate(event.date);
-      const startDate = previousDate || eventDate || masterStart;
+      const startDate = previousDate || masterStart || eventDate;
       const endDate = eventDate || masterEnd;
       const eligibleFlights = flights.filter((flight) => {
         const flightDate = getFlightDate(flight);

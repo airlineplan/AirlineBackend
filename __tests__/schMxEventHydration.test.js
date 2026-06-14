@@ -49,7 +49,7 @@ test("hydrateSchMxEvents fills maintenance logic fields and exact opening balanc
   assert.deepEqual(hydrated[0]._hydratedFields.sort(), ["days", "cycles", "hours", "openingBal", "remaining"].sort());
 });
 
-test("hydrateSchMxEvents preserves manual values and leaves opening balance blank without drawdown date", () => {
+test("hydrateSchMxEvents preserves manual utilisation values and zeros MR balance without drawdown date", () => {
   const firstPass = hydrateSchMxEvents(
     [
       {
@@ -83,7 +83,7 @@ test("hydrateSchMxEvents preserves manual values and leaves opening balance blan
     }
   );
 
-  assert.equal(firstPass[0].openingBal, "");
+  assert.equal(firstPass[0].openingBal, 0);
   assert.equal(firstPass[0].hours, 30540);
   assert.equal(firstPass[0].cycles, 12582);
   assert.equal(firstPass[0].days, 3913);
@@ -117,7 +117,7 @@ test("hydrateSchMxEvents preserves manual values and leaves opening balance blan
   assert.equal(secondPass[0].hours, 99999);
   assert.equal(secondPass[0].cycles, 88888);
   assert.equal(secondPass[0].days, 77777);
-  assert.equal(secondPass[0].openingBal, 12345);
+  assert.equal(secondPass[0].openingBal, 0);
   assert.deepEqual(
     secondPass[0]._hydratedFields.sort(),
     firstPass[0]._hydratedFields.sort()

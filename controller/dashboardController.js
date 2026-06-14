@@ -889,8 +889,8 @@ const getDashboardDataLegacy = async (req, res) => {
           const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
           const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
           const otherMaintenanceUtilisationRCCY = sumRowFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
-          const otherMaintenanceCalendarRCCY = sumNumericField(flightsInPeriod, "otherMaintenance3");
           const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
+          const otherMaintenanceCalendarRCCY = otherMxExpensesRCCY;
           const rotableChangesRCCY = rotableChangesInPeriod.reduce((total, row) => total + toNumericValue(row?.costRCCY ?? row?.cost), 0);
           const totalMaintenanceCostRCCY =
             totalMrContributionRCCY +
@@ -1335,8 +1335,8 @@ const getDashboardData = async (req, res) => {
       const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
       const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
       const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
-      const otherMaintenanceCalendarRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance3"]);
       const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
+      const otherMaintenanceCalendarRCCY = otherMxExpensesRCCY;
       const rotableChangesRCCY = sumNumericField(flightsInPeriod, "rotableChangesRCCY");
       const totalMaintenanceCostRCCY = totalMrContributionRCCY + qualifyingSchMxEventsRCCY + transitMaintenanceRCCY + otherMaintenanceRCCY + otherMxExpensesRCCY + rotableChangesRCCY;
       const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
