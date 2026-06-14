@@ -19,6 +19,7 @@ const {
     parseOtherDutyTimes,
   },
 } = require("../services/crewUploadService");
+const { calculateCrewMemberEvents } = require("../services/crewCalculationService");
 const { dateKey, diffMinutes, getRowValue, parseExcelDate } = require("../services/crewTimeUtils");
 const Flight = require("../model/flight");
 const {
@@ -237,6 +238,120 @@ test("flight duty matching tolerates existing timezone-shifted network schedule 
     assert.equal(result.sta.getUTCMinutes(), 50);
     assert.equal(result.warning, "");
   });
+});
+
+test("Flight Duty upload replaces old assignments and feeds June 14-15 Crew Diary events", async () => {
+  const filePath = writeWorkbook([
+    ["Flight duty table", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["ID", "Date", "Day", "Flight #", "Dep Stn", "Arr Stn", "Sector", "Captain", "FO", "CC1", "CC2", "CC3", "CC4"],
+    ["2", "14-Jun-26", "Sun", "9I601", "BOM", "JLG", "BOM-JLG", "5", "6", "", "", "", ""],
+    ["5", "15-Jun-26", "Mon", "9I625", "BOM", "BHJ", "BOM-BHJ", "5", "6", "", "", "", ""],
+  ]);
+  const crewMembers = [
+    {
+      _id: "crew-5",
+      crewCode: "5",
+      name: "Amit",
+      crewType: "FC",
+      role: "Captain",
+      baseStation: "BOM",
+      allowanceCurrency: "INR",
+    },
+    {
+      _id: "crew-6",
+      crewCode: "6",
+      name: "Vijay",
+      crewType: "FC",
+      role: "FO",
+      baseStation: "BOM",
+      allowanceCurrency: "INR",
+    },
+  ];
+  const scheduleFlights = [
+    {
+      _id: "flight-601",
+      date: new Date("2026-06-13T18:30:00.000Z"),
+      day: "Sun",
+      flight: "9I601",
+      depStn: "BOM",
+      arrStn: "JLG",
+      std: "08:00",
+      sta: "09:20",
+    },
+    {
+      _id: "flight-625",
+      date: new Date("2026-06-14T18:30:00.000Z"),
+      day: "Mon",
+      flight: "9I625",
+      depStn: "BOM",
+      arrStn: "BHJ",
+      std: "10:00",
+      sta: "11:30",
+    },
+  ];
+  const savedAssignments = [];
+  let deleteFilter = null;
+
+  await withPatchedMethods([
+    patchUploadBatch(),
+    [CrewMember, "find", () => queryResult(crewMembers)],
+    [Flight, "find", (filter) => queryResult(scheduleFlights.filter((flight) => filter.flight.test(flight.flight)))],
+    [CrewFlightAssignment, "findOne", () => queryResult(null)],
+    [CrewFlightAssignment, "deleteMany", async (filter) => {
+      deleteFilter = filter;
+      return { deletedCount: 7 };
+    }],
+    [CrewFlightAssignment, "findOneAndUpdate", async (filter, update) => {
+      savedAssignments.push({ ...filter, ...update.$set, _id: `assignment-${savedAssignments.length + 1}` });
+      return savedAssignments[savedAssignments.length - 1];
+    }],
+    ...patchGeneratedCrewOutputDeletes(),
+  ], async () => {
+    const summary = await importFlightDuties({
+      userId: "user-1",
+      file: { path: filePath, originalname: "Flight duty table.xlsx" },
+      uploadedBy: "tester@example.com",
+    });
+
+    assert.equal(summary.rowsRead, 2);
+    assert.equal(summary.rowsInserted, 4);
+    assert.equal(summary.rowsDeleted, 7);
+    assert.equal(summary.invalidRows, 0);
+    assert.deepEqual(deleteFilter, { userId: "user-1" });
+  });
+
+  assert.deepEqual(
+    savedAssignments.map((assignment) => dateKey(assignment.flightDate)),
+    ["2026-06-14", "2026-06-14", "2026-06-15", "2026-06-15"]
+  );
+
+  const captainEvents = calculateCrewMemberEvents({
+    crewMember: crewMembers[0],
+    flightAssignments: savedAssignments.filter((assignment) => assignment.crewCode === "5"),
+    otherDuties: [],
+    dutySettings: {
+      restThresholdMinutes: 420,
+      breakThresholdMinutes: 180,
+      preflightNewFdpMinutes: 30,
+      preflightExistingDutyMinutes: 30,
+      postflightMinutes: 30,
+    },
+    positioningSettings: {
+      returnToBaseAfterFdpEnabled: false,
+      hotacCutoffEnabled: false,
+      positioningWithinCurrentFdpEnabled: false,
+      defaultPositioningMinutes: 150,
+      hotacToAirportTransferMinutes: 60,
+    },
+    layoverRules: [],
+    positioningCostRules: [],
+  });
+  const operatedFlights = captainEvents.filter((event) => event.sourceType === "FLIGHT_ROSTER");
+
+  assert.deepEqual(
+    operatedFlights.map((event) => [event.flightNumber, dateKey(event.startDateTime)]),
+    [["9I601", "2026-06-14"], ["9I625", "2026-06-15"]]
+  );
 });
 
 test("other duty roster uses Crew ID for crew and ID for the roster row", () => {
