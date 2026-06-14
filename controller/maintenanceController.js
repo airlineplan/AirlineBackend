@@ -478,8 +478,15 @@ const onwingRowHasAsset = (row, assetKey) => {
     return onwingFields.some(field => normalizeAssetIdentity(row[field]) === normalizedAssetKey);
 };
 
-const getRotablePositionField = (position) => {
+const normalizeRotablePosition = (position) => {
     const normalizedPosition = String(position || "").trim();
+    if (/^#?\s*1$/i.test(normalizedPosition)) return "#1";
+    if (/^#?\s*2$/i.test(normalizedPosition)) return "#2";
+    return normalizedPosition;
+};
+
+const getRotablePositionField = (position) => {
+    const normalizedPosition = normalizeRotablePosition(position);
     if (normalizedPosition === "#1") return "pos1Esn";
     if (normalizedPosition === "#2") return "pos2Esn";
     return null;
@@ -2227,11 +2234,11 @@ exports.getRotables = async (req, res) => {
         const formattedRecords = records.map(record => ({
             id: record._id,
             label: record.label || "",
-            date: moment(record.date).format("YYYY-MM-DD"),
+            date: moment.utc(record.date).format("YYYY-MM-DD"),
             pn: record.pn || "",
             msn: record.msn || "",
             acftRegn: record.acftReg || "",
-            position: record.position || "",
+            position: normalizeRotablePosition(record.position),
             removedSN: record.removedSN || "",
             installedSN: record.installedSN || ""
         }));
@@ -2261,7 +2268,7 @@ exports.bulkSaveRotables = async (req, res) => {
         for (const record of rotablesData) {
             const msn = String(record.msn || "").trim();
             const pn = String(record.pn || "").trim();
-            const position = String(record.position || "").trim();
+            const position = normalizeRotablePosition(record.position);
             const movementDate = record.date
                 ? moment.utc(record.date, moment.ISO_8601, true).startOf("day")
                 : moment.utc().startOf("day");

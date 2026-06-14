@@ -317,6 +317,12 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 .map((asset) => createMetricKey(asset.category, asset.sn))
                 .filter(Boolean)
         );
+        const fleetComponentKeys = new Set(
+            fleetAssets
+                .filter((asset) => ["Engine", "APU"].includes(asset.category))
+                .map((asset) => createMetricKey(asset.category, asset.sn))
+                .filter(Boolean)
+        );
 
         const rotableHistoryMap = {};
 
@@ -346,8 +352,9 @@ exports.getFleetScheduleMetrics = async (req, res) => {
         });
 
         rotableMovements.forEach((movement) => {
-            const dateValue = movement.date ? new Date(movement.date) : null;
-            if (!dateValue) return;
+            const movementDate = moment.utc(movement.date);
+            if (!movementDate.isValid()) return;
+            const effectiveDate = movementDate.add(1, "day").startOf("day").toDate();
 
             [
                 { category: "Engine", field: "installedSN", state: "installed" },
@@ -356,11 +363,11 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 { category: "APU", field: "removedSN", state: "removed" }
             ].forEach(({ category, field, state }) => {
                 const componentKey = createMetricKey(category, movement[field]);
-                if (!componentKey || !spareComponentKeys.has(componentKey)) return;
+                if (!componentKey || !fleetComponentKeys.has(componentKey)) return;
 
                 if (!rotableHistoryMap[componentKey]) rotableHistoryMap[componentKey] = [];
                 rotableHistoryMap[componentKey].push({
-                    date: dateValue,
+                    date: effectiveDate,
                     ownerAcftSn: createMetricKey("Aircraft", movement.msn),
                     state
                 });
@@ -437,6 +444,12 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
             Object.entries(componentOwnerMap).forEach(([componentSn, ownerAcftSn]) => {
                 if (spareComponentKeys.has(componentSn)) return;
+                const componentHistory = rotableHistoryMap[componentSn] || [];
+                const latestMovement = [...componentHistory]
+                    .reverse()
+                    .find((movement) => moment.utc(movement.date).isSameOrBefore(currentDayEnd));
+                if (latestMovement?.state === "removed") return;
+
                 if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
 
                 const existingComponentMetric = metricsMap[componentSn][dDisp];
@@ -454,7 +467,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 }
             });
 
-            spareComponentKeys.forEach((componentSn) => {
+            Object.keys(rotableHistoryMap).forEach((componentSn) => {
                 if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
 
                 const componentHistory = rotableHistoryMap[componentSn] || [];
@@ -472,8 +485,10 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
                 const componentCategory = componentSn.startsWith("APU:") ? "APU" : "Engine";
                 const componentGroundEvent = componentGroundMap[componentCategory]?.[dDisp]?.[componentSn];
-                if (latestMovement.state === "removed" && componentGroundEvent) {
-                    metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(componentGroundEvent);
+                if (latestMovement.state === "removed") {
+                    if (componentGroundEvent) {
+                        metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(componentGroundEvent);
+                    }
                     return;
                 }
 

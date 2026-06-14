@@ -19,6 +19,7 @@ const UtilisationAssumption = require("../model/utilisationAssumptionSchema");
 const RotableMovement = require("../model/rotableMovementSchema");
 const GroundDay = require("../model/groundDay");
 const maintenanceController = require("../controller/maintenanceController");
+const fleetController = require("../controller/fleetController");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
 
@@ -2689,6 +2690,145 @@ test("saving rotable movement scopes on-wing updates to the current user", async
   assert.equal(res.statusCode, 200);
   assert.equal(userOnwing?.pos2Esn, "685782");
   assert.equal(otherOnwing?.pos2Esn, "OLD-OTHER");
+});
+
+test("rotable engine change entered as position 1 switches fleet utilisation on the next day", async () => {
+  const movementDate = utcDate(2026, 6, 14);
+  const effectiveDate = utcDate(2026, 6, 15);
+
+  await Flight.insertMany([
+    { userId: USER_ID, date: movementDate, flight: "FL14", bh: 6.67, fh: 5 },
+    { userId: USER_ID, date: effectiveDate, flight: "FL15", bh: 10.08, fh: 7 },
+  ]);
+  await Fleet.insertMany([
+    {
+      userId: USER_ID,
+      category: "Aircraft",
+      type: "ATR72",
+      variant: "ATR72",
+      sn: "1605",
+      regn: "VT-AAB",
+      entry: utcDate(2026, 6, 1),
+      exit: utcDate(2026, 8, 15),
+    },
+    {
+      userId: USER_ID,
+      category: "Engine",
+      type: "PW127",
+      variant: "PW127",
+      sn: "ED1209",
+      titled: "VT-AAB #1",
+      entry: utcDate(2026, 6, 1),
+      exit: utcDate(2026, 8, 15),
+    },
+    {
+      userId: USER_ID,
+      category: "Engine",
+      type: "PW127",
+      variant: "PW127",
+      sn: "ED0095",
+      titled: "Spare",
+      entry: utcDate(2026, 6, 1),
+      exit: utcDate(2026, 7, 15),
+    },
+  ]);
+  await AircraftOnwing.create({
+    userId: USER_ID,
+    date: utcDate(2026, 6, 1),
+    msn: "1605",
+    pos1Esn: "ED1209",
+    pos2Esn: "ED1210",
+  });
+  await seedAssignment({
+    date: movementDate,
+    flightNumber: "FL14",
+    msn: 1605,
+    registration: "VT-AAB",
+  });
+  await seedAssignment({
+    date: effectiveDate,
+    flightNumber: "FL15",
+    msn: 1605,
+    registration: "VT-AAB",
+  });
+
+  const saveRes = createMockResponse();
+  await maintenanceController.bulkSaveRotables({
+    user: { id: USER_ID },
+    body: {
+      rotablesData: [{
+        label: "Engine change",
+        date: "2026-06-14",
+        pn: "PW127",
+        msn: "1605",
+        acftRegn: "VT-AAB",
+        position: "1",
+        removedSN: "ED1209",
+        installedSN: "ED0095",
+      }],
+    },
+  }, saveRes);
+
+  const savedMovement = await RotableMovement.findOne({ userId: USER_ID, msn: "1605" }).lean();
+  const effectiveOnwing = await AircraftOnwing.findOne({
+    userId: USER_ID,
+    msn: "1605",
+    date: effectiveDate,
+  }).lean();
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(savedMovement.date.toISOString().slice(0, 10), "2026-06-14");
+  assert.equal(savedMovement.position, "#1");
+  assert.equal(effectiveOnwing?.pos1Esn, "ED0095");
+
+  // Simulate a movement saved before position "1" was normalized and its on-wing timeline rebuilt.
+  await RotableMovement.updateOne({ _id: savedMovement._id }, { $set: { position: "1" } });
+  await AircraftOnwing.deleteOne({ userId: USER_ID, msn: "1605", date: effectiveDate });
+
+  const metricsRes = createMockResponse();
+  await fleetController.getFleetScheduleMetrics({
+    user: { id: USER_ID },
+    query: { month: "June 2026" },
+  }, metricsRes);
+
+  const removedMetrics = metricsRes.body.data["Engine:1209"] || {};
+  const installedMetrics = metricsRes.body.data["Engine:0095"] || {};
+
+  assert.equal(metricsRes.statusCode, 200);
+  assert.equal(removedMetrics["14 Jun 26"]?.bh, 6.67);
+  assert.equal(removedMetrics["15 Jun 26"], undefined);
+  assert.equal(installedMetrics["14 Jun 26"], undefined);
+  assert.equal(installedMetrics["15 Jun 26"]?.bh, 10.08);
+});
+
+test("rotable movement dates are returned as UTC calendar dates", async () => {
+  await RotableMovement.create({
+    userId: USER_ID,
+    label: "Engine change",
+    date: utcDate(2026, 6, 14),
+    pn: "PW127",
+    msn: "1605",
+    acftReg: "VT-AAB",
+    position: "#1",
+    removedSN: "ED1209",
+    installedSN: "ED0095",
+  });
+
+  const originalTimezone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const res = createMockResponse();
+    await maintenanceController.getRotables({ user: { id: USER_ID } }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data[0].date, "2026-06-14");
+  } finally {
+    if (originalTimezone === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTimezone;
+    }
+  }
 });
 
 test("maintenance compute switches engine utilisation after rotable movement", async () => {
