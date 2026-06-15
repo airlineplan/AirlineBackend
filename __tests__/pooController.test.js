@@ -1046,6 +1046,34 @@ test("allocates one-stop OD revenue by prorate ratio for both transit legs", () 
     assert.equal(firstLeg.odCargoRev + secondLeg.odCargoRev, 10000);
 });
 
+test("allocates the BHJ-AVR 174000 fare across both transit legs using GCD ratio", () => {
+    const firstLeg = recalculateRevenue({
+        trafficType: "transit_fl",
+        pax: 29,
+        cargoT: 1,
+        sectorGcd: 300,
+        totalGcd: 700,
+        odFare: 6000,
+        odRate: 100,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+    const secondLeg = recalculateRevenue({
+        trafficType: "transit_sl",
+        pax: 29,
+        cargoT: 1,
+        sectorGcd: 400,
+        totalGcd: 700,
+        odFare: 6000,
+        odRate: 100,
+        pooCcyToRccy: 1,
+        applySSPricing: false,
+    });
+
+    assert.equal(firstLeg.fnlRccyPaxRev + secondLeg.fnlRccyPaxRev, 174000);
+    assert.equal(firstLeg.fnlRccyCargoRev + secondLeg.fnlRccyCargoRev, 100000);
+});
+
 test("missing one-stop GCD defaults leg proration to 50/50", () => {
     const row = recalculateRevenue({
         stops: 1,

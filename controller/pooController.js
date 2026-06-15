@@ -151,6 +151,21 @@ function safeRatio(numerator, denominator) {
     return roundToTwo(parseNumber(numerator) / bottom);
 }
 
+function isConnectingRevenueRow(row = {}) {
+    const trafficType = String(row.trafficType || "").trim().toLowerCase();
+    return parseNumber(row.stops) > 0 || [
+        TRAFFIC_TYPES.BEHIND,
+        TRAFFIC_TYPES.BEYOND,
+        TRAFFIC_TYPES.TRANSIT_FL,
+        TRAFFIC_TYPES.TRANSIT_SL,
+    ].includes(trafficType);
+}
+
+function getOdTotalGcd(row = {}) {
+    const odViaGcd = parseNumber(row.odViaGcd);
+    return odViaGcd > 0 ? odViaGcd : parseNumber(row.totalGcd);
+}
+
 function formatDateKey(date) {
     return moment(date).format("YYYY-MM-DD");
 }
@@ -701,19 +716,19 @@ function calculateProrateRatio(row, fieldName) {
     if (explicit > 0) {
         return Math.min(explicit, 1);
     }
-    if (row.stops !== 1) {
+    if (!isConnectingRevenueRow(row)) {
         return 1;
     }
-    return Math.min(safeRatio(row.sectorGcd, row.odViaGcd), 1);
+    return Math.min(safeRatio(row.sectorGcd, getOdTotalGcd(row)), 1);
 }
 
 function calculateLegShare(row, fieldName) {
-    if (row.stops !== 1) {
+    if (!isConnectingRevenueRow(row)) {
         return 1;
     }
     const explicitRatio = parseNumber(row[fieldName]);
     if (explicitRatio <= 0) {
-        const totalGcd = parseNumber(row.odViaGcd);
+        const totalGcd = getOdTotalGcd(row);
         if (totalGcd <= 0 || parseNumber(row.sectorGcd) <= 0) return 0.5;
         return Math.min(parseNumber(row.sectorGcd) / totalGcd, 1);
     }
@@ -734,7 +749,7 @@ function recalculateRevenueForPooRow(row, revenueConfig = null) {
     const fareShare = calculateLegShare(row, "fareProrateRatioL1L2");
     const rateShare = calculateLegShare(row, "rateProrateRatioL1L2");
 
-    if (row.stops === 1) {
+    if (isConnectingRevenueRow(row)) {
         next.legFare = roundToTwo(row.odFare * fareShare);
         next.legRate = roundToTwo(row.odRate * rateShare);
     }
