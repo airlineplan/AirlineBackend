@@ -29,7 +29,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
-const { normalizeCurrencyCode, normalizeDateKey } = require("../utils/fx");
+const { normalizeCurrencyCode, normalizeDateKey, convertLocalToReporting } = require("../utils/fx");
 
 const createConnections = require('../helper/createConnections');
 
@@ -127,13 +127,52 @@ const toNumericValue = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const getCostConfigRowDate = (row = {}) => {
-  if (row?.date) {
-    const parsed = new Date(row.date);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed;
+const roundCurrency = (value) => Number(toNumericValue(value).toFixed(2));
+
+const parseDashboardDateValue = (value) => {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+  const text = String(value).trim();
+  if (!text) return null;
+
+  const isoDate = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDate) {
+    const [, yyyy, mm, dd] = isoDate;
+    const parsed = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd)));
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  const ddmmyyyy = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (ddmmyyyy) {
+    const [, dd, mm, yyyy] = ddmmyyyy;
+    const year = yyyy.length === 2 ? `20${yyyy}` : yyyy;
+    const parsed = new Date(Date.UTC(Number(year), Number(mm) - 1, Number(dd)));
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  const ddMonYY = text.match(/^(\d{1,2})[-\s/]([A-Z]{3})[-\s/](\d{2,4})$/i);
+  if (ddMonYY) {
+    const [, dd, mon, yy] = ddMonYY;
+    const monthMap = {
+      JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+      JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+    };
+    const month = monthMap[mon.toUpperCase()];
+    const year = yy.length === 2 ? 2000 + Number(yy) : Number(yy);
+    if (month !== undefined) {
+      const parsed = new Date(Date.UTC(year, month, Number(dd)));
+      if (!Number.isNaN(parsed.getTime())) return parsed;
     }
   }
+
+  const fallback = new Date(text);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+};
+
+const getCostConfigRowDate = (row = {}) => {
+  const rowDate = parseDashboardDateValue(row?.date);
+  if (rowDate) return rowDate;
 
   const month = String(row?.month ?? "").trim();
   const monthMatch = month.match(/^(\d{1,2})[/-](\d{2,4})$/);
@@ -146,8 +185,7 @@ const getCostConfigRowDate = (row = {}) => {
     }
   }
 
-  const fallbackDate = new Date(month);
-  return Number.isNaN(fallbackDate.getTime()) ? null : fallbackDate;
+  return parseDashboardDateValue(month);
 };
 
 const getUserIdFromReq = (req) => {
@@ -539,6 +577,7 @@ const getDashboardDataLegacy = async (req, res) => {
         // Initialize an array to store the result data
         const resultData = [];
         const currencyExposureBuckets = {};
+        addSchMxEventCostExposures(currencyExposureBuckets, schMxEvents);
 
         for (const periodEndDate of periods) {
           let periodStartDate;
@@ -818,10 +857,6 @@ const getDashboardDataLegacy = async (req, res) => {
           const fnlRccyCargoRev = revenueInPeriod.reduce((total, row) => total + (Number(row.fnlRccyCargoRev) || 0), 0);
           const fnlRccyTotalRev = fnlRccyPaxRev + fnlRccyCargoRev;
 
-          const schMxInPeriod = schMxEvents.filter((row) => {
-            const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
-            return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
-          });
           const rotableChangesInPeriod = Array.isArray(costConfig.rotableChanges)
             ? costConfig.rotableChanges.filter((row) => {
                 const rowDate = getCostConfigRowDate(row);
@@ -829,40 +864,20 @@ const getDashboardDataLegacy = async (req, res) => {
               })
             : [];
 
-          const groupedSchMxEvents = new Map();
-          schMxInPeriod.forEach((row) => {
-            const eventKey = String(row?.event || "").trim() || "Sch.Mx.Event";
-            if (!groupedSchMxEvents.has(eventKey)) {
-              groupedSchMxEvents.set(eventKey, []);
-            }
-            groupedSchMxEvents.get(eventKey).push(row);
+          const {
+            qualifyingSchMxEventsRCCY,
+            schMxEvent1RCCY,
+            schMxEvent1Detail1RCCY,
+            schMxEvent1Detail2RCCY,
+            schMxEvent2RCCY,
+            schMxEvent2Detail1RCCY,
+          } = getSchMxRecognitionMetrics({
+            schMxEvents,
+            periodStartDay,
+            periodEndDay,
+            reportingCurrency: costConfig.reportingCurrency || revenueConfig.reportingCurrency,
+            fxRates: revenueConfig.fxRates || costConfig.fxRates || [],
           });
-
-          const orderedSchMxEvents = Array.from(groupedSchMxEvents.entries())
-            .map(([event, rows]) => ({
-              event,
-              rows: [...rows].sort((a, b) => {
-                const aDate = startOfUtcDay(new Date(a.date)).getTime();
-                const bDate = startOfUtcDay(new Date(b.date)).getTime();
-                return aDate - bDate;
-              }),
-            }))
-            .sort((a, b) => {
-              const aDate = a.rows[0] ? startOfUtcDay(new Date(a.rows[0].date)).getTime() : 0;
-              const bDate = b.rows[0] ? startOfUtcDay(new Date(b.rows[0].date)).getTime() : 0;
-              return aDate - bDate;
-            });
-
-          const firstSchMxRows = orderedSchMxEvents[0]?.rows || [];
-          const secondSchMxRows = orderedSchMxEvents[1]?.rows || [];
-          const sumSchMxRows = (rows = []) => rows.reduce((total, row) => total + toNumericValue(row?.costRCCY ?? row?.cost), 0);
-
-          const schMxEvent1Detail1RCCY = toNumericValue(firstSchMxRows[0]?.costRCCY ?? firstSchMxRows[0]?.cost);
-          const schMxEvent1Detail2RCCY = toNumericValue(firstSchMxRows[1]?.costRCCY ?? firstSchMxRows[1]?.cost);
-          const schMxEvent1RCCY = sumSchMxRows(firstSchMxRows);
-          const schMxEvent2Detail1RCCY = toNumericValue(secondSchMxRows[0]?.costRCCY ?? secondSchMxRows[0]?.cost);
-          const schMxEvent2RCCY = sumSchMxRows(secondSchMxRows);
-          const qualifyingSchMxEventsRCCY = schMxEvent1RCCY + schMxEvent2RCCY;
 
           const sumNumericField = (rows = [], field, fallback = 0) => rows.reduce((total, row) => {
             return total + toNumericValue(row?.[field]);
@@ -1117,6 +1132,106 @@ const sumFlightFields = (rows = [], fields = []) =>
 const sumNumericField = (rows = [], field) =>
   rows.reduce((total, row) => total + toNumericValue(row?.[field]), 0);
 
+const isBlankValue = (value) => value === null || value === undefined || value === "";
+
+const isCapitalizedSchMxEvent = (row = {}) => (
+  ["Y", "YES", "TRUE", "1"].includes(String(row.capitalisation || row.capitalization || row.cap || "").trim().toUpperCase())
+);
+
+const getSchMxExpenseAmount = (row = {}) => {
+  const remainingRaw = row.remaining;
+  if (!isBlankValue(remainingRaw)) return Math.max(toNumericValue(remainingRaw), 0);
+
+  const cost = toNumericValue(row.cost ?? row.eventTotalCost);
+  const drawdownRaw = row.mrDrawdown ?? row.drawdown;
+  if (!isBlankValue(drawdownRaw)) return Math.max(cost - toNumericValue(drawdownRaw), 0);
+
+  return cost;
+};
+
+const getSchMxExpenseRccy = (row = {}, reportingCurrency, fxRates = []) => {
+  const expenseAmount = getSchMxExpenseAmount(row);
+  if (expenseAmount <= 0) return 0;
+
+  const explicitRccy = toNumericValue(row.costRCCY ?? row.reportingAmount);
+  if (explicitRccy > 0) {
+    const eventCost = toNumericValue(row.cost ?? row.eventTotalCost);
+    if (eventCost > 0 && expenseAmount !== eventCost) {
+      return roundCurrency(explicitRccy * (expenseAmount / eventCost));
+    }
+    return roundCurrency(explicitRccy);
+  }
+
+  const eventDate = parseDashboardDateValue(row.date);
+  return convertLocalToReporting(
+    expenseAmount,
+    row.ccy || row.currency,
+    reportingCurrency,
+    normalizeDateKey(eventDate || row.date),
+    fxRates
+  );
+};
+
+const getSchMxRecognitionMetrics = ({
+  schMxEvents = [],
+  periodStartDay,
+  periodEndDay,
+  reportingCurrency,
+  fxRates = [],
+} = {}) => {
+  const rowsInPeriod = (Array.isArray(schMxEvents) ? schMxEvents : [])
+    .filter((row) => {
+      if (isCapitalizedSchMxEvent(row)) return false;
+      const rowDate = parseDashboardDateValue(row?.date);
+      if (!rowDate || !periodStartDay || !periodEndDay) return false;
+      const eventDay = startOfUtcDay(rowDate);
+      return eventDay >= periodStartDay && eventDay <= periodEndDay;
+    })
+    .map((row) => ({
+      row,
+      eventDate: parseDashboardDateValue(row?.date),
+      amountRCCY: getSchMxExpenseRccy(row, reportingCurrency, fxRates),
+    }))
+    .filter(({ amountRCCY }) => amountRCCY > 0);
+
+  const grouped = new Map();
+  rowsInPeriod.forEach((entry) => {
+    const eventKey = String(entry.row?.event || entry.row?.schMxEvent || "").trim() || "Sch.Mx.Event";
+    if (!grouped.has(eventKey)) grouped.set(eventKey, []);
+    grouped.get(eventKey).push(entry);
+  });
+
+  const orderedEvents = Array.from(grouped.entries())
+    .map(([event, rows]) => ({
+      event,
+      rows: [...rows].sort((a, b) => (a.eventDate?.getTime() || 0) - (b.eventDate?.getTime() || 0)),
+    }))
+    .sort((a, b) => (
+      (a.rows[0]?.eventDate?.getTime() || 0) - (b.rows[0]?.eventDate?.getTime() || 0) ||
+      a.event.localeCompare(b.event)
+    ));
+
+  const firstSchMxRows = orderedEvents[0]?.rows || [];
+  const secondSchMxRows = orderedEvents[1]?.rows || [];
+  const sumRows = (rows = []) => roundCurrency(rows.reduce((total, entry) => total + toNumericValue(entry.amountRCCY), 0));
+
+  const qualifyingSchMxEventsRCCY = sumRows(rowsInPeriod);
+  const schMxEvent1Detail1RCCY = roundCurrency(firstSchMxRows[0]?.amountRCCY);
+  const schMxEvent1Detail2RCCY = roundCurrency(firstSchMxRows[1]?.amountRCCY);
+  const schMxEvent1RCCY = sumRows(firstSchMxRows);
+  const schMxEvent2Detail1RCCY = roundCurrency(secondSchMxRows[0]?.amountRCCY);
+  const schMxEvent2RCCY = sumRows(secondSchMxRows);
+
+  return {
+    qualifyingSchMxEventsRCCY,
+    schMxEvent1RCCY,
+    schMxEvent1Detail1RCCY,
+    schMxEvent1Detail2RCCY,
+    schMxEvent2RCCY,
+    schMxEvent2Detail1RCCY,
+  };
+};
+
 const monthLabelKey = (date) => moment.utc(date).endOf("month").format("YYYY-MM-DD");
 
 const addCurrencyExposure = (container, ccy, date, revenue = 0, cost = 0) => {
@@ -1136,7 +1251,6 @@ const addLocalCostExposures = (currencyBuckets, flight) => {
     "apuFuelCost",
     "maintenanceReserveContribution",
     "mrMonthly",
-    "qualifyingSchMxEvents",
     "transitMaintenance",
     "otherMaintenance",
     "otherMxExpenses",
@@ -1152,6 +1266,16 @@ const addLocalCostExposures = (currencyBuckets, flight) => {
     const ccy = normalizeCurrencyCode(flight?.[`${field}CCY`]);
     if (!ccy) return;
     addCurrencyExposure(currencyBuckets, ccy, flight.date, 0, flight[field]);
+  });
+};
+
+const addSchMxEventCostExposures = (currencyBuckets, schMxEvents = []) => {
+  (Array.isArray(schMxEvents) ? schMxEvents : []).forEach((row) => {
+    if (isCapitalizedSchMxEvent(row)) return;
+    const eventDate = parseDashboardDateValue(row?.date);
+    const expenseAmount = getSchMxExpenseAmount(row);
+    if (!eventDate || expenseAmount <= 0) return;
+    addCurrencyExposure(currencyBuckets, row.ccy || row.currency, eventDate, 0, expenseAmount);
   });
 };
 
@@ -1259,6 +1383,7 @@ const getDashboardData = async (req, res) => {
         addCurrencyExposure(currencyExposureBuckets, localCcy, row.date, localRevenue, 0);
       }
     });
+    addSchMxEventCostExposures(currencyExposureBuckets, baseCostConfig.schMxEvents || []);
 
     for (const periodEnd of periodEnds) {
       const periodStart = getPeriodStartForDashboard(periodEnd, periodicity);
@@ -1324,6 +1449,20 @@ const getDashboardData = async (req, res) => {
       const fnlRccyCargoRev = sumNumericField(revenueInPeriod, "fnlRccyCargoRev");
       const explicitTotalRev = sumNumericField(revenueInPeriod, "fnlRccyTotalRev");
       const fnlRccyTotalRev = explicitTotalRev || (fnlRccyPaxRev + fnlRccyCargoRev);
+      const {
+        qualifyingSchMxEventsRCCY,
+        schMxEvent1RCCY,
+        schMxEvent1Detail1RCCY,
+        schMxEvent1Detail2RCCY,
+        schMxEvent2RCCY,
+        schMxEvent2Detail1RCCY,
+      } = getSchMxRecognitionMetrics({
+        schMxEvents: baseCostConfig.schMxEvents || [],
+        periodStartDay,
+        periodEndDay,
+        reportingCurrency,
+        fxRates: revenueConfig.fxRates || baseCostConfig.fxRates || [],
+      });
 
       const engineFuelCostRCCY = sumNumericField(flightsInPeriod, "engineFuelCostRCCY");
       const apuFuelCostRCCY = sumNumericField(flightsInPeriod, "apuFuelCostRCCY");
@@ -1331,7 +1470,6 @@ const getDashboardData = async (req, res) => {
       const maintenanceReserveContributionRCCY = sumNumericField(flightsInPeriod, "maintenanceReserveContributionRCCY");
       const mrMonthlyRCCY = sumNumericField(flightsInPeriod, "mrMonthlyRCCY");
       const totalMrContributionRCCY = maintenanceReserveContributionRCCY + mrMonthlyRCCY;
-      const qualifyingSchMxEventsRCCY = sumNumericField(flightsInPeriod, "qualifyingSchMxEventsRCCY");
       const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
       const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
       const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
@@ -1387,6 +1525,11 @@ const getDashboardData = async (req, res) => {
         mrMonthlyRCCY,
         totalMrContributionRCCY,
         qualifyingSchMxEventsRCCY,
+        schMxEvent1RCCY,
+        schMxEvent1Detail1RCCY,
+        schMxEvent1Detail2RCCY,
+        schMxEvent2RCCY,
+        schMxEvent2Detail1RCCY,
         transitMaintenanceRCCY,
         otherMaintenanceRCCY,
         otherMaintenanceUtilisationRCCY,

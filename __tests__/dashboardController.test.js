@@ -298,6 +298,76 @@ test("monthly dashboard combines operational, POO revenue, costs, filters, and r
   assert.ok(body.riskExposure.currencies.USD[0].cost < 0);
 });
 
+test("daily dashboard recognizes non-capitalized scheduled maintenance on the event date only", async () => {
+  await Promise.all([
+    Flight.create([
+      {
+        userId: USER_ID,
+        date: utcDate(2026, 6, 10),
+        flight: "ATR10",
+        sector: "BOM-AMD",
+        depStn: "BOM",
+        arrStn: "AMD",
+        variant: "ATR72",
+        acftType: "ATR72",
+        aircraft: { registration: "VT-ATR", msn: "1600" },
+        seats: 70,
+        pax: 42,
+        bh: 2,
+        fh: 1.8,
+      },
+      {
+        userId: USER_ID,
+        date: utcDate(2026, 6, 12),
+        flight: "ATR12",
+        sector: "AMD-BOM",
+        depStn: "AMD",
+        arrStn: "BOM",
+        variant: "ATR72",
+        acftType: "ATR72",
+        aircraft: { registration: "VT-ATR", msn: "1600" },
+        seats: 70,
+        pax: 45,
+        bh: 2,
+        fh: 1.8,
+      },
+    ]),
+    RevenueConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      currencyCodes: ["INR", "USD"],
+      fxRates: [{ pair: "USD/INR", dateKey: "2026-06-01", rate: 96 }],
+    }),
+    CostConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      schMxEvents: [
+        {
+          date: "2026-06-11",
+          event: "48mo SI",
+          msnEsnApun: "1600",
+          pn: "ATR72",
+          snBn: "1600",
+          cost: 100000,
+          ccy: "USD",
+          remaining: 100000,
+          capitalisation: "N",
+        },
+      ],
+      allocationTable: [{ costCode: "QUALIFYINGSCHMXEVENTS", basis: "BH" }],
+    }),
+  ]);
+
+  const body = await getDashboard({ periodicity: "daily" });
+  const byDate = new Map(body.periods.map((period) => [period.dateKey, period.data]));
+
+  assert.equal(byDate.get("2026-06-10").qualifyingSchMxEventsRCCY, 0);
+  assert.equal(byDate.get("2026-06-11").qualifyingSchMxEventsRCCY, 9600000);
+  assert.equal(byDate.get("2026-06-11").totalMaintenanceCostRCCY, 9600000);
+  assert.equal(byDate.get("2026-06-12").qualifyingSchMxEventsRCCY, 0);
+  assert.equal(body.riskExposure.currencies.USD.find((row) => row.dateKey === "2026-06-30").cost, -100000);
+});
+
 test("dashboard filters by tag, flight, and label without crashing on no data", async () => {
   await seedDashboardFixture();
   const tag = await getDashboard({ userTag1: "Label A" });
