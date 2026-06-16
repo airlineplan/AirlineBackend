@@ -1682,6 +1682,49 @@ test("monthly maintenance reserve posts full contribution on first-of-month end 
   assert.equal(augustPosting, undefined);
 });
 
+test("monthly maintenance reserve drawdown off contribution date does not add contribution", () => {
+  const schedule = generateMaintenanceReserveScheduleWithContributions([
+    {
+      mrAccId: "MR-MONTH",
+      schMxEvent: "96mo SI",
+      acftRegn: "VT-AAA",
+      pn: "ATR72",
+      sn: "1600",
+      setBalance: 67000,
+      setRate: 4480,
+      asOnDate: "2026-05-01",
+      ccy: "USD",
+      driver: "Month",
+      endDate: "2026-07-31",
+    },
+  ], [], [], {
+    schMxEvents: [
+      {
+        id: "mx-drawdown",
+        mrAccId: "MR-MONTH",
+        drawdownDate: "2026-06-25",
+        mrDrawdown: 60000,
+        pn: "ATR72",
+        snBn: "1600",
+      },
+    ],
+  });
+
+  const junePosting = schedule.find((row) => row.date === "2026-06-01" && row.transactionType === "Monthly Contribution");
+  const drawdown = schedule.find((row) => row.date === "2026-06-25" && row.transactionType === "Drawdown");
+  const julyPosting = schedule.find((row) => row.date === "2026-07-01" && row.transactionType === "Monthly Contribution");
+
+  assert.equal(junePosting.contribution, 4480);
+  assert.equal(junePosting.balance, 71480);
+  assert.equal(drawdown.contribution, null);
+  assert.equal(drawdown.driverValue, null);
+  assert.equal(drawdown.drawdown, 60000);
+  assert.equal(drawdown.balance, 11480);
+  assert.equal(julyPosting.openingBalance, 11480);
+  assert.equal(julyPosting.contribution, 4480);
+  assert.equal(julyPosting.balance, 15960);
+});
+
 test("first scheduled maintenance event allocates its non-capitalized cost across prior flights", () => {
   const enriched = computeFlightCostsBatch([
     {

@@ -2149,7 +2149,10 @@ const generateMaintenanceReserveScheduleWithContributions = (
     let previousClosing = toNumber(setting.setBalance);
     const settingRows = schedule
       .filter((row) => scheduleRowMatchesReserveSetting(row, setting))
-      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+      .sort((a, b) => (
+        String(a.date || "").localeCompare(String(b.date || "")) ||
+        getScheduleTransactionOrder(a) - getScheduleTransactionOrder(b)
+      ));
 
     settingRows.forEach((row) => {
       const source = normalize(row.source);
@@ -2176,6 +2179,30 @@ const generateMaintenanceReserveScheduleWithContributions = (
           source: row.source || "generated",
         });
         previousClosing = openingBalance;
+        return;
+      }
+
+      if (normalize(row.transactionType) === "DRAWDOWN" || toNumber(row.drawdown || row.mrDrawdown) > 0) {
+        const drawdown = toNumber(row.drawdown || row.mrDrawdown);
+        const openingBalance = previousClosing;
+        const closingBalance = round2(openingBalance - drawdown);
+        Object.assign(row, {
+          driver: "",
+          rate: null,
+          driverValue: null,
+          monthNumber: null,
+          contribution: null,
+          openingBalance,
+          openingBal: openingBalance,
+          drawdown,
+          mrDrawdown: drawdown,
+          closingBalance,
+          closingBal: closingBalance,
+          balance: closingBalance,
+          source: row.source || "generated",
+          transactionType: row.transactionType || "Drawdown",
+        });
+        previousClosing = closingBalance;
         return;
       }
 
