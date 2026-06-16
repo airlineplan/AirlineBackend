@@ -1238,7 +1238,6 @@ const getOpeningBalanceAsOfDate = (scheduleRows = [], mrAccId = "", drawdownDate
       const rowDate = parseDate(row.date);
       if (!rowDate || rowDate.getTime() > targetTime) return false;
       if (mrAccId && normalize(row.mrAccId) !== normalize(mrAccId)) return false;
-      if (rowDate.getTime() === targetTime && normalize(row.transactionType) === "DRAWDOWN") return false;
       return true;
     })
     .sort((a, b) => (
@@ -3114,7 +3113,6 @@ const enrichAllocatedCosts = (flights, config) => {
 
   const schGroups = {};
   config.schMxEvents.forEach((row) => {
-    if (["Y", "YES", "TRUE", "1"].includes(row.capitalisation)) return;
     const key = [row.event, row.msnEsnApun || row.snBn || ""].join("|");
     if (!schGroups[key]) schGroups[key] = [];
     schGroups[key].push(row);

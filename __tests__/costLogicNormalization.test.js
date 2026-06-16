@@ -9,6 +9,7 @@ const {
   generateMaintenanceReserveScheduleWithContributions,
   serializeNavigationCostRows,
   getFlightSnContext,
+  hydrateSchMxEvents,
 } = require("../utils/costLogic");
 const { __private__: apuFuelPrivate } = require("../controller/apuFuelController");
 
@@ -157,6 +158,45 @@ test("normalizeCostConfig preserves maintenance UI fields for round-trip save/lo
   assert.equal(normalized.otherDoc[0].per, "BH");
   assert.equal(normalized.otherDoc[0].cost, 2);
   assert.equal(normalized.otherDoc[0].ccy, "INR");
+});
+
+test("scheduled maintenance MR balance hydrates from schedule closing balance as of drawdown date", () => {
+  const rows = hydrateSchMxEvents([
+    {
+      date: "2026-06-20",
+      event: "48MO SI",
+      mrAccId: "MR-1",
+      drawdownDate: "",
+      cost: 100000,
+      mrDrawdown: 0,
+    },
+    {
+      date: "2026-06-20",
+      event: "48MO SI",
+      mrAccId: "MR-1",
+      drawdownDate: "2026-06-20",
+      cost: 100000,
+      mrDrawdown: 10000,
+    },
+  ], {
+    maintenanceReserveRows: [
+      {
+        date: "2026-06-10",
+        mrAccId: "MR-1",
+        transactionType: "Monthly Contribution",
+        closingBalance: 50000,
+      },
+      {
+        date: "2026-06-20",
+        mrAccId: "MR-1",
+        transactionType: "Monthly Contribution",
+        closingBalance: 75000,
+      },
+    ],
+  });
+
+  assert.equal(rows[0].openingBal, 0);
+  assert.equal(rows[1].openingBal, 75000);
 });
 
 test("cost enrichment populates MSN, engine ESNs, and APUN from aircraft on-wing rows", () => {
@@ -1725,7 +1765,7 @@ test("monthly maintenance reserve drawdown off contribution date does not add co
   assert.equal(julyPosting.balance, 15960);
 });
 
-test("first scheduled maintenance event allocates its non-capitalized cost across prior flights", () => {
+test("first scheduled maintenance event allocates cost across prior flights regardless of capitalisation value", () => {
   const enriched = computeFlightCostsBatch([
     {
       flight: "ATR1",
@@ -1753,7 +1793,7 @@ test("first scheduled maintenance event allocates its non-capitalized cost acros
         pn: "ATR72",
         cost: 100000,
         ccy: "USD",
-        capitalisation: "No",
+        capitalisation: "Yes",
       },
     ],
     allocationTable: [{ costCode: "QUALIFYINGSCHMXEVENTS", basis: "BH" }],

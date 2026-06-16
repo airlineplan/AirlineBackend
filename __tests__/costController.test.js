@@ -12,6 +12,7 @@ const RevenueConfig = require("../model/revenueConfigSchema");
 const Flight = require("../model/flight");
 const Fleet = require("../model/fleet");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
+const GroundDay = require("../model/groundDay");
 const costController = require("../controller/costController");
 const pooController = require("../controller/pooController");
 
@@ -315,6 +316,56 @@ test("cost config populates generated scheduled maintenance occurrences and pres
   });
   assert.ok(res.body.data.schMxEvents.some((row) => row.event === "Manual event"));
   assert.ok(!res.body.data.schMxEvents.some((row) => row.event === "Stale generated event"));
+});
+
+test("cost config populates scheduled maintenance events from generated ground days", async () => {
+  const calendar = await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "1600",
+    calPn: "ATR72",
+    snBn: "1600",
+    schEvent: "48mo SI",
+    generatedOccurrences: [],
+  });
+
+  await GroundDay.create([
+    {
+      userId: USER_ID,
+      msn: "1600",
+      date: utcDate(2026, 6, 11),
+      event: "48mo SI",
+      source: "SCHEDULED_MAINTENANCE",
+      eventSeriesId: String(calendar._id),
+      occurrenceNumber: 1,
+      occurrenceId: `${calendar._id}:1`,
+    },
+    {
+      userId: USER_ID,
+      msn: "1600",
+      date: utcDate(2026, 6, 12),
+      event: "48mo SI",
+      source: "SCHEDULED_MAINTENANCE",
+      eventSeriesId: String(calendar._id),
+      occurrenceNumber: 1,
+      occurrenceId: `${calendar._id}:1`,
+    },
+  ]);
+
+  const res = createMockResponse();
+  await costController.getCostConfig({ user: { id: USER_ID } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.data.schMxEvents.length, 1);
+
+  const event = res.body.data.schMxEvents[0];
+  assert.equal(event.date, "2026-06-11");
+  assert.equal(event.msnEsnApun, "1600");
+  assert.equal(event.event, "48mo SI");
+  assert.equal(event.pn, "ATR72");
+  assert.equal(event.snBn, "1600");
+  assert.equal(event.source, "SCHEDULED_MAINTENANCE");
+  assert.equal(event.occurrenceId, `${calendar._id}:1`);
 });
 
 test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {

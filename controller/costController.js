@@ -4,6 +4,7 @@ const Flights = require("../model/flight");
 const Utilisation = require("../model/utilisation");
 const MaintenanceReserve = require("../model/maintenanceReserveSchema");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
+const GroundDay = require("../model/groundDay");
 const Fleet = require("../model/fleet");
 const {
   normalizeCostConfig,
@@ -64,8 +65,9 @@ const buildScheduledMaintenanceEventsForUser = async (userId) => {
   const calendars = await MaintenanceCalendar.find({ userId: String(userId) })
     .select("calMsn schEvent calPn snBn generatedOccurrences")
     .lean();
+  const calendarById = new Map(calendars.map((calendar) => [String(calendar?._id || ""), calendar]));
 
-  return calendars.flatMap((calendar) => {
+  const calendarOccurrenceRows = calendars.flatMap((calendar) => {
     const eventSeriesId = String(calendar?._id || "");
     return (Array.isArray(calendar?.generatedOccurrences) ? calendar.generatedOccurrences : [])
       .map((occurrence) => {
@@ -90,6 +92,49 @@ const buildScheduledMaintenanceEventsForUser = async (userId) => {
       })
       .filter(Boolean);
   });
+
+  const rowsByKey = new Map();
+  const addGeneratedRow = (row) => {
+    const occurrenceKey = getScheduledMaintenanceOccurrenceKey(row);
+    const detailKey = getScheduledMaintenanceDetailKey(row);
+    const key = occurrenceKey || (detailKey.replace(/\|/g, "") ? `detail:${detailKey}` : "");
+    if (!key || rowsByKey.has(key)) return;
+    rowsByKey.set(key, row);
+  };
+
+  calendarOccurrenceRows.forEach(addGeneratedRow);
+
+  const groundDays = await GroundDay.find({
+    userId: String(userId),
+    source: SCHEDULED_MAINTENANCE_SOURCE,
+  })
+    .select("msn date event eventSeriesId occurrenceNumber occurrenceId")
+    .sort({ date: 1, msn: 1, event: 1 })
+    .lean();
+
+  groundDays.forEach((groundDay) => {
+    const eventSeriesId = String(groundDay?.eventSeriesId || "");
+    const calendar = calendarById.get(eventSeriesId);
+    const date = moment.utc(groundDay?.date);
+    if (!date.isValid()) return;
+
+    const occurrenceNumber = Number(groundDay?.occurrenceNumber || 0);
+    const occurrenceId = String(groundDay?.occurrenceId || (eventSeriesId && occurrenceNumber ? `${eventSeriesId}:${occurrenceNumber}` : "")).trim();
+    addGeneratedRow({
+      date: date.format("YYYY-MM-DD"),
+      msnEsnApun: String(calendar?.calMsn || groundDay?.msn || "").trim(),
+      event: String(calendar?.schEvent || groundDay?.event || "").trim(),
+      pn: String(calendar?.calPn || "").trim(),
+      snBn: String(calendar?.snBn || "").trim(),
+      source: SCHEDULED_MAINTENANCE_SOURCE,
+      eventSeriesId,
+      occurrenceNumber,
+      occurrenceId,
+      _hydratedFields: ["date", "msnEsnApun", "event", "pn", "snBn"],
+    });
+  });
+
+  return [...rowsByKey.values()];
 };
 
 const mergeScheduledMaintenanceEvents = (savedRows = [], generatedRows = []) => {
