@@ -368,6 +368,92 @@ test("daily dashboard recognizes non-capitalized scheduled maintenance on the ev
   assert.equal(body.riskExposure.currencies.USD.find((row) => row.dateKey === "2026-06-30").cost, -100000);
 });
 
+test("daily dashboard recognizes rotable changes on the configured event date only", async () => {
+  await Promise.all([
+    Flight.create([
+      {
+        userId: USER_ID,
+        date: utcDate(2026, 6, 8),
+        flight: "ATR08",
+        sector: "BOM-AMD",
+        depStn: "BOM",
+        arrStn: "AMD",
+        variant: "ATR72",
+        acftType: "ATR72",
+        aircraft: { registration: "VT-AAB", msn: "1605" },
+        seats: 70,
+        pax: 42,
+        bh: 2,
+        fh: 1.8,
+      },
+      {
+        userId: USER_ID,
+        date: utcDate(2026, 6, 9),
+        flight: "ATR09",
+        sector: "AMD-BOM",
+        depStn: "AMD",
+        arrStn: "BOM",
+        variant: "ATR72",
+        acftType: "ATR72",
+        aircraft: { registration: "VT-AAB", msn: "1605" },
+        seats: 70,
+        pax: 45,
+        bh: 2,
+        fh: 1.8,
+      },
+      {
+        userId: USER_ID,
+        date: utcDate(2026, 6, 10),
+        flight: "ATR10",
+        sector: "BOM-AMD",
+        depStn: "BOM",
+        arrStn: "AMD",
+        variant: "ATR72",
+        acftType: "ATR72",
+        aircraft: { registration: "VT-AAB", msn: "1605" },
+        seats: 70,
+        pax: 42,
+        bh: 2,
+        fh: 1.8,
+      },
+    ]),
+    RevenueConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      currencyCodes: ["INR"],
+      fxRates: [],
+    }),
+    CostConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      rotableChanges: [
+        {
+          label: "EngineChange",
+          date: "2026-06-09",
+          pn: "PW127",
+          msn: "1605",
+          acftRegn: "VT-AAB",
+          position: "#1",
+          removedSN: "ED1209",
+          installedSN: "ED0095",
+          cost: 150000,
+          ccy: "INR",
+        },
+      ],
+      allocationTable: [{ costCode: "ROTABLECHANGES", basis: "FH" }],
+    }),
+  ]);
+
+  const body = await getDashboard({ periodicity: "daily" });
+  const byDate = new Map(body.periods.map((period) => [period.dateKey, period.data]));
+
+  assert.equal(byDate.get("2026-06-08").rotableChangesRCCY, 0);
+  assert.equal(byDate.get("2026-06-09").rotableChangesRCCY, 150000);
+  assert.equal(byDate.get("2026-06-09").totalMaintenanceCostRCCY, 150000);
+  assert.equal(byDate.get("2026-06-10").rotableChangesRCCY, 0);
+  assert.equal(body.riskExposure.currencies.INR.find((row) => row.dateKey === "2026-06-30").cost, -150000);
+});
+
 test("dashboard filters by tag, flight, and label without crashing on no data", async () => {
   await seedDashboardFixture();
   const tag = await getDashboard({ userTag1: "Label A" });

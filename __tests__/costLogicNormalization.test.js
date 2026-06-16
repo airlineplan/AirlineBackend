@@ -696,9 +696,104 @@ test("other mx monthly expenses apply once per matching aircraft in the fleet", 
     allocationTable: [{ costCode: "OTHERMXEXPENSES", basis: "FH" }],
   });
 
-  assert.equal(enriched[0].otherMxExpenses, 200);
-  assert.equal(enriched[1].otherMxExpenses, 200);
+  assert.equal(enriched[0].otherMxExpenses, 160);
+  assert.equal(enriched[1].otherMxExpenses, 240);
   assert.equal(enriched.reduce((sum, flight) => sum + flight.otherMxExpenses, 0), 400);
+});
+
+test("other mx monthly variant rows do not create a monthly pool for flights without an aircraft identity", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "ATR1",
+      date: "2026-06-10",
+      variant: "ATR72",
+      bh: 2,
+      fh: 2,
+      aircraft: { registration: "VT-AAA" },
+    },
+    {
+      flight: "ATR2",
+      date: "2026-06-20",
+      variant: "ATR72",
+      bh: 3,
+      fh: 3,
+      aircraft: { registration: "VT-AAB" },
+    },
+    {
+      flight: "ATR-UNASSIGNED",
+      date: "2026-06-25",
+      variant: "ATR72",
+      bh: 4,
+      fh: 4,
+    },
+  ], {
+    reportingCurrency: "INR",
+    otherMx: [
+      {
+        variant: "ATR72",
+        costPerMonth: 200,
+        ccy: "INR",
+        fromDate: "2026-06-01",
+        toDate: "2026-06-30",
+      },
+    ],
+    allocationTable: [{ costCode: "OTHERMXEXPENSES", basis: "FH" }],
+  });
+
+  assert.equal(enriched[0].otherMxExpenses, 160);
+  assert.equal(enriched[1].otherMxExpenses, 240);
+  assert.equal(enriched[2].otherMxExpenses, 0);
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.otherMxExpenses, 0), 400);
+});
+
+test("other mx monthly variant rows allocate the fleet monthly pool by month FH before weekly slicing", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "W1",
+      date: "2026-06-02",
+      variant: "ATR72",
+      acftType: "ATR72",
+      fh: 67,
+      aircraft: { registration: "VT-AAA" },
+    },
+    {
+      flight: "W2-A",
+      date: "2026-06-09",
+      variant: "ATR72",
+      acftType: "ATR72",
+      fh: 100,
+      aircraft: { registration: "VT-AAA" },
+    },
+    {
+      flight: "W2-B",
+      date: "2026-06-10",
+      variant: "ATR72",
+      acftType: "ATR72",
+      fh: 120,
+      aircraft: { registration: "VT-AAB" },
+    },
+  ], {
+    reportingCurrency: "INR",
+    fleet: [
+      { category: "Aircraft", type: "ATR72", variant: "ATR72", regn: "VT-AAA", sn: "1600", entry: "2026-06-01", exit: "2026-06-30" },
+      { category: "Aircraft", type: "ATR72", variant: "ATR72", regn: "VT-AAB", sn: "1605", entry: "2026-06-01", exit: "2026-06-30" },
+      { category: "Engine", type: "PW127", variant: "PW127", sn: "ED1200", entry: "2026-06-01", exit: "2026-06-30" },
+    ],
+    otherMx: [
+      {
+        pn: "ATR72",
+        costPerMonth: 30000,
+        ccy: "INR",
+        fromDate: "2026-06-01",
+        toDate: "2026-06-30",
+      },
+    ],
+    allocationTable: [{ costCode: "OTHERMXEXPENSES", basis: "FH" }],
+  });
+
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.otherMxExpenses, 0), 60000);
+  assert.equal(enriched[0].otherMxExpenses, 14006.97);
+  assert.equal(enriched.slice(1).reduce((sum, flight) => sum + flight.otherMxExpenses, 0), 45993.03);
 });
 
 test("monthly maintenance reserve uses the configured allocation-table basis", () => {
@@ -739,6 +834,56 @@ test("monthly maintenance reserve uses the configured allocation-table basis", (
 
   assert.equal(enriched[0].mrMonthly, 50);
   assert.equal(enriched[1].mrMonthly, 50);
+});
+
+test("monthly maintenance reserve posted next month allocates across prior-month flights by FH", () => {
+  const enriched = computeFlightCostsBatch([
+    {
+      flight: "W1",
+      date: "2026-06-02",
+      fh: 67,
+      aircraft: { registration: "VT-AAA", msn: "1600" },
+      variant: "ATR72",
+    },
+    {
+      flight: "W2-A",
+      date: "2026-06-09",
+      fh: 100,
+      aircraft: { registration: "VT-AAA", msn: "1600" },
+      variant: "ATR72",
+    },
+    {
+      flight: "W2-B",
+      date: "2026-06-10",
+      fh: 120,
+      aircraft: { registration: "VT-AAA", msn: "1600" },
+      variant: "ATR72",
+    },
+  ], {
+    reportingCurrency: "INR",
+    fxRates: [{ pair: "USD/INR", dateKey: "2026-07-01", rate: 96 }],
+    allocationTable: [{ costCode: "MRMONTHLY", basis: "FH" }],
+    maintenanceReserveSchedule: [
+      {
+        date: "2026-07-01",
+        mrAccId: "1",
+        schMxEvent: "48mo SI",
+        acftRegn: "VT-AAA",
+        pn: "ATR72",
+        sn: "1600",
+        driver: "MONTH",
+        rate: 4480,
+        driverValue: 1,
+        contribution: 4480,
+        ccy: "USD",
+      },
+    ],
+  });
+
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.mrMonthly, 0), 4480);
+  assert.equal(enriched.reduce((sum, flight) => sum + flight.mrMonthlyRCCY, 0), 430080);
+  assert.equal(enriched[0].mrMonthlyRCCY, 100401.6);
+  assert.equal(enriched.slice(1).reduce((sum, flight) => sum + flight.mrMonthlyRCCY, 0), 329678.4);
 });
 
 test("maintenance reserve contribution uses flight FH and the matched engine SN schedule rate", () => {

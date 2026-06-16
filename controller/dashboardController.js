@@ -578,6 +578,7 @@ const getDashboardDataLegacy = async (req, res) => {
         const resultData = [];
         const currencyExposureBuckets = {};
         addSchMxEventCostExposures(currencyExposureBuckets, schMxEvents);
+        addRotableChangeCostExposures(currencyExposureBuckets, costConfig.rotableChanges || []);
 
         for (const periodEndDate of periods) {
           let periodStartDate;
@@ -1172,6 +1173,36 @@ const getSchMxExpenseRccy = (row = {}, reportingCurrency, fxRates = []) => {
   );
 };
 
+const getRotableChangeRccy = (row = {}, reportingCurrency, fxRates = []) => {
+  const explicitRccy = toNumericValue(row.costRCCY ?? row.reportingAmount);
+  if (explicitRccy > 0) return roundCurrency(explicitRccy);
+
+  const rowDate = getCostConfigRowDate(row);
+  return convertLocalToReporting(
+    row.cost,
+    row.ccy || row.currency,
+    reportingCurrency,
+    normalizeDateKey(rowDate || row.date || row.month),
+    fxRates
+  );
+};
+
+const getRotableChangeRecognitionRccy = ({
+  rotableChanges = [],
+  periodStartDay,
+  periodEndDay,
+  reportingCurrency,
+  fxRates = [],
+} = {}) => (
+  (Array.isArray(rotableChanges) ? rotableChanges : []).reduce((total, row) => {
+    const rowDate = getCostConfigRowDate(row);
+    if (!rowDate || !periodStartDay || !periodEndDay) return total;
+    const eventDay = startOfUtcDay(rowDate);
+    if (eventDay < periodStartDay || eventDay > periodEndDay) return total;
+    return total + getRotableChangeRccy(row, reportingCurrency, fxRates);
+  }, 0)
+);
+
 const getSchMxRecognitionMetrics = ({
   schMxEvents = [],
   periodStartDay,
@@ -1254,7 +1285,6 @@ const addLocalCostExposures = (currencyBuckets, flight) => {
     "transitMaintenance",
     "otherMaintenance",
     "otherMxExpenses",
-    "rotableChanges",
     "crewAllowances",
     "layoverCost",
     "crewPositioningCost",
@@ -1276,6 +1306,15 @@ const addSchMxEventCostExposures = (currencyBuckets, schMxEvents = []) => {
     const expenseAmount = getSchMxExpenseAmount(row);
     if (!eventDate || expenseAmount <= 0) return;
     addCurrencyExposure(currencyBuckets, row.ccy || row.currency, eventDate, 0, expenseAmount);
+  });
+};
+
+const addRotableChangeCostExposures = (currencyBuckets, rotableChanges = []) => {
+  (Array.isArray(rotableChanges) ? rotableChanges : []).forEach((row) => {
+    const eventDate = getCostConfigRowDate(row);
+    const amount = toNumericValue(row?.cost);
+    if (!eventDate || amount <= 0) return;
+    addCurrencyExposure(currencyBuckets, row.ccy || row.currency, eventDate, 0, amount);
   });
 };
 
@@ -1356,12 +1395,18 @@ const getDashboardData = async (req, res) => {
 
     await backfillDashboardPooMasterFields(userId);
 
-    const [allRevenueRows, rawCostConfig, rawRevenueConfig, fleetRows, flightsForFxDates] = await Promise.all([
+    const dashboardFlightsQuery = {
+      ...flightsQuery,
+      date: { $gte: startDate, $lte: endOfUtcDay(endDate) },
+    };
+
+    const [allRevenueRows, rawCostConfig, rawRevenueConfig, fleetRows, flightsForFxDates, allFlightsRaw] = await Promise.all([
       PooTable.find(revenueQuery).lean(),
       CostConfig.findOne({ userId }).lean(),
       RevenueConfig.findOne({ userId }).lean(),
       Fleet.find({ userId }).lean(),
       Flights.find({ userId }).select("date").lean(),
+      Flights.find(dashboardFlightsQuery).lean(),
     ]);
 
     const revenueConfig = rawRevenueConfig || {};
@@ -1384,21 +1429,22 @@ const getDashboardData = async (req, res) => {
       }
     });
     addSchMxEventCostExposures(currencyExposureBuckets, baseCostConfig.schMxEvents || []);
+    addRotableChangeCostExposures(currencyExposureBuckets, baseCostConfig.rotableChanges || []);
+
+    const mrContext = await buildMaintenanceReserveContext(userId, allFlightsRaw);
+    const enrichedFlightsForDashboard = computeFlightCostsBatch(allFlightsRaw, {
+      ...baseCostConfig,
+      ...mergeMaintenanceContext(baseCostConfig, mrContext),
+      fleet: fleetRows,
+    });
 
     for (const periodEnd of periodEnds) {
       const periodStart = getPeriodStartForDashboard(periodEnd, periodicity);
       const periodStartDay = startOfUtcDay(periodStart);
       const periodEndDay = endOfUtcDay(periodEnd);
-      const periodFlightsQuery = {
-        ...flightsQuery,
-        date: { $gte: periodStartDay, $lte: periodEndDay },
-      };
-      const flightsRaw = await Flights.find(periodFlightsQuery).lean();
-      const mrContext = await buildMaintenanceReserveContext(userId, flightsRaw);
-      const flightsInPeriod = computeFlightCostsBatch(flightsRaw, {
-        ...baseCostConfig,
-        ...mergeMaintenanceContext(baseCostConfig, mrContext),
-        fleet: fleetRows,
+      const flightsInPeriod = enrichedFlightsForDashboard.filter((flight) => {
+        const flightDate = flight?.date ? startOfUtcDay(new Date(flight.date)) : null;
+        return flightDate && flightDate >= periodStartDay && flightDate <= periodEndDay;
       });
 
       const revenueInPeriod = allRevenueRows.filter((row) => {
@@ -1475,7 +1521,13 @@ const getDashboardData = async (req, res) => {
       const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
       const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
       const otherMaintenanceCalendarRCCY = otherMxExpensesRCCY;
-      const rotableChangesRCCY = sumNumericField(flightsInPeriod, "rotableChangesRCCY");
+      const rotableChangesRCCY = getRotableChangeRecognitionRccy({
+        rotableChanges: baseCostConfig.rotableChanges || [],
+        periodStartDay,
+        periodEndDay,
+        reportingCurrency,
+        fxRates: revenueConfig.fxRates || baseCostConfig.fxRates || [],
+      });
       const totalMaintenanceCostRCCY = totalMrContributionRCCY + qualifyingSchMxEventsRCCY + transitMaintenanceRCCY + otherMaintenanceRCCY + otherMxExpensesRCCY + rotableChangesRCCY;
       const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
       const layoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");
