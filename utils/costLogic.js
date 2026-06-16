@@ -72,9 +72,6 @@ const parseDate = (value) => {
   if (!value) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
 
-  const direct = new Date(value);
-  if (!Number.isNaN(direct.getTime())) return direct;
-
   if (typeof value === "string") {
     const ddmmyyyy = value.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
     if (ddmmyyyy) {
@@ -99,6 +96,9 @@ const parseDate = (value) => {
       }
     }
   }
+
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) return direct;
 
   return null;
 };
@@ -1173,7 +1173,9 @@ const generateMonthlyDates = (asOnDateValue, endDateValue) => {
   const endDate = parseDate(endDateValue);
   if (!asOnDate || !endDate) return [];
   const dates = [];
-  const finalPostingDate = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
+  const finalPostingDate = endDate.getUTCDate() === 1
+    ? new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1))
+    : new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
   for (
     let cursor = new Date(Date.UTC(asOnDate.getUTCFullYear(), asOnDate.getUTCMonth() + 1, 1));
     cursor <= finalPostingDate;
@@ -2157,6 +2159,23 @@ const generateMaintenanceReserveScheduleWithContributions = (
         const openingBalance = toNumber(row.openingBalance || row.openingBal || previousClosing);
         const closingBalance = toNumber(row.closingBalance || row.closingBal || row.balance || (openingBalance + contribution - drawdown));
         previousClosing = closingBalance;
+        return;
+      }
+
+      if (normalize(row.transactionType) === "OPENING BALANCE") {
+        const openingBalance = toNumber(row.openingBalance || row.openingBal || row.balance || previousClosing);
+        Object.assign(row, {
+          contribution: null,
+          drawdown: null,
+          mrDrawdown: null,
+          openingBalance,
+          openingBal: openingBalance,
+          closingBalance: openingBalance,
+          closingBal: openingBalance,
+          balance: openingBalance,
+          source: row.source || "generated",
+        });
+        previousClosing = openingBalance;
         return;
       }
 

@@ -1651,6 +1651,37 @@ test("monthly maintenance reserve schedule prorates partial first and last effec
   assert.equal(augustPosting.contribution, 67.74);
 });
 
+test("monthly maintenance reserve posts full contribution on first-of-month end date", () => {
+  const schedule = generateMaintenanceReserveScheduleWithContributions([
+    {
+      mrAccId: "MR-MONTH",
+      schMxEvent: "96mo SI",
+      acftRegn: "VT-AAA",
+      pn: "ATR72",
+      sn: "1600",
+      setBalance: 125532,
+      setRate: 2713,
+      asOnDate: "2026-06-01",
+      ccy: "USD",
+      driver: "Month",
+      annualEscl: 2.5,
+      anniversary: "2026-09-30",
+      endDate: "2026-07-01",
+    },
+  ], [], []);
+
+  const opening = schedule.find((row) => row.date === "2026-06-01" && row.transactionType === "Opening Balance");
+  const julyPosting = schedule.find((row) => row.date === "2026-07-01" && row.transactionType === "Monthly Contribution");
+  const augustPosting = schedule.find((row) => row.date === "2026-08-01" && row.transactionType === "Monthly Contribution");
+
+  assert.equal(opening.contribution, null);
+  assert.equal(opening.balance, 125532);
+  assert.equal(julyPosting.driverValue, 1);
+  assert.equal(julyPosting.contribution, 2713);
+  assert.equal(julyPosting.balance, 128245);
+  assert.equal(augustPosting, undefined);
+});
+
 test("first scheduled maintenance event allocates its non-capitalized cost across prior flights", () => {
   const enriched = computeFlightCostsBatch([
     {
