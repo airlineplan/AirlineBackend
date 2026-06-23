@@ -485,6 +485,8 @@ test("crew KPI average costs divide by matching diary occurrence counts", () => 
     { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-06T08:00:00"), endDateTime: d("2026-03-06T10:00:00"), category: "Positioning", subCategory: "Uploaded travel", sourceType: "OTHER_DUTY_ROSTER", positioningCost: 0, layoverCost: 0, currency: "INR" },
     { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-07T08:00:00"), endDateTime: d("2026-03-07T12:00:00"), category: "Break", subCategory: "Convenience", sourceType: "SYSTEM_BREAK", positioningCost: 0, layoverCost: 100, currency: "INR" },
     { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-08T08:00:00"), endDateTime: d("2026-03-08T20:00:00"), category: "Rest", subCategory: "Layover HOTAC", sourceType: "SYSTEM_REST", positioningCost: 0, layoverCost: 300, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-09T08:00:00"), endDateTime: d("2026-03-09T12:00:00"), category: "Break", subCategory: "Convenience", sourceType: "SYSTEM_BREAK", positioningCost: 0, layoverCost: 0, currency: "INR" },
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-10T08:00:00"), endDateTime: d("2026-03-10T20:00:00"), category: "Rest", subCategory: "Layover HOTAC", sourceType: "SYSTEM_REST", positioningCost: 0, layoverCost: 0, currency: "INR" },
   ];
 
   const response = calculateKpiResponse({ events, targets: [], periodicity: "MONTHLY", startDate: "2026-03-01" });
@@ -492,8 +494,34 @@ test("crew KPI average costs divide by matching diary occurrence counts", () => 
 
   assert.equal(value("positioningCount"), 2);
   assert.equal(value("positioningAverageCost"), 100);
+  assert.equal(value("layoverOccurrences"), 4);
+  assert.equal(value("layoverDurationMinutes"), 1920);
   assert.equal(value("layoverTotalCost"), 400);
-  assert.equal(value("layoverAverageCost"), 200);
-  assert.equal(value("convenienceAverageCost"), 100);
-  assert.equal(value("hotacAverageCost"), 300);
+  assert.equal(value("layoverAverageCost"), 100);
+  assert.equal(value("convenienceAverageCost"), 50);
+  assert.equal(value("hotacAverageCost"), 150);
+
+  const monthlyRows = buildMonthlyKpiSummaries({
+    userId: "user-1",
+    calculationRunId: "run-1",
+    events,
+    targets: [],
+  });
+  assert.equal(monthlyRows[0].layoverOccurrences, 4);
+  assert.equal(monthlyRows[0].layoverDurationMinutes, 1920);
+  assert.equal(monthlyRows[0].layoverAverageCost, 100);
+});
+
+test("crew KPI does not count HOTAC airport transfers as layover occurrences", () => {
+  const events = [
+    { crewMemberId: "c1", crewCode: "C1", role: "Captain", startDateTime: d("2026-03-05T08:00:00"), endDateTime: d("2026-03-05T09:00:00"), category: "Positioning", subCategory: "HOTAC to Airport Transfer", sourceType: "SYSTEM_POSITIONING", positioningCost: 0, layoverCost: 0, currency: "INR" },
+  ];
+
+  const response = calculateKpiResponse({ events, targets: [], periodicity: "MONTHLY", startDate: "2026-03-01" });
+  const value = (key) => response.metrics.find((metric) => metric.key === key).values[0].value;
+
+  assert.equal(value("positioningCount"), 1);
+  assert.equal(value("layoverOccurrences"), 0);
+  assert.equal(value("layoverDurationMinutes"), 0);
+  assert.equal(value("hotacTotalCost"), 0);
 });

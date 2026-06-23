@@ -902,9 +902,21 @@ const isPositioningEvent = (event) => {
   return category.includes("position") || /position|deadhead|return to base/.test(subCategory);
 };
 
-const isConvenienceEvent = (event) => lowerEventText(event).includes("convenience");
+const isConvenienceEvent = (event) => (
+  normalizeText(event.subCategory).toLowerCase() === "convenience" ||
+  (event.sourceType === "SYSTEM_LAYOVER" && lowerEventText(event).includes("convenience"))
+);
 
-const isHotacEvent = (event) => lowerEventText(event).includes("hotac");
+const isHotacEvent = (event) => (
+  normalizeText(event.subCategory).toLowerCase() === "layover hotac" ||
+  (event.sourceType === "SYSTEM_LAYOVER" && lowerEventText(event).includes("hotac"))
+);
+
+const isLayoverEvent = (event) => (
+  event.sourceType === "SYSTEM_LAYOVER" ||
+  isConvenienceEvent(event) ||
+  isHotacEvent(event)
+);
 
 const addCrewRoleForTarget = (crewRoles, event) => {
   const crewKey = normalizeUpper(event.crewCode) || String(event.crewMemberId || "");
@@ -971,16 +983,16 @@ const buildMonthlyKpiSummaries = ({ userId, calculationRunId, events, targets })
     row.totalRpMinutes += Number(event.rpMinutes || 0);
     if (event.sourceType === "FLIGHT_ROSTER") row.totalLandings += 1;
     if (isPositioningEvent(event)) row.positioningCount += 1;
-    if (Number(event.layoverCost || 0) > 0) {
+    if (isLayoverEvent(event)) {
       row.layoverOccurrences += 1;
       row.layoverDurationMinutes += eventDuration(event);
       row.layoverTotalCost += Number(event.layoverCost || 0);
     }
-    if (isConvenienceEvent(event) && Number(event.layoverCost || 0) > 0) {
+    if (isConvenienceEvent(event)) {
       row.convenienceCount += 1;
       row.convenienceTotalCost += Number(event.layoverCost || 0);
     }
-    if (isHotacEvent(event) && Number(event.layoverCost || 0) > 0) {
+    if (isHotacEvent(event)) {
       row.hotacCount += 1;
       row.hotacTotalCost += Number(event.layoverCost || 0);
     }
@@ -1260,16 +1272,16 @@ const calculateKpiResponse = ({ events, targets, periodicity = "MONTHLY", startD
       acc.totalRpMinutes += Number(event.rpMinutes || 0);
       if (event.sourceType === "FLIGHT_ROSTER") acc.totalLandings += 1;
       if (isPositioningEvent(event)) acc.positioningCount += 1;
-      if (Number(event.layoverCost || 0) > 0) {
+      if (isLayoverEvent(event)) {
         acc.layoverOccurrences += 1;
         acc.layoverDurationMinutes += eventDuration(event);
         acc.layoverTotalCost += Number(event.layoverCost || 0);
       }
-      if (isConvenienceEvent(event) && Number(event.layoverCost || 0) > 0) {
+      if (isConvenienceEvent(event)) {
         acc.convenienceCount += 1;
         acc.convenienceTotalCost += Number(event.layoverCost || 0);
       }
-      if (isHotacEvent(event) && Number(event.layoverCost || 0) > 0) {
+      if (isHotacEvent(event)) {
         acc.hotacCount += 1;
         acc.hotacTotalCost += Number(event.layoverCost || 0);
       }
