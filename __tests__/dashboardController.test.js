@@ -14,6 +14,7 @@ const RevenueConfig = require("../model/revenueConfigSchema");
 const Flight = require("../model/flight");
 const Fleet = require("../model/fleet");
 const PooTable = require("../model/pooTable");
+const { CrewCalculationRun, CrewDiaryEvent } = require("../model/crewSchemas");
 
 const USER_ID = new mongoose.Types.ObjectId().toString();
 
@@ -296,6 +297,115 @@ test("monthly dashboard combines operational, POO revenue, costs, filters, and r
   assert.ok(body.riskExposure.currencies.INR[0].cost < 0);
   assert.equal(body.riskExposure.currencies.USD[0].revenue, 1000);
   assert.ok(body.riskExposure.currencies.USD[0].cost < 0);
+});
+
+test("monthly dashboard keeps stored crew direct costs during cost enrichment", async () => {
+  await Promise.all([
+    Flight.create({
+      userId: USER_ID,
+      date: utcDate(2026, 3, 14),
+      sector: "DEL-BOM",
+      depStn: "DEL",
+      arrStn: "BOM",
+      flight: "CR100",
+      variant: "A320",
+      domIntl: "dom",
+      seats: 180,
+      pax: 150,
+      bh: 2,
+      fh: 1.8,
+      crewAllowances: 1250,
+      crewAllowancesCCY: "INR",
+      crewAllowancesRCCY: 1250,
+      layoverCost: 800,
+      layoverCostCCY: "INR",
+      layoverCostRCCY: 800,
+      crewPositioningCost: 450,
+      crewPositioningCostCCY: "INR",
+      crewPositioningCostRCCY: 450,
+    }),
+    RevenueConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      currencyCodes: ["INR"],
+      fxRates: [],
+    }),
+  ]);
+
+  const body = await getDashboard();
+  const march = body.periods[0].data;
+
+  assert.equal(march.crewAllowancesRCCY, 1250);
+  assert.equal(march.layoverCostRCCY, 800);
+  assert.equal(march.crewPositioningCostRCCY, 450);
+  assert.equal(march.crewTotalDirectCostRCCY, 2500);
+  assert.equal(march.totalDocRCCY, 2500);
+});
+
+test("monthly dashboard falls back to latest completed crew run costs when flight crew costs are empty", async () => {
+  const crewMemberId = new mongoose.Types.ObjectId();
+  const run = await CrewCalculationRun.create({
+    userId: USER_ID,
+    status: "COMPLETED",
+    startedAt: utcDate(2026, 3, 1),
+    completedAt: utcDate(2026, 3, 1),
+  });
+
+  await Promise.all([
+    Flight.create({
+      userId: USER_ID,
+      date: utcDate(2026, 3, 20),
+      sector: "DEL-BOM",
+      depStn: "DEL",
+      arrStn: "BOM",
+      flight: "CR200",
+      variant: "A320",
+      domIntl: "dom",
+      seats: 180,
+      pax: 150,
+      bh: 2,
+      fh: 1.8,
+    }),
+    RevenueConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "INR",
+      currencyCodes: ["INR"],
+      fxRates: [],
+    }),
+    CrewDiaryEvent.create({
+      userId: USER_ID,
+      calculationRunId: run._id,
+      crewMemberId,
+      crewCode: "C200",
+      crewName: "Crew Two Hundred",
+      role: "Captain",
+      startDateTime: new Date(Date.UTC(2026, 2, 20, 8, 0)),
+      endDateTime: new Date(Date.UTC(2026, 2, 20, 10, 0)),
+      displayDate: "2026-03-20",
+      location: "BOM",
+      departureStation: "DEL",
+      arrivalStation: "BOM",
+      flightNumber: "CR200",
+      category: "Flight Duty",
+      subCategory: "Operated Flight",
+      dpCost: 100,
+      fdpCost: 200,
+      ftCost: 300,
+      layoverCost: 400,
+      positioningCost: 500,
+      currency: "INR",
+      sourceType: "FLIGHT_ROSTER",
+    }),
+  ]);
+
+  const body = await getDashboard();
+  const march = body.periods[0].data;
+
+  assert.equal(march.crewAllowancesRCCY, 600);
+  assert.equal(march.layoverCostRCCY, 400);
+  assert.equal(march.crewPositioningCostRCCY, 500);
+  assert.equal(march.crewTotalDirectCostRCCY, 1500);
+  assert.equal(march.totalDocRCCY, 1500);
 });
 
 test("daily dashboard recognizes non-capitalized scheduled maintenance on the event date only", async () => {

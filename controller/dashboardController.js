@@ -13,6 +13,7 @@ const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
 const CostConfig = require("../model/costConfigSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
+const { CrewCalculationRun, CrewDiaryEvent } = require("../model/crewSchemas");
 const csv = require("csvtojson");
 const xlsx = require("xlsx");
 const exceljs = require("exceljs");
@@ -1299,6 +1300,44 @@ const addLocalCostExposures = (currencyBuckets, flight) => {
   });
 };
 
+const shouldUseCrewRunFallback = (label, filters = {}) => (
+  label === "both" &&
+  Object.values(filters).every((values) => !Array.isArray(values) || values.length === 0)
+);
+
+const getCrewEventAmounts = (event = {}) => ({
+  allowances: toNumericValue(event.dpCost) + toNumericValue(event.fdpCost) + toNumericValue(event.ftCost),
+  layover: toNumericValue(event.layoverCost),
+  positioning: toNumericValue(event.positioningCost),
+});
+
+const summarizeCrewDiaryCostsRccy = (events = [], reportingCurrency, fxRates = []) => (
+  events.reduce((totals, event) => {
+    const eventDateKey = normalizeDateKey(event.startDateTime);
+    const eventCurrency = normalizeCurrencyCode(event.currency || reportingCurrency);
+    const amounts = getCrewEventAmounts(event);
+    totals.crewAllowancesRCCY += convertLocalToReporting(amounts.allowances, eventCurrency, reportingCurrency, eventDateKey, fxRates);
+    totals.layoverCostRCCY += convertLocalToReporting(amounts.layover, eventCurrency, reportingCurrency, eventDateKey, fxRates);
+    totals.crewPositioningCostRCCY += convertLocalToReporting(amounts.positioning, eventCurrency, reportingCurrency, eventDateKey, fxRates);
+    return totals;
+  }, {
+    crewAllowancesRCCY: 0,
+    layoverCostRCCY: 0,
+    crewPositioningCostRCCY: 0,
+  })
+);
+
+const addCrewDiaryCostExposures = (currencyBuckets, events = [], components = {}) => {
+  events.forEach((event) => {
+    const ccy = normalizeCurrencyCode(event.currency);
+    if (!ccy) return;
+    const amounts = getCrewEventAmounts(event);
+    if (components.allowances) addCurrencyExposure(currencyBuckets, ccy, event.startDateTime, 0, amounts.allowances);
+    if (components.layover) addCurrencyExposure(currencyBuckets, ccy, event.startDateTime, 0, amounts.layover);
+    if (components.positioning) addCurrencyExposure(currencyBuckets, ccy, event.startDateTime, 0, amounts.positioning);
+  });
+};
+
 const addSchMxEventCostExposures = (currencyBuckets, schMxEvents = []) => {
   (Array.isArray(schMxEvents) ? schMxEvents : []).forEach((row) => {
     if (isCapitalizedSchMxEvent(row)) return;
@@ -1437,6 +1476,17 @@ const getDashboardData = async (req, res) => {
       ...mergeMaintenanceContext(baseCostConfig, mrContext),
       fleet: fleetRows,
     });
+    const useCrewRunFallback = shouldUseCrewRunFallback(label, filters);
+    const latestCrewRun = useCrewRunFallback
+      ? await CrewCalculationRun.findOne({ userId, status: "COMPLETED" }).sort({ createdAt: -1 }).select("_id").lean()
+      : null;
+    const crewDiaryEvents = latestCrewRun?._id
+      ? await CrewDiaryEvent.find({
+        userId,
+        calculationRunId: latestCrewRun._id,
+        startDateTime: { $gte: startDate, $lte: endOfUtcDay(endDate) },
+      }).lean()
+      : [];
 
     for (const periodEnd of periodEnds) {
       const periodStart = getPeriodStartForDashboard(periodEnd, periodicity);
@@ -1450,6 +1500,10 @@ const getDashboardData = async (req, res) => {
       const revenueInPeriod = allRevenueRows.filter((row) => {
         const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
         return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
+      });
+      const crewDiaryEventsInPeriod = crewDiaryEvents.filter((event) => {
+        const eventDate = event?.startDateTime ? startOfUtcDay(new Date(event.startDateTime)) : null;
+        return eventDate && eventDate >= periodStartDay && eventDate <= periodEndDay;
       });
 
       flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight));
@@ -1529,9 +1583,23 @@ const getDashboardData = async (req, res) => {
         fxRates: revenueConfig.fxRates || baseCostConfig.fxRates || [],
       });
       const totalMaintenanceCostRCCY = totalMrContributionRCCY + qualifyingSchMxEventsRCCY + transitMaintenanceRCCY + otherMaintenanceRCCY + otherMxExpensesRCCY + rotableChangesRCCY;
-      const crewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
-      const layoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");
-      const crewPositioningCostRCCY = sumNumericField(flightsInPeriod, "crewPositioningCostRCCY");
+      const storedCrewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
+      const storedLayoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");
+      const storedCrewPositioningCostRCCY = sumNumericField(flightsInPeriod, "crewPositioningCostRCCY");
+      const crewDiaryCostsRCCY = summarizeCrewDiaryCostsRccy(
+        crewDiaryEventsInPeriod,
+        reportingCurrency,
+        revenueConfig.fxRates || baseCostConfig.fxRates || []
+      );
+      const crewFallbackComponents = {
+        allowances: storedCrewAllowancesRCCY === 0 && crewDiaryCostsRCCY.crewAllowancesRCCY !== 0,
+        layover: storedLayoverCostRCCY === 0 && crewDiaryCostsRCCY.layoverCostRCCY !== 0,
+        positioning: storedCrewPositioningCostRCCY === 0 && crewDiaryCostsRCCY.crewPositioningCostRCCY !== 0,
+      };
+      const crewAllowancesRCCY = crewFallbackComponents.allowances ? crewDiaryCostsRCCY.crewAllowancesRCCY : storedCrewAllowancesRCCY;
+      const layoverCostRCCY = crewFallbackComponents.layover ? crewDiaryCostsRCCY.layoverCostRCCY : storedLayoverCostRCCY;
+      const crewPositioningCostRCCY = crewFallbackComponents.positioning ? crewDiaryCostsRCCY.crewPositioningCostRCCY : storedCrewPositioningCostRCCY;
+      addCrewDiaryCostExposures(currencyExposureBuckets, crewDiaryEventsInPeriod, crewFallbackComponents);
       const crewTotalDirectCostRCCY = crewAllowancesRCCY + layoverCostRCCY + crewPositioningCostRCCY;
       const airportRCCY = sumNumericField(flightsInPeriod, "airportRCCY");
       const navigationRCCY = sumNumericField(flightsInPeriod, "navigationRCCY");

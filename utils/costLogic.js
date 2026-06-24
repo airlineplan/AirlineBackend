@@ -31,6 +31,12 @@ const COST_FIELDS = [
   "totalCost",
 ];
 
+const PRESERVED_FLIGHT_COST_FIELDS = [
+  "crewAllowances",
+  "layoverCost",
+  "crewPositioningCost",
+];
+
 const toNumber = (value) => {
   if (value === null || value === undefined || value === "") return 0;
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
@@ -2470,13 +2476,34 @@ const applyCostField = (flight, field, amount, currency, reportingCurrency, expl
   flight[`${field}RCCY`] = convertToRccy(numeric, currency, reportingCurrency, explicitRccy, effectiveFxRates, date || flight?.date, flight);
 };
 
-const initializeFlight = (flight, reportingCurrency) => {
+const preserveFlightCostField = (target, source, field, reportingCurrency, fxRates = []) => {
+  const sourceAmount = source?.[field];
+  const sourceCurrency = source?.[`${field}CCY`];
+  const sourceRccy = source?.[`${field}RCCY`];
+  const hasStoredValue = [sourceAmount, sourceCurrency, sourceRccy].some((value) => value !== undefined && value !== null && value !== "");
+  if (!hasStoredValue) return;
+
+  const amount = round2(sourceAmount);
+  const currency = sourceCurrency || (amount ? reportingCurrency : "");
+  target[field] = amount;
+  target[`${field}CCY`] = currency || "";
+  target[`${field}RCCY`] = sourceRccy !== undefined && sourceRccy !== null && sourceRccy !== ""
+    ? round2(sourceRccy)
+    : convertToRccy(amount, currency, reportingCurrency, 0, fxRates, source?.date, source);
+};
+
+const initializeFlight = (flight, config) => {
+  const reportingCurrency = config.reportingCurrency;
   const next = { ...flight };
 
   COST_FIELDS.forEach((field) => {
     next[field] = 0;
     next[`${field}CCY`] = "";
     next[`${field}RCCY`] = 0;
+  });
+
+  PRESERVED_FLIGHT_COST_FIELDS.forEach((field) => {
+    preserveFlightCostField(next, flight, field, reportingCurrency, config.fxRates || []);
   });
 
   next.engineFuel = 0;
@@ -3006,9 +3033,6 @@ const enrichDirectCosts = (flights, config) => {
       flight.costDebug.otherDoc = { matchingRows: directOtherDocRows, amounts: directOtherDocAmounts.map(round2) };
     }
 
-    applyCostField(flight, "crewAllowances", 0, "", config.reportingCurrency, 0);
-    applyCostField(flight, "layoverCost", 0, "", config.reportingCurrency, 0);
-    applyCostField(flight, "crewPositioningCost", 0, "", config.reportingCurrency, 0);
   });
 };
 
@@ -3335,7 +3359,7 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
 
   const debugCosts = Boolean(rawConfig?.debugCosts || rawConfig?.debug);
   const flights = (inputFlights || []).map((flight) => {
-    const next = initializeFlight(flight, config.reportingCurrency);
+    const next = initializeFlight(flight, config);
     next.__costFxRates = config.fxRates || [];
     if (debugCosts) {
       next.costDebug = {
