@@ -84,7 +84,7 @@ const createNewFlights = async (userId, flightNumber, depStn, std, sta, arrStn, 
   await Flights.insertMany(newFlights);
   // await populateNetworkTable(newFlights);
 };
-const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNumber, depStn, datesInRange, flightNumber, std, sta, variant, rotationNumber, existingFlights, rotationDetailsId) => {
+const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNumber, depStn, datesInRange, flightNumber, std, sta, variant, rotationNumber, existingFlights) => {
   try {
 
 
@@ -157,7 +157,10 @@ const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNu
 
     // Step 3: Repopulate Master table
     const { AddDataFromRotations } = require('./dataController');
-    await AddDataFromRotations(req, res, rotationDetailsId);
+    const addDataResult = await AddDataFromRotations(req, res);
+    if (!addDataResult?.success) {
+      return { success: false };
+    }
 
     return { success: true };
   } catch (error) {
@@ -165,7 +168,7 @@ const eraseAndRepopulateMasterTable = async (req, res, userId, arrStn, bt, depNu
     return { success: false };
   }
 };
-const addRotationDetails = async (req, res) => {
+const addRotationDetails = async (req) => {
   const userId = req.user.id;
   const {
     rotationNumber,
@@ -202,11 +205,11 @@ const addRotationDetails = async (req, res) => {
     const savedRotationDetails = await newRotationDetails.save();
 
     console.log("Rotation Details added");
-    return savedRotationDetails._id;
+    return savedRotationDetails;
     // res.status(201).json({ message: `Rotation Details added` });
   } catch (error) {
     console.log(error);
-    res.status(500).json({ error: "An error occurred while creating data" });
+    throw error;
   }
 };
 const deleteRotation = async (userId, rotationNumber, totalDepNumber) => {
@@ -403,6 +406,16 @@ const updateRotationSummary = async (req, res) => {
   }
 };
 const addRotationDetailsFlgtChange = async (req, res) => {
+  let savedRotationDetails = null;
+  const rollbackSavedRotationDetails = async () => {
+    if (!savedRotationDetails?._id) return;
+    try {
+      await RotationDetails.deleteOne({ _id: savedRotationDetails._id, userId: req.user.id });
+    } catch (rollbackError) {
+      console.error('Error rolling back rotation detail:', rollbackError);
+    }
+  };
+
   try {
 
     const userId = req.user.id;
@@ -546,19 +559,22 @@ const addRotationDetailsFlgtChange = async (req, res) => {
 
     if (existingFlights.length === 0) {
       // Case A: No row is found — populate new flights in Master table
-      const rotationDetailsId = await addRotationDetails(req, res);
+      savedRotationDetails = await addRotationDetails(req);
       const { AddDataFromRotations } = require('./dataController');
-      await AddDataFromRotations(req, res, rotationDetailsId);
+      const addDataResult = await AddDataFromRotations(req, res);
+      if (!addDataResult?.success) {
+        await rollbackSavedRotationDetails();
+        return res.status(500).json({ message: 'Error creating rotation network data', flightNumber });
+      }
 
       // Update RotationSummary totals
       await updateRotationSummaryTotals(userId, rotationNumber);
 
-      return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.' });
+      return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.', data: savedRotationDetails });
 
     } else if ((networkIdToCheck && isSubset && isDateRangeValid) || (existingFlightsIds.every(id => allFlightsIds.includes(id)) && allDatesInRange)) {
       // Case B: Rows found for all dates — update rotationNumber in existing flights
-      const rotationDetailsId = await addRotationDetails(req, res);
-      const { AddDataFromRotations } = require('./dataController');
+      savedRotationDetails = await addRotationDetails(req);
 
       const historyPromises = existingFlights.map(async (flight) => {
         const flightHistory = new FlightHistory({
@@ -579,21 +595,21 @@ const addRotationDetailsFlgtChange = async (req, res) => {
       // Update RotationSummary totals
       await updateRotationSummaryTotals(userId, rotationNumber);
 
-      return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.' });
+      return res.status(200).json({ message: 'RotationNumber updated successfully for existing flights.', data: savedRotationDetails });
     } else {
       // Case C: Rows found on at least one date — erase and repopulate
-      const rotationDetailsId = await addRotationDetails(req, res);
-
       const result = await eraseAndRepopulateMasterTable(
         req, res, userId, arrStn, bt, depNumber, depStn,
         datesInRange, flightNumber, std, sta, variant,
-        rotationNumber, existingFlights, rotationDetailsId
+        rotationNumber, existingFlights
       );
 
       if (result.success) {
+        savedRotationDetails = await addRotationDetails(req);
+
         // Update RotationSummary totals
         await updateRotationSummaryTotals(userId, rotationNumber);
-        return res.status(200).json({ message: 'Master table erased and repopulated successfully.' });
+        return res.status(200).json({ message: 'Master table erased and repopulated successfully.', data: savedRotationDetails });
       } else {
         return res.status(500).json({ message: 'Error erasing and repopulating master table', flightNumber });
       }
@@ -601,6 +617,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
 
   } catch (error) {
     console.error('Error modifying flights:', error);
+    await rollbackSavedRotationDetails();
     return res.status(500).json({ success: false, message: 'An error occurred while modifying flights.' });
   }
 };

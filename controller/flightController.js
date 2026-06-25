@@ -182,7 +182,18 @@ const getFlightsWoRotations = async (req, res) => {
   try {
     const id = req.user.id;
 
-    const { allowedDeptStn, allowedStdLt, selectedVariant, effToDate, effFromDate, dow } = req.body;
+    const {
+      allowedDeptStn,
+      allowedStdLt,
+      selectedVariant,
+      effToDate,
+      effFromDate,
+      dow,
+      page = 1,
+      limit = 8,
+      filters = {},
+      sort = {},
+    } = req.body;
     const dowRegex = regexForFindingSuperset(dow);
     // Parse dates — no UTC offset correction needed (dates are already calendar strings)
     const fromDate = new Date(effFromDate);
@@ -201,27 +212,31 @@ const getFlightsWoRotations = async (req, res) => {
       effToDt: { $gte: new Date(formattedFromDate) },
       dow: { $regex: dowRegex, $options: 'i' }
     };
-    const datesArray = [];
 
     const dowNums = dow.split('').map(Number); // e.g. [1,2,3,4,5]
-
-    // Walk each calendar day in [fromDate, toDate]
-    for (
-      let date = new Date(fromDate);
-      date <= toDate;
-      date.setUTCDate(date.getUTCDate() + 1)
-    ) {
-      // JS getDay(): 0=Sun,1=Mon,...,6=Sat
-      // System DOW:  1=Mon,...,6=Sat,7=Sun
-      const jsDow = date.getUTCDay();
-      const sysDow = jsDow === 0 ? 7 : jsDow; // convert Sunday 0→7
-      if (dowNums.includes(sysDow)) {
-        datesArray.push(new Date(date));
+    const daysOfWeekStrings = dowNums.map(day => {
+      switch (day) {
+        case 1:
+          return "Mon";
+        case 2:
+          return "Tue";
+        case 3:
+          return "Wed";
+        case 4:
+          return "Thu";
+        case 5:
+          return "Fri";
+        case 6:
+          return "Sat";
+        case 7:
+          return "Sun";
+        default:
+          return null;
       }
-    }
+    }).filter(Boolean);
 
-    // Add filter for flight dates based on dateArray
-    filter.date = { $in: datesArray };
+    filter.date = { $gte: fromDate, $lte: toDate };
+    filter.day = { $in: daysOfWeekStrings };
 
     // Add optional filters if available
     if (allowedDeptStn) {
@@ -231,8 +246,74 @@ const getFlightsWoRotations = async (req, res) => {
       filter.std = { $gte: allowedStdLt };
     }
 
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const filterFieldMap = {
+      day: "day",
+      flight: "flight",
+      depStn: "depStn",
+      std: "std",
+      bt: "bt",
+      sta: "sta",
+      arrStn: "arrStn",
+      variant: "variant",
+    };
+    const additionalFilters = [];
 
-    const data = await Flights.find(filter).sort({ flight: 1, date: 1 });
+    Object.entries(filters || {}).forEach(([key, value]) => {
+      if (!value) return;
+      const trimmedValue = String(value).trim();
+      if (!trimmedValue) return;
+
+      if (key === "date") {
+        const parsedDate = new Date(trimmedValue);
+        if (!Number.isNaN(parsedDate.getTime())) {
+          parsedDate.setUTCHours(0, 0, 0, 0);
+          const nextDate = new Date(parsedDate);
+          nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+          additionalFilters.push({ date: { $gte: parsedDate, $lt: nextDate } });
+        }
+        return;
+      }
+
+      const field = filterFieldMap[key];
+      if (field) {
+        additionalFilters.push({ [field]: { $regex: escapeRegex(trimmedValue), $options: "i" } });
+      }
+    });
+    if (additionalFilters.length > 0) {
+      filter.$and = additionalFilters;
+    }
+
+    const sortFieldMap = {
+      date: "date",
+      day: "day",
+      flight: "flight",
+      depStn: "depStn",
+      std: "std",
+      bt: "bt",
+      sta: "sta",
+      arrStn: "arrStn",
+      variant: "variant",
+    };
+    const sortField = sortFieldMap[sort.column] || "flight";
+    const sortDirection = sort.direction === "Down" ? -1 : 1;
+    const sortQuery = sortField === "flight"
+      ? { flight: sortDirection, date: 1 }
+      : { [sortField]: sortDirection, flight: 1, date: 1 };
+
+    const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 8, 1), 100);
+    const skip = (pageNumber - 1) * pageSize;
+
+    const [data, total] = await Promise.all([
+      Flights.find(filter)
+        .select("date day flight depStn std bt sta arrStn variant timeZone")
+        .sort(sortQuery)
+        .skip(skip)
+        .limit(pageSize)
+        .lean(),
+      Flights.countDocuments(filter),
+    ]);
 
 
     let timeZone;
@@ -240,12 +321,16 @@ const getFlightsWoRotations = async (req, res) => {
       timeZone = data[0].timeZone;
     }
 
-    if (timeZone) {
-      startDate = timeZoneCorrectedDates(startDate, timeZone);
-      endDate = timeZoneCorrectedDates(endDate, timeZone);
-    }
-
-    res.status(200).json({ data, timeZone });
+    res.status(200).json({
+      data,
+      timeZone,
+      pagination: {
+        page: pageNumber,
+        limit: pageSize,
+        total,
+        totalPages: Math.max(Math.ceil(total / pageSize), 1),
+      }
+    });
   } catch (error) {
     console.error(error);
 
