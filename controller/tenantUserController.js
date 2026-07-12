@@ -248,6 +248,7 @@ const deleteTenantUser = async (req, res) => {
 
 module.exports = {
   bootstrapTenantAdmin,
+  createUserRecord,
   createTenantUser,
   deleteTenantUser,
   getBootstrapToken,

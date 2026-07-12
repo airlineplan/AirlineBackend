@@ -1,7 +1,10 @@
 const mongoose = require("mongoose");
 const Fleet = require("../model/fleet");
 
-const DB = process.env.MONGO_URI || "mongodb+srv://neeladrinathsarangi:kBhaZHXuGOIUgt9y@cluster0.n0cx0yj.mongodb.net/?retryWrites=true&w=majority";
+const DB = process.env.MONGO_URI;
+if (!DB) {
+  throw new Error("MONGO_URI is required");
+}
 
 async function main() {
   try {

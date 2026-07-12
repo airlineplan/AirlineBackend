@@ -20,15 +20,12 @@ const Connections = require('../model/connectionSchema');
    REDIS + QUEUE CONFIGURATION
 ──────────────────────────────────────────── */
 
-const REDIS_CONFIG = {
-  host: 'redis-12693.c264.ap-south-1-1.ec2.redns.redis-cloud.com',
-  port: 12693,
-  username: 'default',
-  password: '5NJA5j0k3sDz6lKVJlsm0GoCA4DWecHU'
-};
+const redisUrl = process.env.REDIS_URL;
+if (!redisUrl && process.env.NODE_ENV === "production") {
+  throw new Error("REDIS_URL is required for connection processing");
+}
 
-const flightQueue = new Bull('flight-processing-v2', {
-  redis: REDIS_CONFIG,
+const flightQueue = new Bull('flight-processing-v2', redisUrl || "redis://127.0.0.1:6379", {
   settings: {
     maxStalledCount: 3,
     lockDuration: 600000,

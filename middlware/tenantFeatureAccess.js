@@ -1,36 +1,40 @@
-const fs = require("fs");
-const path = require("path");
 const { TENANT_ADMIN_ROLES } = require("./auth");
 const { getHighestAccessLevel, hasPageAccess, normalizeFeatureIds } = require("../config/pageAccess");
-
-const FEATURE_CONFIG_PATH = path.join(__dirname, "../config/tenantAdminFeatures.json");
+const {
+  FEATURE_CATALOG,
+  canonicalizeFeatureIds,
+} = require("../config/featureCatalog");
+const { getTenantRuntimeConfig } = require("../config/runtime");
 
 const getTenantAdminFeatures = () => {
-  const config = JSON.parse(fs.readFileSync(FEATURE_CONFIG_PATH, "utf8"));
-  return Array.isArray(config.features) ? config.features : [];
+  const { features } = getTenantRuntimeConfig();
+  const canonical = FEATURE_CATALOG.map((feature) => ({
+    id: feature.id,
+    label: feature.label,
+    isAllowed: features[feature.id] === true,
+  }));
+
+  return [
+    ...canonical,
+    { id: "view", label: "View", isAllowed: features.network === true },
+    { id: "list", label: "List", isAllowed: features.network === true },
+  ];
 };
 
 const isFeatureAllowedForTenantAdmin = (featureIdOrIds) => {
-  const featureAccess = new Map(
-    getTenantAdminFeatures().map((feature) => [feature.id, feature])
+  const { features } = getTenantRuntimeConfig();
+  return canonicalizeFeatureIds(featureIdOrIds).some(
+    (featureId) => features[featureId] === true
   );
-  return normalizeFeatureIds(featureIdOrIds).some((featureId) => {
-    const feature = featureAccess.get(featureId);
-    return feature?.isAllowed === true || feature?.isAlllowed === true;
-  });
 };
 
 const requireTenantFeatureAccess = (featureIdOrIds) => (req, res, next) => {
-  if (!TENANT_ADMIN_ROLES.has(req.user?.role)) {
-    return next();
-  }
-
   if (isFeatureAllowedForTenantAdmin(featureIdOrIds)) {
     return next();
   }
 
   return res.status(403).json({
-    error: "This feature is not enabled for tenant admins",
+    error: "This feature is not enabled for this tenant",
     featureId: featureIdOrIds,
   });
 };
@@ -68,8 +72,15 @@ const requireUserPageAccess = (featureIdOrIds, requiredAccess = "read") => (req,
 };
 
 const requireFeatureAccess = (featureIdOrIds, requiredAccess = "read") => (req, res, next) => {
+  if (!isFeatureAllowedForTenantAdmin(featureIdOrIds)) {
+    return res.status(403).json({
+      error: "This feature is not enabled for this tenant",
+      featureId: featureIdOrIds,
+    });
+  }
+
   if (TENANT_ADMIN_ROLES.has(req.user?.role)) {
-    return requireTenantFeatureAccess(featureIdOrIds)(req, res, next);
+    return next();
   }
 
   return requireUserPageAccess(featureIdOrIds, requiredAccess)(req, res, next);

@@ -1,72 +1,44 @@
 require("dotenv").config();
 
-const express = require("express");
-const app = express();
-const cors = require("cors");
-const userRoutes = require("./routes/userRoutes");
-const adminRoutes = require("./routes/adminRoutes");
-const exceljs = require("exceljs");
-const path = require("path");
-const mongoose = require("mongoose");
-const Fleet = require("./model/fleet");
-const Flight = require("./model/flight");
-const Assignment = require("./model/assignment");
-const MaintenanceReset = require("./model/maintenanceReset");
-const MaintenanceTarget = require("./model/maintenanceTargetSchema");
-const MaintenanceCalendar = require("./model/maintenanceCalendarSchema");
-const PORT = 3000;
-app.use(cors());
+const { createApp } = require("./app");
+const { connectDatabase, disconnectDatabase } = require("./config/db");
+const { connectRedis, disconnectRedis } = require("./config/redis");
+const { getAppMode, validateRuntimeConfig } = require("./config/runtime");
 
-require("./config/db");
+const start = async () => {
+  const mode = getAppMode();
+  validateRuntimeConfig();
+  await connectDatabase();
 
-mongoose.connection.once("open", async () => {
-  try {
-    // Keep tenant-aware indexes aligned with the schema so old global indexes do not block other users.
-    await Fleet.syncIndexes();
-    console.log("Fleet indexes synced successfully");
-    await Flight.syncIndexes();
-    console.log("Flight indexes synced successfully");
-    await Assignment.syncIndexes();
-    console.log("Assignment indexes synced successfully");
-    await MaintenanceReset.syncIndexes();
-    console.log("MaintenanceReset indexes synced successfully");
-    await MaintenanceTarget.syncIndexes();
-    console.log("MaintenanceTarget indexes synced successfully");
-    await MaintenanceCalendar.syncIndexes();
-    console.log("MaintenanceCalendar indexes synced successfully");
-  } catch (error) {
-    console.error("Failed to sync Fleet indexes:", error);
+  if (mode === "tenant" && process.env.REDIS_URL) {
+    await connectRedis();
   }
-});
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    tenant: process.env.TENANT_DOMAIN || null,
+  const port = Number(process.env.PORT || 3000);
+  const server = createApp().listen(port, "0.0.0.0", () => {
+    console.log(`${mode} server started on ${port}`);
   });
-});
 
-app.use("/", userRoutes);
-app.use("/admin", adminRoutes);
+  const shutdown = async (signal) => {
+    console.log(`Received ${signal}; shutting down`);
+    server.close(async () => {
+      await Promise.allSettled([disconnectRedis(), disconnectDatabase()]);
+      process.exit(0);
+    });
+  };
 
-// app.use(express.static("dist"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  return server;
+};
 
+if (require.main === module) {
+  start().catch((error) => {
+    console.error("Application startup failed", error);
+    process.exit(1);
+  });
+}
 
-// app.get("*", (req, res) => {
-//   res.sendFile(path.resolve(__dirname, "dist", "index.html"));
-// });
-
-app.use(express.static(path.join(__dirname, "../Airlineplan/dist")));
-
-app.get("*", (req, res) => {
-  res.sendFile(
-    path.resolve(__dirname, "../Airlineplan/dist", "index.html")
-  );
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`server started on ${PORT}`);
-});
+module.exports = {
+  start,
+};

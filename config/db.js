@@ -1,23 +1,30 @@
 const mongoose = require("mongoose");
 
-// new developer - Himanshu link 
-// const DB = "mongodb+srv://crazyphoton150hs:C00!buddy@cluster0.4mq6pjf.mongodb.net/?retryWrites=true&w=majority";
-// const DB = "mongodb+srv://hhimanshu030:C00!buddy@cluster0.qondpde.mongodb.net/?retryWrites=true&w=majority";
-// const DB = "mongodb://https://airlineplan.com/airlines"
+const connectDatabase = async () => {
+  const uri = process.env.MONGO_URI;
+  if (!uri) {
+    throw new Error("MONGO_URI is required");
+  }
 
-const DB = process.env.MONGO_URI;
-if (!DB) {
-  throw new Error("MONGO_URI is required");
-}
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
 
-// Client - Neelandri link
-// const DB = "mongodb+srv://neeladrinathsarangi:kBhaZHXuGOIUgt9y@cluster0.n0cx0yj.mongodb.net/?retryWrites=true&w=majority"
-
-mongoose
-  .connect(DB, {})
-  .then(() => {
-    console.log("connection sucussfull", DB);
-  })
-  .catch((err) => {
-    console.log("no connection", err);
+  await mongoose.connect(uri, {
+    dbName: process.env.MONGO_DB_NAME || undefined,
+    serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 15000),
   });
+  console.log("MongoDB connection established");
+  return mongoose.connection;
+};
+
+const disconnectDatabase = async () => {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+  }
+};
+
+module.exports = {
+  connectDatabase,
+  disconnectDatabase,
+};

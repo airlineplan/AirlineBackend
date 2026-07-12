@@ -1,5 +1,3 @@
-const nodemailer = require("nodemailer");
-const { google } = require('googleapis');
 const User = require("../model/userSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
 const CostConfig = require("../model/costConfigSchema");
@@ -7,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const config = require("../config/config");
 const Otp = require("../model/otp");
+const { sendOtpEmail, sendContactQueryEmail } = require("../services/emailService");
 const { TENANT_ADMIN_ROLES, USER_TOKEN_AUDIENCE } = require("../middlware/auth");
 const { getEffectivePageAccess, normalizePageAccessInput } = require("../config/pageAccess");
 
@@ -147,8 +146,9 @@ exports.loginUser = async (req, res) => {
 };
 exports.changePassword = async (req, res) => {
   try {
+    const email = normalizeEmail(req.body?.email);
     const data = await Otp.findOne({
-      email: req.body.email,
+      email,
       code: req.body.otpCode,
     });
 
@@ -163,7 +163,7 @@ exports.changePassword = async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(req.body.password, salt);
 
-        const user = await User.findOne({ email: req.body.email });
+        const user = await User.findOne({ email });
         if (!user) {
           response.message = "User not found";
           response.statusText = "error";
@@ -187,22 +187,22 @@ exports.changePassword = async (req, res) => {
 
 exports.sendEmail = async (req, res) => {
   try {
-    console.log({ email: req.body.email });
-    const data = await User.findOne({ email: req.body.email });
+    const email = normalizeEmail(req.body?.email);
+    const data = await User.findOne({ email });
 
     const responseType = {};
 
     if (data) {
       const otpcode = Math.floor(Math.random() * 9000) + 1000;
       const otpData = new Otp({
-        email: req.body.email,
+        email,
         code: otpcode,
         expireIn: new Date().getTime() + 300 * 1000,
       });
 
       await otpData.save();
 
-      await sendEmail(req.body.email, otpcode);
+      await sendOtpEmail({ to: email, otp: otpcode });
 
       responseType.statusText = "Success";
       responseType.message = "Please Check Your Email Id";
@@ -218,55 +218,15 @@ exports.sendEmail = async (req, res) => {
   }
 };
 
-const sendEmail = async (email, otp) => {
-  try {
-    
-    // Create a Nodemailer transporter
-    const transporter = nodemailer.createTransport({
-      service: 'Gmail', // Change this to your email service provider
-      auth: {
-        user: process.env.EMAIL_USER || 'admin@airlineplan.com',
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-
-    const mailOptions = {
-      from: "admin@airlineplan.com",
-      to: email,
-      subject: "Airlineplan OTP ",
-      text: `Your OTP code is: ${otp}`,
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log("Email sent:", info.response);
-  } catch (error) {
-    console.error("Error sending email:", error);
-  }
-};
-
 exports.sendContactEmail = async (req, res) => {
   try {
     const { name, email, subject, message } = req.body;
 
-    // Create a Nodemailer transporter
-    const transporter = nodemailer.createTransport({
-      service: 'Gmail', // Change this to your email service provider
-      auth: {
-        user: process.env.EMAIL_USER || 'admin@airlineplan.com',
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+    if (!name || !email || !message) {
+      return res.status(400).json({ message: "Name, email, and message are required" });
+    }
 
-    // Email content
-    const mailOptions = {
-      from: 'admin@airlineplan.com', // Sender email address
-      to: 'admin@airlineplan.com', // Receiver email address
-      subject: subject,
-      text: `Name: ${name}\nEmail: ${email}\nMessage: ${message}`,
-    };
-
-    // Send email
-    await transporter.sendMail(mailOptions);
+    await sendContactQueryEmail({ name, email: normalizeEmail(email), subject, message });
     res.status(200).json({ message: 'Email sent successfully' });
   } catch (error) {
     console.error('Error sending email:', error);

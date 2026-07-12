@@ -3,7 +3,10 @@ require("dotenv").config();
 const User = require("../model/userSchema");
 
 // Database Connection
-const DB = process.env.MONGO_URI || "mongodb+srv://neeladrinathsarangi:kBhaZHXuGOIUgt9y@cluster0.n0cx0yj.mongodb.net/?retryWrites=true&w=majority";
+const DB = process.env.MONGO_URI;
+if (!DB) {
+  throw new Error("MONGO_URI is required");
+}
 
 async function deleteUserData() {
   const email = process.argv[2];

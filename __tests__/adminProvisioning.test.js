@@ -62,33 +62,35 @@ test("admin auth uses env credentials and emits admin-scoped JWT", async () => {
 
 test("tenant model stores provisioning state and cloud identifiers", () => {
   const tenant = new Tenant({
-    tenantName: "Star Aviation",
-    subdomain: "star",
-    fullDomain: "star.airlineplan.com",
+    tenantId: "tnt_star_001",
+    companyName: "Star Aviation",
+    slug: "star",
+    domain: "star.airlineplan.com",
     adminEmail: "ops@star.example",
-    aws: {
-      region: "ap-south-1",
-      instanceType: "t3.small",
-      instanceId: "i-123",
-      publicIp: "203.0.113.10",
+    albRulePriority: 101,
+    deployment: {
+      desiredAppVersion: "standard-2026.06.19",
+      desiredImageTag: "airlineplan-tenant:standard-2026.06.19",
     },
-    atlas: {
-      projectId: "atlas-project",
-      clusterName: "airlineplan-star",
-      databaseName: "airlineplan_star",
+    resources: {
+      awsRegion: "ap-south-1",
+      ecsServiceName: "app-star",
+      atlasProjectId: "atlas-project",
+      atlasClusterName: "airlineplan-star-prod",
+      atlasDatabaseName: "airlineplan_star",
     },
-    logs: [{ level: "info", message: "created" }],
+    auditEvents: [{ type: "TENANT_CREATED", message: "created" }],
   });
 
-  assert.equal(tenant.status, "pending");
-  tenant.status = "dns_pending";
-  assert.equal(tenant.aws.instanceType, "t3.small");
-  assert.equal(tenant.atlas.clusterName, "airlineplan-star");
-  assert.equal(tenant.logs[0].message, "created");
+  assert.equal(tenant.status, "PENDING");
+  tenant.status = "MIGRATING_DB";
+  assert.equal(tenant.resources.ecsServiceName, "app-star");
+  assert.equal(tenant.resources.atlasClusterName, "airlineplan-star-prod");
+  assert.equal(tenant.auditEvents[0].message, "created");
   assert.equal(tenant.validateSync(), undefined);
 
-  tenant.status = "unknown";
-  assert.match(tenant.validateSync().message, /`unknown` is not a valid enum value/);
+  tenant.status = "UNKNOWN";
+  assert.match(tenant.validateSync().message, /`UNKNOWN` is not a valid enum value/);
 });
 
 test("tenant users have scoped roles and active access state", () => {

@@ -1,39 +1,56 @@
 const mongoose = require("mongoose");
+const {
+  FEATURE_IDS,
+  normalizeFeatureMap,
+} = require("../config/featureCatalog");
 
-const provisioningLogSchema = new mongoose.Schema(
+const TENANT_STATUSES = Object.freeze([
+  "PENDING",
+  "PROVISIONING",
+  "MIGRATING_DB",
+  "SEEDING_ADMIN",
+  "HEALTH_CHECKING",
+  "ACTIVE",
+  "FAILED",
+  "ROLLING_BACK",
+  "SUSPENDED",
+  "DELETING",
+  "DELETED",
+]);
+
+const auditEventSchema = new mongoose.Schema(
   {
-    level: {
-      type: String,
-      enum: ["info", "warning", "error"],
-      default: "info",
-    },
-    message: {
-      type: String,
-      required: true,
-    },
-    meta: {
-      type: mongoose.Schema.Types.Mixed,
-      default: undefined,
-    },
+    type: { type: String, required: true },
+    message: { type: String, required: true },
+    actor: String,
+    step: String,
+    meta: mongoose.Schema.Types.Mixed,
   },
   { timestamps: true }
 );
 
 const tenantSchema = new mongoose.Schema(
   {
-    tenantName: {
+    tenantId: {
       type: String,
       required: true,
-      trim: true,
+      unique: true,
+      index: true,
     },
-    subdomain: {
+    slug: {
       type: String,
       required: true,
       lowercase: true,
       trim: true,
       unique: true,
+      index: true,
     },
-    fullDomain: {
+    companyName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    domain: {
       type: String,
       required: true,
       lowercase: true,
@@ -46,53 +63,117 @@ const tenantSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
+    plan: {
+      type: String,
+      default: "enterprise-dedicated",
+      trim: true,
+    },
+    branding: {
+      companyName: String,
+      logoUrl: String,
+      primaryColor: {
+        type: String,
+        default: "#0B3B75",
+      },
+    },
+    features: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => normalizeFeatureMap({}, { defaultEnabled: true }),
+      validate: {
+        validator(value) {
+          return (
+            value &&
+            typeof value === "object" &&
+            FEATURE_IDS.every((featureId) => typeof value[featureId] === "boolean")
+          );
+        },
+        message: "Tenant features must contain every canonical feature flag",
+      },
+    },
     status: {
       type: String,
-      enum: ["pending", "provisioning", "dns_pending", "ssl_pending", "active", "failed", "deactivated"],
-      default: "pending",
+      enum: TENANT_STATUSES,
+      default: "PENDING",
       index: true,
     },
-    aws: {
-      region: String,
-      instanceType: String,
-      instanceId: String,
-      publicIp: String,
+    currentStep: {
+      type: String,
+      default: "PENDING",
     },
-    atlas: {
-      projectId: String,
-      clusterName: String,
-      clusterId: String,
-      databaseName: String,
-      username: String,
+    executionArn: String,
+    attempt: {
+      type: Number,
+      default: 1,
+      min: 1,
     },
-    dns: {
-      provider: {
+    albRulePriority: {
+      type: Number,
+      required: true,
+      unique: true,
+    },
+    deployment: {
+      desiredAppVersion: String,
+      desiredImageTag: String,
+      deployedAppVersion: String,
+      deployedImageTag: String,
+      deployedImageDigest: String,
+      previousImageTag: String,
+      history: [
+        {
+          appVersion: String,
+          imageTag: String,
+          imageDigest: String,
+          deployedAt: Date,
+        },
+      ],
+    },
+    resources: {
+      awsRegion: {
         type: String,
-        default: "godaddy",
+        default: "ap-south-1",
       },
-      recordType: {
+      ecsClusterArn: String,
+      ecsServiceArn: String,
+      ecsServiceName: String,
+      taskDefinitionArn: String,
+      taskSecurityGroupId: String,
+      privateSubnetIds: [String],
+      targetGroupArn: String,
+      albRuleArn: String,
+      route53Record: String,
+      secretArn: String,
+      redisReplicationGroupId: String,
+      redisEndpoint: String,
+      logGroupName: String,
+      atlasProjectId: String,
+      atlasProjectName: String,
+      atlasClusterName: String,
+      atlasDatabaseName: String,
+      terraformStateKey: String,
+      provisioningOutputKey: String,
+    },
+    provisioning: {
+      bootstrapSecretArn: {
         type: String,
-        default: "A",
+        select: false,
       },
-      recordValue: String,
-      lastCheckedAt: Date,
+      lastStartedAt: Date,
+      lastFinishedAt: Date,
     },
-    runtimeEnv: {
-      tenantDomain: String,
-      tenantSubdomain: String,
-      viteApiUrl: String,
-      scheduleUploadLimit: String,
-      flightLimit: String,
+    failure: {
+      step: String,
+      message: String,
+      code: String,
+      occurredAt: Date,
     },
-    failureReason: String,
-    lastProvisioningStartedAt: Date,
-    lastProvisioningFinishedAt: Date,
-    logs: [provisioningLogSchema],
+    auditEvents: [auditEventSchema],
   },
-  { timestamps: true }
+  { timestamps: true, minimize: false }
 );
 
-tenantSchema.index({ subdomain: 1 }, { unique: true });
-tenantSchema.index({ fullDomain: 1 }, { unique: true });
+tenantSchema.index({ slug: 1 }, { unique: true });
+tenantSchema.index({ domain: 1 }, { unique: true });
+tenantSchema.index({ albRulePriority: 1 }, { unique: true });
 
 module.exports = mongoose.model("Tenant", tenantSchema);
+module.exports.TENANT_STATUSES = TENANT_STATUSES;
