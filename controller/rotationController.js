@@ -24,6 +24,7 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
+const { dayNamesForDow, occurrenceDates, utcDateOnly } = require("../utils/rotationDates");
 
 const createConnections = require('../helper/createConnections');
 
@@ -437,56 +438,33 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     console.log("effFromDate " + effFromDate)
     console.log("effToDate " + effToDate)
     // Find dates between effFromDate and effToDate with the given dow
-    const startEffDate = new Date(effFromDate);
-    const endEffDate = new Date(effToDate);
+    const startEffDate = utcDateOnly(effFromDate);
+    const endEffDate = utcDateOnly(effToDate);
+    if (!startEffDate || !endEffDate || startEffDate > endEffDate) {
+      return res.status(400).json({ message: "Invalid rotation effective date range", flightNumber });
+    }
     // Create separate copies for adjusted date range queries (avoid mutating originals)
-    const queryStartDate = new Date(effFromDate);
-    const queryEndDate = new Date(effToDate);
+    const queryStartDate = new Date(startEffDate);
+    const queryEndDate = new Date(endEffDate);
 
     console.log("startEffDate " + startEffDate)
     console.log("endEffDate " + endEffDate)
 
-    const daysOfWeek = dow.split('').map(Number); // Convert dow string to an array of numbers
-    const daysOfWeekStrings = daysOfWeek.map(day => {
-      switch (day) {
-        case 1:
-          return "Mon";
-        case 2:
-          return "Tue";
-        case 3:
-          return "Wed";
-        case 4:
-          return "Thu";
-        case 5:
-          return "Fri";
-        case 6:
-          return "Sat";
-        case 7:
-          return "Sun";
-        default:
-          return null;
-      }
-    });
+    const daysOfWeekStrings = dayNamesForDow(dow);
+    if (daysOfWeekStrings.length === 0) {
+      return res.status(400).json({ message: "Invalid rotation DOW", flightNumber });
+    }
 
 
     // timezone = timezone ? timezone : "Asia/Kolkata";
 
-    const datesInRange = [];
-    const currentDate = new Date(startEffDate);
-
-    console.log("current Date" + currentDate)
-
-    // Generate dates within the range and filter based on daysOfWeek
-    while (currentDate <= endEffDate) {
-      if (daysOfWeek.includes(currentDate.getDay() + 1)) {
-        datesInRange.push(new Date(currentDate));
-      }
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
+    // DOW is ISO-style (1=Mon ... 7=Sun). Generate at UTC midnight so the
+    // selected calendar dates match the occurrence records exactly.
+    const datesInRange = occurrenceDates(effFromDate, effToDate, dow);
 
     //correction for end Dates - use query copies to avoid mutating originals
-    queryEndDate.setDate(queryEndDate.getDate() + 1);
-    queryEndDate.setHours(0, 0, 0, 0);
+    queryEndDate.setUTCDate(queryEndDate.getUTCDate() + 1);
+    queryEndDate.setUTCHours(0, 0, 0, 0);
 
     console.log("After correct startEffDate " + startEffDate)
     console.log("After correct endEffDate " + endEffDate)
@@ -498,7 +476,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
       bt,
       depStn,
       day: { $in: daysOfWeekStrings },
-      date: { $gte: queryStartDate, $lte: queryEndDate },
+      date: { $in: datesInRange },
       flight: flightNumber,
       std,
       sta,
@@ -518,7 +496,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     });
 
     // Use query copies for range comparisons (don't mutate originals)
-    queryStartDate.setHours(0, 0, 0, 0);
+    queryStartDate.setUTCHours(0, 0, 0, 0);
 
     const existingFlightsDates = existingFlights.map(flight => flight.date);
     const allFlightsWithSameNetworkIdDates = allFlightsWithSameNetworkId.map(flight => flight.date);

@@ -27,6 +27,7 @@ const CostConfig = require("../model/costConfigSchema");
 const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { scopedUserQuery } = require("./accessScope");
+const { dayNamesForDow, utcDateOnly } = require("../utils/rotationDates");
 
 const createConnections = require('../helper/createConnections');
 
@@ -53,7 +54,6 @@ const {
   processExcelRow,
   filterFlightsByTimeRange,
   normalizeDate,
-  regexForFindingSuperset,
   convertTimeToTZ,
   isValidFlightNumber,
   addDays,
@@ -194,46 +194,30 @@ const getFlightsWoRotations = async (req, res) => {
       filters = {},
       sort = {},
     } = req.body;
-    const dowRegex = regexForFindingSuperset(dow);
-    // Parse dates — no UTC offset correction needed (dates are already calendar strings)
-    const fromDate = new Date(effFromDate);
-    fromDate.setUTCHours(0, 0, 0, 0);
-    const toDate = new Date(effToDate);
+    // Flights are already expanded into dated occurrences. Query those occurrence
+    // dates directly instead of also requiring copied network effective-date/DOW
+    // fields, which are absent on some legacy occurrences.
+    const fromDate = utcDateOnly(effFromDate);
+    const toDate = utcDateOnly(effToDate);
+    if (!fromDate || !toDate || fromDate > toDate) {
+      return res.status(400).json({ error: "Invalid rotation effective date range" });
+    }
     toDate.setUTCHours(23, 59, 59, 999);
-    // For the effFromDt / effToDt overlap filter, use the raw ISO dates
-    const formattedFromDate = fromDate.toISOString();
-    const formattedToDate = toDate.toISOString();
     let filter = {
       userId: id,
       isComplete: true,
-      $or: [{ rotationNumber: { $exists: false } }, { rotationNumber: null }],
+      $or: [
+        { rotationNumber: { $exists: false } },
+        { rotationNumber: null },
+        { rotationNumber: "" },
+      ],
       variant: selectedVariant,
-      effFromDt: { $lte: new Date(formattedToDate) },
-      effToDt: { $gte: new Date(formattedFromDate) },
-      dow: { $regex: dowRegex, $options: 'i' }
     };
 
-    const dowNums = dow.split('').map(Number); // e.g. [1,2,3,4,5]
-    const daysOfWeekStrings = dowNums.map(day => {
-      switch (day) {
-        case 1:
-          return "Mon";
-        case 2:
-          return "Tue";
-        case 3:
-          return "Wed";
-        case 4:
-          return "Thu";
-        case 5:
-          return "Fri";
-        case 6:
-          return "Sat";
-        case 7:
-          return "Sun";
-        default:
-          return null;
-      }
-    }).filter(Boolean);
+    const daysOfWeekStrings = dayNamesForDow(dow);
+    if (daysOfWeekStrings.length === 0) {
+      return res.status(400).json({ error: "Invalid rotation DOW" });
+    }
 
     filter.date = { $gte: fromDate, $lte: toDate };
     filter.day = { $in: daysOfWeekStrings };
