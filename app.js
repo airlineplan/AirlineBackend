@@ -8,6 +8,23 @@ const { getAppMode, getTenantRuntimeConfig } = require("./config/runtime");
 const { getRedisClient } = require("./config/redis");
 const { enforceTenantHost } = require("./middlware/tenantHost");
 
+const findFrontendDirectory = () => {
+  const candidates = [
+    process.env.FRONTEND_DIST_PATH,
+    path.resolve(__dirname, "../Airlineplan/dist"),
+    path.resolve(__dirname, "../airlineplan/dist"),
+    path.resolve(__dirname, "dist"),
+    path.resolve(__dirname, "public"),
+    path.resolve(process.cwd(), "Airlineplan/dist"),
+    path.resolve(process.cwd(), "airlineplan/dist"),
+    path.resolve(process.cwd(), "dist"),
+  ].filter(Boolean);
+
+  return candidates.find((directory) =>
+    fs.existsSync(path.join(directory, "index.html"))
+  );
+};
+
 const createHealthPayload = async () => {
   const mode = getAppMode();
   const payload = {
@@ -43,11 +60,14 @@ const createHealthPayload = async () => {
 
 const serveFrontend = (app) => {
   if (process.env.SERVE_FRONTEND === "false") return;
-  const frontendDirectory =
-    process.env.FRONTEND_DIST_PATH ||
-    path.resolve(__dirname, "../Airlineplan/dist");
+  const frontendDirectory = findFrontendDirectory();
 
-  if (!fs.existsSync(path.join(frontendDirectory, "index.html"))) return;
+  if (!frontendDirectory) {
+    console.error(
+      "Frontend build not found. Run `npm run build` in the Airlineplan repository before starting the backend."
+    );
+    return;
+  }
 
   app.use(express.static(frontendDirectory));
   app.get("*", (_req, res) => {
@@ -126,4 +146,5 @@ const createApp = () => {
 module.exports = {
   createApp,
   createHealthPayload,
+  findFrontendDirectory,
 };
