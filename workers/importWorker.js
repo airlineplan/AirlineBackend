@@ -1,6 +1,8 @@
 require("dotenv").config();
+require("../config/dns");
 
 const { workerData, parentPort } = require("worker_threads");
+const { connectDatabase } = require("../config/db");
 const mongoose = require("mongoose");
 const xlsx = require("xlsx");
 const fs = require("fs");
@@ -16,7 +18,7 @@ const CHUNK_SIZE = 1000;
 (async () => {
     try {
         console.log("🚀 Worker Started");
-        await mongoose.connect(process.env.MONGO_URI);
+        await connectDatabase();
         console.log("✅ Mongo Connected (Worker)");
 
         const { filePath, userId, jobId } = workerData;

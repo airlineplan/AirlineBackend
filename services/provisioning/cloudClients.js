@@ -267,6 +267,7 @@ rm -rf ${appDir}
 git clone --branch ${repoBranch} ${repoUrl} ${appDir}
 cat > ${appDir}/AirlineBackend/.env <<'ENV'
 MONGO_URI=${mongoUri}
+NODE_DNS_SERVERS=${process.env.NODE_DNS_SERVERS || "1.1.1.1,8.8.8.8"}
 JWT_SECRET=${tenantJwtSecret}
 TENANT_BOOTSTRAP_SECRET=${tenantBootstrapSecret}
 SCHEDULE_UPLOAD_LIMIT=${process.env.SCHEDULE_UPLOAD_LIMIT || ""}

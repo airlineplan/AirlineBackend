@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("../config/dns");
 const mongoose = require("mongoose");
 const Flight = require("../model/flight");
 const Station = require("../model/stationSchema");

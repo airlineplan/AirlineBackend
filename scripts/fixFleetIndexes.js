@@ -1,3 +1,4 @@
+require("../config/dns");
 const mongoose = require("mongoose");
 const Fleet = require("../model/fleet");
 

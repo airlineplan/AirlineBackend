@@ -1,7 +1,12 @@
 require("dotenv").config();
+require("./config/dns");
 
 const { createApp } = require("./app");
-const { connectDatabase, disconnectDatabase } = require("./config/db");
+const {
+  connectDatabase,
+  disconnectDatabase,
+  formatMongoError,
+} = require("./config/db");
 const { connectRedis, disconnectRedis } = require("./config/redis");
 const { getAppMode, validateRuntimeConfig } = require("./config/runtime");
 
@@ -16,7 +21,9 @@ const start = async () => {
 
   const port = Number(process.env.PORT || 3000);
   const server = createApp().listen(port, "0.0.0.0", () => {
-    console.log(`${mode} server started on ${port}`);
+    const address = server.address();
+    const listeningPort = typeof address === "object" && address ? address.port : port;
+    console.log(`Server listening on port ${listeningPort} (${mode} mode)`);
   });
 
   const shutdown = async (signal) => {
@@ -34,7 +41,7 @@ const start = async () => {
 
 if (require.main === module) {
   start().catch((error) => {
-    console.error("Application startup failed", error);
+    console.error("Application startup failed:", formatMongoError(error));
     process.exit(1);
   });
 }
