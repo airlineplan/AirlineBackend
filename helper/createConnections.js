@@ -20,19 +20,12 @@ const Connections = require('../model/connectionSchema');
    REDIS + QUEUE CONFIGURATION
 ──────────────────────────────────────────── */
 
-const redisUrl = process.env.REDIS_URL;
-if (!redisUrl && process.env.NODE_ENV === "production") {
-  throw new Error("REDIS_URL is required for connection processing");
-}
+let flightQueue;
 
-const flightQueue = new Bull('flight-processing-v2', redisUrl || "redis://127.0.0.1:6379", {
-  settings: {
-    maxStalledCount: 3,
-    lockDuration: 600000,
-    removeOnComplete: { age: 300 },
-    removeOnFail: { age: 300 }
-  }
-});
+const getRedisRetryLimit = () => {
+  const configured = Number(process.env.BULL_REDIS_MAX_RETRIES_PER_REQUEST);
+  return Number.isInteger(configured) && configured >= 0 ? configured : 3;
+};
 
 /* ─────────────────────────────────────────────
    WORKER (High Performance Deduplication)
@@ -40,7 +33,7 @@ const flightQueue = new Bull('flight-processing-v2', redisUrl || "redis://127.0.
 
 const CONCURRENCY = 10;
 
-flightQueue.process(CONCURRENCY, async (job) => {
+const processFlightBatch = async (job) => {
   const { flightIdsBatch = [], userId, hometimeZone } = job.data;
 
   if (flightIdsBatch.length === 0) return;
@@ -170,15 +163,57 @@ flightQueue.process(CONCURRENCY, async (job) => {
     `✅ Job done: ${connectionEntries.length} connections | ` +
     `${flightBulkOps.length} flight updates | batch size: ${flightsBatch.length}`
   );
-});
+};
+
+const getFlightQueue = () => {
+  if (flightQueue) return flightQueue;
+
+  const redisUrl = String(process.env.REDIS_URL || '').trim();
+  if (!redisUrl) {
+    const error = new Error('Connection processing is unavailable because REDIS_URL is not configured');
+    error.code = 'QUEUE_UNAVAILABLE';
+    error.statusCode = 503;
+    throw error;
+  }
+
+  flightQueue = new Bull('flight-processing-v2', redisUrl, {
+    redis: {
+      connectTimeout: 10000,
+      maxRetriesPerRequest: getRedisRetryLimit(),
+      retryStrategy: retries => Math.min(retries * 200, 3000)
+    },
+    defaultJobOptions: {
+      removeOnComplete: { age: 300 },
+      removeOnFail: { age: 300 }
+    },
+    settings: {
+      maxStalledCount: 3,
+      lockDuration: 600000
+    }
+  });
+
+  flightQueue.on('error', error => {
+    console.error('Flight queue Redis error:', error.message);
+  });
+  flightQueue.process(CONCURRENCY, processFlightBatch);
+  return flightQueue;
+};
+
+const closeFlightQueue = async () => {
+  const queue = flightQueue;
+  flightQueue = undefined;
+  if (queue) await queue.close(true);
+};
 
 /* ─────────────────────────────────────────────
    CONTROLLER
 ──────────────────────────────────────────── */
 
-module.exports = async function createConnections(req, res) {
+async function createConnections(req, res) {
   try {
     console.log('createConnections called');
+    const queue = getFlightQueue();
+    await queue.isReady();
 
     const userId = req.user.id;
     const user = await User.findById(userId, { hometimeZone: 1 }).lean();
@@ -206,7 +241,7 @@ module.exports = async function createConnections(req, res) {
       flightIdsBatch.push(flight._id.toString());
 
       if (flightIdsBatch.length >= BATCH_SIZE) {
-        jobs.push(await flightQueue.add(
+        jobs.push(await queue.add(
           { flightIdsBatch, userId, hometimeZone },
           { ttl: 3600 * 1000 }
         ));
@@ -218,7 +253,7 @@ module.exports = async function createConnections(req, res) {
 
     // Queue any remaining flights
     if (flightIdsBatch.length > 0) {
-      jobs.push(await flightQueue.add(
+      jobs.push(await queue.add(
         { flightIdsBatch, userId, hometimeZone },
         { ttl: 3600 * 1000 }
       ));
@@ -235,12 +270,15 @@ module.exports = async function createConnections(req, res) {
       message: `Successfully processed ${totalQueued} flights and created connections.`
     });
   } catch (error) {
-    console.error('Error in createConnections:', error);
+    console.error('Error in createConnections:', error.message);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
+      const statusCode = error.statusCode || (error.code === 'QUEUE_UNAVAILABLE' ? 503 : 500);
+      res.status(statusCode).json({
+        error: statusCode === 503 ? error.message : 'Internal server error'
+      });
     }
   }
-};
+}
 
 /* ─────────────────────────────────────────────
    QUERY BUILDERS (With Midnight Crossover Logic)
@@ -364,20 +402,6 @@ function addDays(date, days) {
   return d;
 }
 
-/* ─────────────────────────────────────────────
-   QUEUE CLEANUP
-──────────────────────────────────────────── */
-
-async function cleanupQueue() {
-  try {
-    await Promise.all([
-      flightQueue.clean(300 * 1000, 'completed'),
-      flightQueue.clean(300 * 1000, 'failed')
-    ]);
-  } catch (err) {
-    console.error("Queue cleanup failed:", err);
-  }
-}
-
-setInterval(cleanupQueue, 900 * 1000);
-cleanupQueue();
+module.exports = createConnections;
+module.exports.closeFlightQueue = closeFlightQueue;
+module.exports.getFlightQueue = getFlightQueue;

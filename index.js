@@ -29,7 +29,12 @@ const start = async () => {
   const shutdown = async (signal) => {
     console.log(`Received ${signal}; shutting down`);
     server.close(async () => {
-      await Promise.allSettled([disconnectRedis(), disconnectDatabase()]);
+      const { closeFlightQueue } = require("./helper/createConnections");
+      await Promise.allSettled([
+        closeFlightQueue(),
+        disconnectRedis(),
+        disconnectDatabase(),
+      ]);
       process.exit(0);
     });
   };
