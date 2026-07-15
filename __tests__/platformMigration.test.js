@@ -74,9 +74,11 @@ test("tenant entitlement is enforced before user page access", () => {
   }
 });
 
-test("hostname enforcement honors the configured forwarded host", () => {
+test("hostname enforcement allows the tenant and main application domains", () => {
   const previous = process.env.TENANT_DOMAIN;
+  const previousRoot = process.env.ROOT_DOMAIN;
   process.env.TENANT_DOMAIN = "star.airlineplan.com";
+  process.env.ROOT_DOMAIN = "airlineplan.com";
 
   try {
     const allowed = createResponse();
@@ -95,6 +97,20 @@ test("hostname enforcement honors the configured forwarded host", () => {
     );
     assert.equal(nextCalled, true);
 
+    for (const host of ["airlineplan.com", "www.airlineplan.com"]) {
+      const mainApplication = createResponse();
+      let mainApplicationNextCalled = false;
+      enforceTenantHost(
+        { headers: { host } },
+        mainApplication,
+        () => {
+          mainApplicationNextCalled = true;
+        }
+      );
+      assert.equal(mainApplicationNextCalled, true);
+      assert.equal(mainApplication.statusCode, 200);
+    }
+
     const denied = createResponse();
     enforceTenantHost(
       { headers: { host: "other.airlineplan.com" } },
@@ -106,6 +122,8 @@ test("hostname enforcement honors the configured forwarded host", () => {
   } finally {
     if (previous === undefined) delete process.env.TENANT_DOMAIN;
     else process.env.TENANT_DOMAIN = previous;
+    if (previousRoot === undefined) delete process.env.ROOT_DOMAIN;
+    else process.env.ROOT_DOMAIN = previousRoot;
   }
 });
 
