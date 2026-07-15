@@ -15,6 +15,7 @@ const User = require('../model/userSchema');
 const Stations = require('../model/stationSchema');
 const Flights = require('../model/flight');
 const Connections = require('../model/connectionSchema');
+const { getRedisUrl } = require('../config/redisUrl');
 
 /* ─────────────────────────────────────────────
    REDIS + QUEUE CONFIGURATION
@@ -168,7 +169,7 @@ const processFlightBatch = async (job) => {
 const getFlightQueue = () => {
   if (flightQueue) return flightQueue;
 
-  const redisUrl = String(process.env.REDIS_URL || '').trim();
+  const redisUrl = getRedisUrl();
   if (!redisUrl) {
     const error = new Error('Connection processing is unavailable because REDIS_URL is not configured');
     error.code = 'QUEUE_UNAVAILABLE';

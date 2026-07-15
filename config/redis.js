@@ -1,9 +1,10 @@
 const { createClient } = require("redis");
+const { getRedisUrl } = require("./redisUrl");
 
 let redisClient;
 
 const getRedisClient = () => {
-  const redisUrl = process.env.REDIS_URL;
+  const redisUrl = getRedisUrl();
   if (!redisUrl) return null;
 
   if (!redisClient) {

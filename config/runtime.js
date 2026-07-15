@@ -2,6 +2,7 @@ const {
   createDefaultFeatures,
   normalizeFeatureMap,
 } = require("./featureCatalog");
+const { getRedisUrl } = require("./redisUrl");
 
 const parseJsonEnv = (name, fallback) => {
   const raw = process.env[name];
@@ -66,6 +67,7 @@ const validateRuntimeConfig = () => {
   if (missing.length > 0) {
     throw new Error(`Missing tenant runtime configuration: ${missing.join(", ")}`);
   }
+  getRedisUrl();
 };
 
 module.exports = {
