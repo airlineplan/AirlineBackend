@@ -1081,7 +1081,7 @@ test("maintenance calendar since-new threshold triggers once inside the master d
   assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-04-03");
 });
 
-test("maintenance compute creates ground days and excludes flying utilisation on conflicts", async () => {
+test("maintenance compute revalidates assignments against generated ground days", async () => {
   const day1 = utcDate(2026, 4, 1);
   const day2 = utcDate(2026, 4, 2);
 
@@ -1127,7 +1127,12 @@ test("maintenance compute creates ground days and excludes flying utilisation on
   });
   await Flight.updateOne(
     { userId: USER_ID, date: day2, flight: "MX2" },
-    { $set: { aircraft: { msn: 4150, registration: "VT-MX1" } } }
+    {
+      $set: {
+        aircraft: { msn: 4150, registration: "VT-MX1" },
+        variant: "A320",
+      },
+    }
   );
 
   const res = createMockResponse();
@@ -1149,9 +1154,11 @@ test("maintenance compute creates ground days and excludes flying utilisation on
   }).lean();
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.assignmentImpact.deletedCount, 0);
-  assert.equal(assignment?.flightNumber, "MX2");
-  assert.equal(flight?.aircraft?.registration, "VT-MX1");
+  assert.equal(res.body.assignmentImpact.deletedCount, 1);
+  assert.equal(res.body.assignmentImpact.daysTouched, 1);
+  assert.equal(res.body.assignmentDiagnostics.rejections.groundConflicts, 1);
+  assert.equal(assignment, null);
+  assert.ok(!flight?.aircraft?.registration);
   assert.equal(groundDay?.event, "Performance restoration");
   assert.equal(triggerDay?.tsn, 100);
 });

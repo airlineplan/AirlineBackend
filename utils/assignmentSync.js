@@ -152,6 +152,7 @@ const buildEmptyDiagnostics = (duplicateComboCount = 0) => ({
   successfullyAssigned: 0,
   appliedCount: 0,
   discardedCount: 0,
+  discardedDateCount: 0,
   revalidatedCount: 0,
   rejections: {
     missingFromFleetDB: 0,
@@ -282,6 +283,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
   const processedRowsByFlightKey = new Map();
   const acceptedIntervalsByAcftDate = new Map();
   const rejectedRows = [];
+  const discardedDateKeys = new Set();
 
   let notFoundCount = 0;
   let missingFleetDBCount = 0;
@@ -388,6 +390,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
     }
 
     if (isValid && assignedAcft) successfulAcftLinks++;
+    if (!isValid || !assignedAcft) discardedDateKeys.add(row.dateKey);
     if (errors.length > 0 && rejectedRows.length < 10) {
       rejectedRows.push(buildRejectionSummary(row, errors));
     }
@@ -494,6 +497,7 @@ const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
       successfullyAssigned: successfulAcftLinks,
       appliedCount: successfulAcftLinks,
       discardedCount: processedRowsByFlightKey.size - successfulAcftLinks,
+      discardedDateCount: discardedDateKeys.size,
       revalidatedCount: 0,
       rejections: {
         missingFromFleetDB: missingFleetDBCount,

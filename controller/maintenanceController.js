@@ -11,6 +11,7 @@ const Flight = require("../model/flight.js");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema.js");
 const GroundDay = require("../model/groundDay.js");
+const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const moment = require('moment'); // <-- Added missing moment import
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
@@ -2204,19 +2205,29 @@ exports.computeMaintenanceLogic = async (req, res) => {
     try {
         const userId = getUserIdFromReq(req);
         const result = await recomputeMaintenanceTimeline({ userId });
+        const assignmentDiagnostics = await revalidateAssignmentsForUser({ userId: String(userId) });
+        const discardedCount = Number(assignmentDiagnostics?.discardedCount || 0);
+        const flightNotFoundCount = Number(assignmentDiagnostics?.rejections?.flightNotFound || 0);
+        const assignmentImpact = {
+            deletedCount: discardedCount,
+            clearedFlightCount: Math.max(0, discardedCount - flightNotFoundCount),
+            daysTouched: Number(assignmentDiagnostics?.discardedDateCount || 0)
+        };
 
         if (result.message === "No flights found to compute.") {
             return res.status(200).json({
                 success: true,
                 message: result.message,
-                assignmentImpact: result.assignmentImpact || { deletedCount: 0, clearedFlightCount: 0, daysTouched: 0 }
+                assignmentImpact,
+                assignmentDiagnostics
             });
         }
 
         res.status(200).json({
             success: true,
             message: result.message,
-            assignmentImpact: result.assignmentImpact
+            assignmentImpact,
+            assignmentDiagnostics
         });
     } catch (error) {
         console.error("🔥 Error computing maintenance logic:", error);
