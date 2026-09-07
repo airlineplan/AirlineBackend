@@ -167,7 +167,7 @@ const buildEmptyDiagnostics = (duplicateComboCount = 0) => ({
   discardedRows: [],
 });
 
-const buildValidationContext = async ({ userId, rows }) => {
+const buildValidationContext = async ({ userId, rows, includeGroundDays = true }) => {
   const normalizedRows = [];
   const seenRowKeys = new Set();
   const flightSet = new Set();
@@ -225,12 +225,14 @@ const buildValidationContext = async ({ userId, rows }) => {
     })
       .select("sn regn entry exit variant")
       .lean(),
-    GroundDay.find({
-      userId,
-      date: { $gte: minDate, $lte: maxDate },
-    })
-      .select("msn date event")
-      .lean(),
+    includeGroundDays
+      ? GroundDay.find({
+        userId,
+        date: { $gte: minDate, $lte: maxDate },
+      })
+        .select("msn date event")
+        .lean()
+      : Promise.resolve([]),
   ]);
 
   return {
@@ -242,10 +244,16 @@ const buildValidationContext = async ({ userId, rows }) => {
   };
 };
 
-const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
+const buildAssignmentSyncPlan = async ({
+  userId,
+  rows,
+  priorityKeys = [],
+  includeGroundDays = true
+}) => {
   const { normalizedRows, duplicateComboCount, flights, fleetData, groundDays } = await buildValidationContext({
     userId,
     rows,
+    includeGroundDays
   });
 
   if (normalizedRows.length === 0) {

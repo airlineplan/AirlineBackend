@@ -12,6 +12,11 @@ const MaintenanceCalendar = require("../model/maintenanceCalendarSchema.js");
 const UtilisationAssumption = require("../model/utilisationAssumptionSchema.js");
 const GroundDay = require("../model/groundDay.js");
 const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
+const {
+    applyMaintenanceEvent,
+    getAssumptionUsageForDate,
+    projectDailyState
+} = require("../services/maintenanceProjectionService");
 const moment = require('moment'); // <-- Added missing moment import
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
@@ -366,14 +371,24 @@ const collectPostEventValues = (cal, triggeredGroups = []) => {
     return values;
 };
 
-const applyPostEventValuesToCurrent = (currentValues, postEventValues = {}) => ({
-    currentTso: Object.prototype.hasOwnProperty.call(postEventValues, "tsoTsr") ? postEventValues.tsoTsr : currentValues.currentTso,
-    currentCso: Object.prototype.hasOwnProperty.call(postEventValues, "csoCsr") ? postEventValues.csoCsr : currentValues.currentCso,
-    currentDso: Object.prototype.hasOwnProperty.call(postEventValues, "dsoDsr") ? postEventValues.dsoDsr : currentValues.currentDso,
-    currentTsr: Object.prototype.hasOwnProperty.call(postEventValues, "tsRplmt") ? postEventValues.tsRplmt : currentValues.currentTsr,
-    currentCsr: Object.prototype.hasOwnProperty.call(postEventValues, "csRplmt") ? postEventValues.csRplmt : currentValues.currentCsr,
-    currentDsr: Object.prototype.hasOwnProperty.call(postEventValues, "dsRplmt") ? postEventValues.dsRplmt : currentValues.currentDsr,
-});
+const applyPostEventValuesToCurrent = (currentValues, postEventValues = {}) => {
+    const next = applyMaintenanceEvent({
+        tsoTsr: currentValues.currentTso,
+        csoCsr: currentValues.currentCso,
+        dsoDsr: currentValues.currentDso,
+        tsRplmt: currentValues.currentTsr,
+        csRplmt: currentValues.currentCsr,
+        dsRplmt: currentValues.currentDsr
+    }, postEventValues);
+    return {
+        currentTso: next.tsoTsr,
+        currentCso: next.csoCsr,
+        currentDso: next.dsoDsr,
+        currentTsr: next.tsRplmt,
+        currentCsr: next.csRplmt,
+        currentDsr: next.dsRplmt
+    };
+};
 
 let maintenanceCalendarIndexesEnsured = false;
 const ensureMaintenanceCalendarIndexes = async () => {
@@ -832,30 +847,6 @@ const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
     };
 };
 
-const getAssumptionUsageForDate = ({ assumptions = [], effectiveMsn, date }) => {
-    const msn = String(effectiveMsn || "").trim();
-    if (!msn || !date) {
-        return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
-    }
-
-    const targetDate = moment.utc(date).startOf("day");
-    const match = assumptions.find((assumption) => (
-        String(assumption.msn || "").trim() === msn &&
-        targetDate.isSameOrAfter(moment.utc(assumption.fromDate).startOf("day")) &&
-        targetDate.isSameOrBefore(moment.utc(assumption.toDate).endOf("day"))
-    ));
-
-    if (!match) {
-        return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
-    }
-
-    return {
-        timeUsage: Number(match.hours || 0),
-        cycleUsage: Number(match.cycles || 0),
-        hasUsage: true
-    };
-};
-
 const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, assumptions = [] }) => {
     if (!effectiveMsn) {
         return { timeUsage: 0, cycleUsage: 0, hasUsage: false };
@@ -928,7 +919,10 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
         return {
             timeUsage,
             cycleUsage,
-            hasUsage: true
+            hasUsage: true,
+            source: "ASSIGNED",
+            assumption: null,
+            assumptionId: null
         };
     }
 
@@ -936,6 +930,25 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
 };
 
 const getUtcDateKey = (value) => moment.utc(value).format("YYYY-MM-DD");
+
+const createConfiguredProjectionTraceWriter = () => {
+    const tracedMsn = String(process.env.MAINTENANCE_TRACE_MSN || "").trim();
+    if (!tracedMsn) return null;
+    const fromDate = process.env.MAINTENANCE_TRACE_FROM
+        ? moment.utc(process.env.MAINTENANCE_TRACE_FROM).startOf("day")
+        : null;
+    const toDate = process.env.MAINTENANCE_TRACE_TO
+        ? moment.utc(process.env.MAINTENANCE_TRACE_TO).startOf("day")
+        : null;
+
+    return (row) => {
+        if (String(row.msnEsn || "").trim() !== tracedMsn) return;
+        const rowDate = moment.utc(row.date).startOf("day");
+        if (fromDate?.isValid() && rowDate.isBefore(fromDate, "day")) return;
+        if (toDate?.isValid() && rowDate.isAfter(toDate, "day")) return;
+        console.log(`[maintenance-projection] ${JSON.stringify(row)}`);
+    };
+};
 
 /**
  * Loads all data needed by a dashboard projection in a small, fixed number of
@@ -1182,14 +1195,22 @@ const createMaintenanceDashboardUsageResolver = async ({
                 const cycles = Number(assignment.metrics?.cycles);
                 return sum + (Number.isFinite(cycles) && cycles > 0 ? cycles : 1);
             }, 0),
-            hasUsage: true
+            hasUsage: true,
+            source: "ASSIGNED",
+            assumption: null,
+            assumptionId: null
         };
         usageByAssetDateAndMetric.set(usageKey, usage);
         return usage;
     };
 };
 
-const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedResetGroups } = {}) => {
+const recomputeMaintenanceTimeline = async ({
+    userId,
+    resetGroups: requestedResetGroups,
+    recomputeFromDate = null,
+    traceWriter = null
+} = {}) => {
     const flightBounds = await getFlightDateBounds({ userId });
 
     if (!flightBounds?.firstDate || !flightBounds?.lastDate) {
@@ -1201,6 +1222,9 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
 
     const masterStartDate = moment.utc(flightBounds.firstDate).startOf("day");
     const masterEndDate = moment.utc(flightBounds.lastDate).endOf("day");
+    const recomputeFrom = recomputeFromDate ? moment.utc(recomputeFromDate).startOf("day") : null;
+    const shouldPersistDate = (date) => !recomputeFrom || moment.utc(date).isSameOrAfter(recomputeFrom, "day");
+    const effectiveTraceWriter = traceWriter || createConfiguredProjectionTraceWriter();
 
     const allCalendars = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
     const utilisationAssumptions = await UtilisationAssumption.find({ userId: String(userId) }).lean();
@@ -1244,6 +1268,9 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
         };
         if (affectedCalendarIds.length > 0) {
             deleteGeneratedGroundDaysFilter.eventSeriesId = { $in: affectedCalendarIds };
+        }
+        if (recomputeFrom?.isValid()) {
+            deleteGeneratedGroundDaysFilter.date = { $gte: recomputeFrom.toDate() };
         }
         await GroundDay.deleteMany(deleteGeneratedGroundDaysFilter);
     }
@@ -1389,69 +1416,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
 
             const resetDate = moment.utc(currentReset.date).startOf("day");
 
-            if (i === 0) {
-                let backfillCursor = moment.utc(resetDate);
-                let currentTsn = normalizeMetricNumber(currentReset.tsn);
-                let currentCsn = normalizeMetricNumber(currentReset.csn);
-                let currentDsn = normalizeMetricNumber(currentReset.dsn);
-                let currentTso = normalizeMetricNumber(currentReset.tsoTsr);
-                let currentCso = normalizeMetricNumber(currentReset.csoCsr);
-                let currentDso = normalizeMetricNumber(currentReset.dsoDsr);
-                let currentTsr = normalizeMetricNumber(currentReset.tsRplmt);
-                let currentCsr = normalizeMetricNumber(currentReset.csRplmt);
-                let currentDsr = normalizeMetricNumber(currentReset.dsRplmt);
-
-                while (backfillCursor.isAfter(startBoundaryDate)) {
-                    const targetDate = moment.utc(backfillCursor).subtract(1, "day").startOf("day");
-                    const backfillUtilizationContext = await getEffectiveUtilisationContext({
-                        userId,
-                        msnEsn,
-                        date: backfillCursor
-                    });
-
-                    const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
-                        userId,
-                        effectiveMsn: backfillUtilizationContext.effectiveMsn || msnEsn,
-                        date: backfillCursor,
-                        metric: currentReset.timeMetric,
-                        assumptions: utilisationAssumptions
-                    });
-                    const dayUsage = 1;
-
-                    if (currentTsn !== null) currentTsn = Number((currentTsn - timeUsage).toFixed(2));
-                    if (currentCsn !== null) currentCsn -= cycleUsage;
-                    if (currentDsn !== null) currentDsn -= dayUsage;
-                    if (currentTso !== null) currentTso = Number((currentTso - timeUsage).toFixed(2));
-                    if (currentCso !== null) currentCso -= cycleUsage;
-                    if (currentDso !== null) currentDso -= dayUsage;
-                    if (currentTsr !== null) currentTsr = Number((currentTsr - timeUsage).toFixed(2));
-                    if (currentCsr !== null) currentCsr -= cycleUsage;
-                    if (currentDsr !== null) currentDsr -= dayUsage;
-
-                    totalOps.push({
-                        updateOne: {
-                            filter: { userId: String(userId), date: targetDate.toDate(), msnEsn, pn, snBn },
-                            update: {
-                                $set: {
-                                    userId: String(userId),
-                                    date: targetDate.toDate(),
-                                    msnEsn, pn, snBn,
-                                    tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
-                                    tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
-                                    tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr,
-                                    timeMetric: currentReset.timeMetric
-                                },
-                                $unset: { setFlag: "", remarks: "" }
-                            },
-                            upsert: true
-                        }
-                    });
-
-                    backfillCursor = targetDate;
-                }
-            }
-
-            totalOps.push({
+            if (shouldPersistDate(resetDate)) totalOps.push({
                 updateOne: {
                     filter: { userId: String(userId), date: resetDate.toDate(), msnEsn, pn, snBn },
                     update: {
@@ -1496,6 +1461,16 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
             assetCalendars.forEach(c => calendarIdsTouched.add(String(c._id)));
             let inMaintenanceUntil = null;
             let pendingPostEvents = [];
+            const emitTrace = (payload) => {
+                if (!effectiveTraceWriter) return;
+                effectiveTraceWriter({
+                    msnEsn,
+                    pn,
+                    componentSerial: snBn,
+                    statusSourceBaselineRecordId: currentReset._id ? String(currentReset._id) : null,
+                    ...payload
+                });
+            };
 
             while (currDate.isSameOrBefore(segmentEnd)) {
                 const currentUtilizationContext = await getEffectiveUtilisationContext({
@@ -1504,11 +1479,23 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     date: currDate
                 });
                 const currentEffectiveMsn = currentUtilizationContext.effectiveMsn || msnEsn;
+                const startingValues = getMetricValuesFromCurrent({
+                    currentTsn, currentCsn, currentDsn,
+                    currentTso, currentCso, currentDso,
+                    currentTsr, currentCsr, currentDsr
+                });
 
                 if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
-                    if (currentDsn !== null) currentDsn += 1;
-                    if (currentDso !== null) currentDso += 1;
-                    if (currentDsr !== null) currentDsr += 1;
+                    const downtimeProjection = projectDailyState({
+                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                        tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                        tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr
+                    }, { canOperate: false });
+                    ({
+                        tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                        tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                        tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr
+                    } = downtimeProjection.state);
 
                     const duePostEvents = pendingPostEvents.filter(event => currDate.isSame(event.date, "day"));
                     if (duePostEvents.length > 0) {
@@ -1525,7 +1512,34 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         pendingPostEvents = pendingPostEvents.filter(event => !currDate.isSame(event.date, "day"));
                     }
 
-                    totalOps.push({
+                    const activeAssumption = getAssumptionUsageForDate({
+                        assumptions: utilisationAssumptions,
+                        effectiveMsn: currentEffectiveMsn,
+                        date: currDate
+                    });
+                    emitTrace({
+                        date: currDate.format("YYYY-MM-DD"),
+                        startingTsn: startingValues.tsn,
+                        startingCsn: startingValues.csn,
+                        startingDsn: startingValues.dsn,
+                        aircraftState: "MAINTENANCE",
+                        maintenanceOnGround: true,
+                        actualUtilisationBh: 0,
+                        actualUtilisationCycles: 0,
+                        selectedAssumptionId: activeAssumption.assumptionId,
+                        assumptionBh: activeAssumption.timeUsage,
+                        assumptionCycles: activeAssumption.cycleUsage,
+                        finalAppliedBh: 0,
+                        finalAppliedCycles: 0,
+                        endingTsn: currentTsn,
+                        endingCsn: currentCsn,
+                        endingDsn: currentDsn,
+                        maintenanceThresholdEvaluated: [],
+                        maintenanceEventCreated: false,
+                        maintenanceEventApplied: duePostEvents.length > 0
+                    });
+
+                    if (shouldPersistDate(currDate)) totalOps.push({
                         updateOne: {
                             filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                             update: {
@@ -1548,38 +1562,25 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                     continue;
                 }
 
-                const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
+                const usage = await getEffectiveUsageForDate({
                     userId,
                     effectiveMsn: currentEffectiveMsn,
                     date: currDate,
                     metric: currentReset.timeMetric,
                     assumptions: utilisationAssumptions
                 });
-                const dayUsage = 1;
-
-                const projectedTsn = currentTsn !== null ? Number((currentTsn + timeUsage).toFixed(2)) : null;
-                const projectedCsn = currentCsn !== null ? currentCsn + cycleUsage : null;
-                const projectedDsn = currentDsn !== null ? currentDsn + dayUsage : null;
-
-                const projectedTso = currentTso !== null ? Number((currentTso + timeUsage).toFixed(2)) : null;
-                const projectedCso = currentCso !== null ? currentCso + cycleUsage : null;
-                const projectedDso = currentDso !== null ? currentDso + dayUsage : null;
-
-                const projectedTsr = currentTsr !== null ? Number((currentTsr + timeUsage).toFixed(2)) : null;
-                const projectedCsr = currentCsr !== null ? currentCsr + cycleUsage : null;
-                const projectedDsr = currentDsr !== null ? currentDsr + dayUsage : null;
-
-                const projectedValues = {
-                    tsn: projectedTsn,
-                    csn: projectedCsn,
-                    dsn: projectedDsn,
-                    tsoTsr: projectedTso,
-                    csoCsr: projectedCso,
-                    dsoDsr: projectedDso,
-                    tsRplmt: projectedTsr,
-                    csRplmt: projectedCsr,
-                    dsRplmt: projectedDsr
-                };
+                const { timeUsage, cycleUsage } = usage;
+                const dailyProjection = projectDailyState({
+                    tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
+                    tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
+                    tsRplmt: currentTsr, csRplmt: currentCsr, dsRplmt: currentDsr
+                }, { canOperate: true, timeUsage, cycleUsage });
+                const projectedValues = dailyProjection.state;
+                const {
+                    tsn: projectedTsn, csn: projectedCsn, dsn: projectedDsn,
+                    tsoTsr: projectedTso, csoCsr: projectedCso, dsoDsr: projectedDso,
+                    tsRplmt: projectedTsr, csRplmt: projectedCsr, dsRplmt: projectedDsr
+                } = projectedValues;
 
                 const currentValues = getMetricValuesFromCurrent({
                     currentTsn,
@@ -1622,17 +1623,15 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         inMaintenanceUntil = moment.utc(currDate).add(maxDownDaysToApply - 1, "days");
                     }
 
-                    if (maxDownDaysToApply <= 0) {
-                        currentTsn = projectedTsn;
-                        currentCsn = projectedCsn;
-                        currentDsn = projectedDsn;
-                        currentTso = projectedTso;
-                        currentCso = projectedCso;
-                        currentDso = projectedDso;
-                        currentTsr = projectedTsr;
-                        currentCsr = projectedCsr;
-                        currentDsr = projectedDsr;
-                    }
+                    currentTsn = projectedTsn;
+                    currentCsn = projectedCsn;
+                    currentDsn = projectedDsn;
+                    currentTso = projectedTso;
+                    currentCso = projectedCso;
+                    currentDso = projectedDso;
+                    currentTsr = projectedTsr;
+                    currentCsr = projectedCsr;
+                    currentDsr = projectedDsr;
 
                     const immediatePostEventValues = {};
                     for (const { cal, state, triggerDefinition, downDaysToApply } of triggeredCalendars) {
@@ -1655,7 +1654,7 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                             occurrenceNumber: occurrence.occurrenceNumber,
                             startDate: currDate,
                             downtimeDays: downDaysToApply
-                        }).map(row => ({
+                        }).filter(row => shouldPersistDate(row.date)).map(row => ({
                             updateOne: {
                                 filter: {
                                     userId: row.userId,
@@ -1696,7 +1695,33 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                         }, immediatePostEventValues));
                     }
 
-                    totalOps.push({
+                    emitTrace({
+                        date: currDate.format("YYYY-MM-DD"),
+                        startingTsn: startingValues.tsn,
+                        startingCsn: startingValues.csn,
+                        startingDsn: startingValues.dsn,
+                        aircraftState: "OPERATING_TO_MAINTENANCE",
+                        maintenanceOnGround: false,
+                        actualUtilisationBh: usage.source === "ASSIGNED" ? timeUsage : 0,
+                        actualUtilisationCycles: usage.source === "ASSIGNED" ? cycleUsage : 0,
+                        selectedAssumptionId: usage.assumptionId || null,
+                        assumptionBh: usage.source === "ASSUMPTION" ? timeUsage : 0,
+                        assumptionCycles: usage.source === "ASSUMPTION" ? cycleUsage : 0,
+                        finalAppliedBh: dailyProjection.appliedTime,
+                        finalAppliedCycles: dailyProjection.appliedCycles,
+                        endingTsn: currentTsn,
+                        endingCsn: currentCsn,
+                        endingDsn: currentDsn,
+                        maintenanceThresholdEvaluated: triggeredCalendars.map(item => ({
+                            event: item.cal.schEvent || "",
+                            metric: item.triggerDefinition.metricCode,
+                            threshold: item.triggerDefinition.threshold
+                        })),
+                        maintenanceEventCreated: true,
+                        maintenanceEventApplied: Object.keys(immediatePostEventValues).length > 0
+                    });
+
+                    if (shouldPersistDate(currDate)) totalOps.push({
                         updateOne: {
                             filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                             update: {
@@ -1732,7 +1757,35 @@ const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedRese
                 currentCsr = projectedCsr;
                 currentDsr = projectedDsr;
 
-                totalOps.push({
+                emitTrace({
+                    date: currDate.format("YYYY-MM-DD"),
+                    startingTsn: startingValues.tsn,
+                    startingCsn: startingValues.csn,
+                    startingDsn: startingValues.dsn,
+                    aircraftState: "OPERATING",
+                    maintenanceOnGround: false,
+                    actualUtilisationBh: usage.source === "ASSIGNED" ? timeUsage : 0,
+                    actualUtilisationCycles: usage.source === "ASSIGNED" ? cycleUsage : 0,
+                    selectedAssumptionId: usage.assumptionId || null,
+                    assumptionBh: usage.source === "ASSUMPTION" ? timeUsage : 0,
+                    assumptionCycles: usage.source === "ASSUMPTION" ? cycleUsage : 0,
+                    finalAppliedBh: dailyProjection.appliedTime,
+                    finalAppliedCycles: dailyProjection.appliedCycles,
+                    endingTsn: currentTsn,
+                    endingCsn: currentCsn,
+                    endingDsn: currentDsn,
+                    maintenanceThresholdEvaluated: assetCalendars.map(cal => ({
+                        event: cal.schEvent || "",
+                        thresholds: getCalendarTriggerDefinitions(cal).map(definition => ({
+                            metric: definition.metricCode,
+                            threshold: definition.interval
+                        }))
+                    })),
+                    maintenanceEventCreated: false,
+                    maintenanceEventApplied: false
+                });
+
+                if (shouldPersistDate(currDate)) totalOps.push({
                     updateOne: {
                         filter: { userId: String(userId), date: currDate.toDate(), msnEsn, pn, snBn },
                         update: {
@@ -1876,17 +1929,24 @@ const buildMaintenanceStatusFromReset = async ({
     const targetDate = moment.utc(selectedDate).startOf("day");
     if (!resetDate.isValid() || !targetDate.isValid()) return null;
 
-    let currentTsn = normalizeMetricNumber(reset.tsn);
-    let currentCsn = normalizeMetricNumber(reset.csn);
-    let currentDsn = normalizeMetricNumber(reset.dsn);
-    let currentTso = normalizeMetricNumber(reset.tsoTsr);
-    let currentCso = normalizeMetricNumber(reset.csoCsr);
-    let currentDso = normalizeMetricNumber(reset.dsoDsr);
-    let currentTsr = normalizeMetricNumber(reset.tsRplmt);
-    let currentCsr = normalizeMetricNumber(reset.csRplmt);
-    let currentDsr = normalizeMetricNumber(reset.dsRplmt);
+    // A status record is an observation/baseline, not a future target to work
+    // backwards from. Without a baseline at or before the requested date there
+    // is no causally valid state to return.
+    if (targetDate.isBefore(resetDate)) return null;
 
-    const applyUsage = async (date, direction) => {
+    let currentState = {
+        tsn: normalizeMetricNumber(reset.tsn),
+        csn: normalizeMetricNumber(reset.csn),
+        dsn: normalizeMetricNumber(reset.dsn),
+        tsoTsr: normalizeMetricNumber(reset.tsoTsr),
+        csoCsr: normalizeMetricNumber(reset.csoCsr),
+        dsoDsr: normalizeMetricNumber(reset.dsoDsr),
+        tsRplmt: normalizeMetricNumber(reset.tsRplmt),
+        csRplmt: normalizeMetricNumber(reset.csRplmt),
+        dsRplmt: normalizeMetricNumber(reset.dsRplmt)
+    };
+
+    const applyUsage = async (date) => {
         let usage;
         if (usageResolver) {
             usage = await usageResolver({
@@ -1908,40 +1968,21 @@ const buildMaintenanceStatusFromReset = async ({
                 assumptions
             });
         }
-        const { timeUsage, cycleUsage } = usage;
-        const dayUsage = 1;
-
-        if (currentTsn !== null) currentTsn = Number((currentTsn + (direction * timeUsage)).toFixed(2));
-        if (currentCsn !== null) currentCsn += direction * cycleUsage;
-        if (currentDsn !== null) currentDsn += direction * dayUsage;
-        if (currentTso !== null) currentTso = Number((currentTso + (direction * timeUsage)).toFixed(2));
-        if (currentCso !== null) currentCso += direction * cycleUsage;
-        if (currentDso !== null) currentDso += direction * dayUsage;
-        if (currentTsr !== null) currentTsr = Number((currentTsr + (direction * timeUsage)).toFixed(2));
-        if (currentCsr !== null) currentCsr += direction * cycleUsage;
-        if (currentDsr !== null) currentDsr += direction * dayUsage;
+        currentState = projectDailyState(currentState, {
+            canOperate: true,
+            timeUsage: usage.timeUsage,
+            cycleUsage: usage.cycleUsage
+        }).state;
     };
 
-    if (targetDate.isBefore(resetDate)) {
-        for (let cursor = resetDate.clone(); cursor.isAfter(targetDate); cursor.subtract(1, "day")) {
-            await applyUsage(cursor.clone(), -1);
-        }
-    } else if (targetDate.isAfter(resetDate)) {
+    if (targetDate.isAfter(resetDate)) {
         for (let cursor = resetDate.clone().add(1, "day"); cursor.isSameOrBefore(targetDate); cursor.add(1, "day")) {
-            await applyUsage(cursor.clone(), 1);
+            await applyUsage(cursor.clone());
         }
     }
 
     return {
-        tsn: currentTsn,
-        csn: currentCsn,
-        dsn: currentDsn,
-        tsoTsr: currentTso,
-        csoCsr: currentCso,
-        dsoDsr: currentDso,
-        tsRplmt: currentTsr,
-        csRplmt: currentCsr,
-        dsRplmt: currentDsr,
+        ...currentState,
         timeMetric: reset.timeMetric
     };
 };
@@ -2059,13 +2100,12 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 allFleetFilter.userId = String(userId);
             }
 
-            const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions, calendarRows] = await Promise.all([
+            const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 Fleet.find(fleetFilter).select("sn titled regn").lean(),
                 Fleet.find(allFleetFilter).select("sn titled regn").lean(),
                 UtilisationAssumption.find({ userId: String(userId) }).lean(),
-                MaintenanceCalendar.find({ userId: String(userId) }).select("calMsn calPn snBn").lean(),
             ]);
 
             const getFleetTitledDisplay = (asset = {}) =>
@@ -2110,12 +2150,6 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 resetRecordsByKey.set(key, recordsForKey);
             });
 
-            const calendarKeys = new Set((calendarRows || []).map(record => [
-                String(record.calMsn || "").trim().toUpperCase(),
-                String(record.calPn || "").trim().toUpperCase(),
-                String(record.snBn || "").trim().toUpperCase()
-            ].join("|")));
-
             const selectedDateMoment = selectedDateBounds.start.clone().endOf("day");
             const selectedDate = selectedDateMoment.format("YYYY-MM-DD");
             const rowSourcesByKey = new Map(utilByKey);
@@ -2136,19 +2170,18 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 return activeFleetSnSet.has(msnEsn) || activeFleetSnSet.has(snBn);
             });
 
-            const rowPlans = rowSourceEntries.map(([utilKey, util]) => {
+            const rowPlans = rowSourceEntries.map(([utilKey]) => {
+                const util = utilByKey.get(utilKey) || null;
                 const resetRecordsForKey = resetRecordsByKey.get(utilKey) || [];
                 const record = resetRecordsForKey.find(reset =>
                     moment.utc(reset.date).isSameOrBefore(selectedDateMoment)
-                ) || [...resetRecordsForKey].reverse().find(reset =>
-                    moment.utc(reset.date).isAfter(selectedDateMoment)
                 ) || util;
                 const exactResetRecord = resetRecordsForKey.find(reset =>
                     isSameUtcDay(reset.date, selectedDateMoment)
                 );
                 const sourceRecord = exactResetRecord || record || util;
                 return { utilKey, util, exactResetRecord, sourceRecord };
-            });
+            }).filter(plan => plan.sourceRecord);
             const dashboardUsageResolver = await createMaintenanceDashboardUsageResolver({
                 userId,
                 resets: rowPlans.map(({ sourceRecord }) => sourceRecord),
@@ -2167,11 +2200,9 @@ exports.getMaintenanceDashboard = async (req, res) => {
                         usageResolver: dashboardUsageResolver
                     })
                     : null;
-                const hasCalendarSchedule = calendarKeys.has(utilKey);
                 const metricSource = exactResetRecord
-                    || (hasCalendarSchedule && util ? util : null)
-                    || computedMetricSource
                     || util
+                    || computedMetricSource
                     || sourceRecord;
 
                 return {
@@ -2491,8 +2522,9 @@ exports.deleteResetRecord = async (req, res) => {
  */
 /**
  * 4. POST: Trigger to compute maintenance logic (The green "Compute" button)
- * This function performs a full recalculation for all assets that have Maintenance Reset records.
- * It propagates metrics forwards and backwards from these reset points.
+ * This function performs a full forward-only recalculation for all assets that
+ * have Maintenance Reset records. It never derives historical state from a
+ * later reset, maintenance event, or utilisation assumption.
  */
 exports.computeMaintenanceLogic = async (req, res) => {
     try {
@@ -2951,6 +2983,16 @@ exports.bulkSaveUtilisationAssumptions = async (req, res) => {
         };
 
         const bulkOperations = [];
+        const existingIds = utilisationAssumptions
+            .map(record => record.id)
+            .filter(isValidObjectId);
+        const existingAssumptions = existingIds.length > 0
+            ? await UtilisationAssumption.find({
+                _id: { $in: existingIds },
+                userId: String(userId)
+            }).select("fromDate").lean()
+            : [];
+        const affectedFromDates = existingAssumptions.map(record => moment.utc(record.fromDate).startOf("day"));
 
         for (const record of utilisationAssumptions) {
             const values = [record.msn, record.fromDate, record.toDate, record.hours, record.cycles, record.avgDowndays];
@@ -2977,6 +3019,7 @@ exports.bulkSaveUtilisationAssumptions = async (req, res) => {
 
             const normalizedFromDate = fromDate.startOf("day").toDate();
             const normalizedToDate = toDate.startOf("day").toDate();
+            affectedFromDates.push(moment.utc(normalizedFromDate).startOf("day"));
             const filter = isValidObjectId(record.id)
                 ? { _id: record.id, userId: String(userId) }
                 : {
@@ -3009,7 +3052,10 @@ exports.bulkSaveUtilisationAssumptions = async (req, res) => {
             await UtilisationAssumption.bulkWrite(bulkOperations, { ordered: false });
         }
 
-        await recomputeMaintenanceTimeline({ userId });
+        const earliestAffectedDate = affectedFromDates.length > 0
+            ? moment.min(affectedFromDates).startOf("day").toDate()
+            : null;
+        await recomputeMaintenanceTimeline({ userId, recomputeFromDate: earliestAffectedDate });
 
         res.status(200).json({ success: true, message: "Utilisation assumptions updated successfully." });
     } catch (error) {
@@ -3032,7 +3078,7 @@ exports.deleteUtilisationAssumption = async (req, res) => {
             return res.status(404).json({ message: "Utilisation assumption not found." });
         }
 
-        await recomputeMaintenanceTimeline({ userId });
+        await recomputeMaintenanceTimeline({ userId, recomputeFromDate: deletedRecord.fromDate });
 
         res.status(200).json({ success: true, message: "Utilisation assumption deleted successfully." });
     } catch (error) {

@@ -1,12 +1,12 @@
 const xlsx = require('xlsx');
 const Assignment = require('../model/assignment');
 const Flight = require('../model/flight');
+const GroundDay = require('../model/groundDay');
 const moment = require('moment');
 const {
     applyAssignmentSyncPlan,
     buildAssignmentSyncPlan,
     buildDateFlightKey,
-    revalidateAssignmentsForUser,
 } = require('../utils/assignmentSync');
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -22,13 +22,12 @@ const buildUploadMessage = (diagnostics) => {
     const postExitDates = diagnostics?.rejections?.postExitDates || 0;
     const flightNotFound = diagnostics?.rejections?.flightNotFound || 0;
     const variantMismatches = diagnostics?.rejections?.variantMismatches || 0;
-    const groundConflicts = diagnostics?.rejections?.groundConflicts || 0;
     const overlaps = diagnostics?.rejections?.acftOverlaps || 0;
     const rejectedRows = Array.isArray(diagnostics?.discardedRows)
         ? diagnostics.discardedRows
         : (Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : []);
 
-    if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches && !groundConflicts && !overlaps) {
+    if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches && !overlaps) {
         if (Number(diagnostics?.discardedCount || 0) > 0) {
             return `Assignments uploaded with warnings. ${diagnostics.discardedCount} row(s) were disregarded.`;
         }
@@ -53,9 +52,6 @@ const buildUploadMessage = (diagnostics) => {
     }
     if (variantMismatches) {
         parts.push(`${variantMismatches} row(s) failed aircraft-variant validation.`);
-    }
-    if (groundConflicts) {
-        parts.push(`${groundConflicts} row(s) conflicted with ground-day records.`);
     }
     if (overlaps) {
         parts.push(`${overlaps} row(s) overlapped another assignment for the same aircraft.`);
@@ -170,21 +166,19 @@ exports.uploadAssignments = async (req, res) => {
             userId,
             rows: validRows,
             priorityKeys: uploadedKeys,
+            // Ground days are derived from the previous maintenance compute.
+            // They must not reject a new source assignment upload.
+            includeGroundDays: false,
         });
 
         await applyAssignmentSyncPlan(syncResult);
-
-        const revalidationDiagnostics = await revalidateAssignmentsForUser({
-            userId,
-            priorityKeys: uploadedKeys,
-        });
+        // Assignment is source data. Existing on-ground rows were derived from
+        // the old assignment plan and are stale until the user runs Compute.
+        await GroundDay.deleteMany({ userId: String(userId) });
         const diagnostics = {
             ...syncResult.diagnostics,
-            discardedCount:
-                Number(syncResult.diagnostics?.discardedCount || 0) +
-                Number(revalidationDiagnostics?.discardedCount || 0),
-            revalidatedCount: revalidationDiagnostics?.revalidatedCount || 0,
-            revalidation: revalidationDiagnostics,
+            revalidatedCount: 0,
+            groundDaysCleared: true,
         };
         const message = buildUploadMessage(diagnostics);
 
