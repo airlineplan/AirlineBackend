@@ -22,6 +22,12 @@ test("new stations default their currency code to INR", () => {
   assert.equal(station.currencyCode, "INR");
 });
 
+test("stations retain their assigned currency code", () => {
+  const station = new Station({ stationName: "AUH", userId: "user-1", currencyCode: "aed" });
+
+  assert.equal(station.currencyCode, "AED");
+});
+
 test("currency helpers use INR when reporting currency is omitted", () => {
   assert.equal(normalizeCostConfig({}).reportingCurrency, "INR");
   assert.equal(
