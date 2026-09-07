@@ -34,5 +34,6 @@ const aircraftOnwingSchema = new mongoose.Schema({
 
 // Compound index for fast lookup of an aircraft's configuration over time
 aircraftOnwingSchema.index({ userId: 1, date: 1, msn: 1 });
+aircraftOnwingSchema.index({ userId: 1, msn: 1, date: -1 });
 
 module.exports = mongoose.model("AircraftOnwing", aircraftOnwingSchema);

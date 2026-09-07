@@ -3,9 +3,12 @@ const RESEND_EMAILS_URL = "https://api.resend.com/emails";
 const DEFAULT_FROM_EMAIL = "Airlineplan <admin@mail.airlineplan.com>";
 const DEFAULT_CONTACT_EMAIL = "admin@airlineplan.com";
 
-const getFromEmail = () => process.env.RESEND_FROM_EMAIL || DEFAULT_FROM_EMAIL;
+const getFromEmail = () =>
+  String(process.env.RESEND_FROM_EMAIL || DEFAULT_FROM_EMAIL).trim();
 const getContactEmail = () =>
-  process.env.CONTACT_EMAIL || process.env.ADMIN_EMAIL || DEFAULT_CONTACT_EMAIL;
+  String(
+    process.env.CONTACT_EMAIL || process.env.ADMIN_EMAIL || DEFAULT_CONTACT_EMAIL
+  ).trim();
 
 const escapeHtml = (value) =>
   String(value || "")
@@ -16,9 +19,11 @@ const escapeHtml = (value) =>
     .replace(/'/g, "&#39;");
 
 const sendResendEmail = async ({ from, to, subject, text, html, replyTo }) => {
-  const apiKey = process.env.RESEND_API_KEY;
+  const apiKey = String(process.env.RESEND_API_KEY || "").trim();
   if (!apiKey) {
-    throw new Error("RESEND_API_KEY is not configured");
+    const error = new Error("RESEND_API_KEY is not configured");
+    error.code = "EMAIL_CONFIG_MISSING";
+    throw error;
   }
 
   const payload = {

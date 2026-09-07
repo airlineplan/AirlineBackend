@@ -362,7 +362,6 @@ const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
 
           if (groundRecord) {
             isValid = false;
-            assignedAcft = null;
             removedReason = "GROUND_DAY_CONFLICT";
             groundConflictCount++;
             errors.push(`Aircraft ${msn} is on ground for this date`);
@@ -452,6 +451,31 @@ const buildAssignmentSyncPlan = async ({ userId, rows, priorityKeys = [] }) => {
               isValid: true,
               validationErrors: [],
               removedReason: null,
+            },
+          },
+          upsert: true,
+        },
+      });
+    } else if (removedReason === "GROUND_DAY_CONFLICT" && assignedAcft && msnVal !== null) {
+      // Keep the planned assignment as the source used to forecast the
+      // maintenance threshold on a later recomputation. Normal assignment
+      // views only return valid records, so the grounded aircraft remains
+      // unavailable and the flight link below is still cleared.
+      assignmentBulkOps.push({
+        updateOne: {
+          filter: { userId, date: row.assignDate, flightNumber: row.flight },
+          update: {
+            $set: {
+              userId,
+              date: row.assignDate,
+              flightNumber: row.flight,
+              "aircraft.registration": assignedAcft,
+              "aircraft.msn": msnVal,
+              rotationNumber: rotationNum,
+              legNumber,
+              isValid: false,
+              validationErrors: errors,
+              removedReason,
             },
           },
           upsert: true,

@@ -93,6 +93,10 @@ const createApp = () => {
     });
   });
 
+  // Public website endpoints must be available on both the root control plane
+  // and tenant deployments.
+  app.use("/", require("./routes/publicRoutes"));
+
   if (mode === "control-plane") {
     app.use("/admin", require("./routes/adminRoutes"));
     app.get("/api/health", async (_req, res) => {

@@ -5,6 +5,7 @@ const path = require("path");
 const verifyToken = require("../middlware/auth.js");
 const { requireTenantAdmin } = require("../middlware/auth.js");
 const { requireFeatureAccess, getTenantAdminFeatures } = require("../middlware/tenantFeatureAccess");
+const { SUPPORTING_PAGE_READ_ACCESS } = require("../config/supportingPageAccess");
 const userLogin = require("../controller/userLogin");
 var bodyParser = require("body-parser");
 const { verify } = require("crypto");
@@ -49,7 +50,7 @@ user.post(
   importUser
 );
 user.post("/add-Data", jsonParser, ...featureAccess("network", "edit"), dataController.AddData);
-user.get("/get-data", ...featureAccess("network"), dataController.getData);
+user.get("/get-data", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.networkData), dataController.getData);
 user.get("/downloadFLGTs", ...featureAccess("flgts"), dataController.downloadExpenses);
 user.get("/products/:id", ...featureAccess("network"), dataController.singleData);
 user.delete("/delete", jsonParser, ...featureAccess("network", "edit"), dataController.deleteFlightsAndUpdateSectors);
@@ -60,7 +61,7 @@ user.put(
   ...featureAccess("network", "edit"),
   dataController.updateData
 );
-user.get("/sectors", ...featureAccess("sectors"), sectorController.getSecors);
+user.get("/sectors", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.sectorData), sectorController.getSecors);
 user.post("/add-sector", jsonParser, ...featureAccess("sectors", "edit"), sectorController.AddSectors);
 user.put(
   "/update-sectore/:id",
@@ -88,7 +89,6 @@ user.get("/tenant-admin/features", verifyToken, requireTenantAdmin, (req, res) =
   return res.status(200).json({ features: getTenantAdminFeatures() });
 });
 user.post("/send-email", jsonParser, userLogin.sendEmail);
-user.post("/send-contactEmail", jsonParser, userLogin.sendContactEmail);
 user.post("/change-passowrd", jsonParser, userLogin.changePassword);
 user.get("/flight", ...featureAccess("flgts"), flightController.getFlights);
 user.post("/searchflights", ...featureAccess("flgts"), flightController.searchFlights);
@@ -100,8 +100,8 @@ user.get("/dashboard", ...featureAccess("dashboard"), dashboardController.getDas
 // 🔥 USE THE IMPORTED HELPER DIRECTLY FOR THIS ROUTE
 user.get("/createConnections", ...featureAccess(["connections", "view", "dashboard"], "edit"), createConnections);
 user.get("/getConnections", ...featureAccess("connections"), dataController.getConnections);
-user.get("/dashboard/populateDropDowns", ...featureAccess(["dashboard", "cost", "revenue", "network"]), dashboardController.populateDashboardDropDowns);
-user.get("/get-stationData", ...featureAccess(["stations", "network", "sectors", "poo"]), stationController.getStationsTableData);
+user.get("/dashboard/populateDropDowns", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.dashboardDropdowns), dashboardController.populateDashboardDropDowns);
+user.get("/get-stationData", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.stationData), stationController.getStationsTableData);
 user.get("/getNextRotationNumber", ...featureAccess("rotations", "edit"), rotationController.getNextRotationNumber);
 user.get("/rotationbyid/:id", ...featureAccess("rotations"), rotationController.singleRotationDetail);
 user.post("/updateRotationSummary", ...featureAccess("rotations", "edit"), jsonParser, rotationController.updateRotationSummary);
@@ -122,7 +122,9 @@ user.get("/maintenance-reserve/schedule", ...featureAccess("cost"), costControll
 user.post("/cost-page-data", ...featureAccess("cost"), jsonParser, costController.getCostPageData);
 user.post("/cost-page-data/recalculate-and-save", ...featureAccess("cost", "edit"), jsonParser, costController.recalculateAndSaveCostPageData);
 
-user.get("/apu-fuel-costs", ...featureAccess("cost"), apuFuelController.getApuFuelCosts);
+// Dashboard's financial breakdown reads these rows without granting access to
+// the Cost page itself. Mutating APU fuel data still requires Cost edit access.
+user.get("/apu-fuel-costs", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.apuFuelRows), apuFuelController.getApuFuelCosts);
 user.post("/apu-fuel-costs", ...featureAccess("cost", "edit"), jsonParser, apuFuelController.bulkSaveApuFuelCosts);
 user.post("/apu-fuel-costs/rebuild", ...featureAccess("cost", "edit"), jsonParser, apuFuelController.rebuildApuFuelCosts);
 
@@ -170,7 +172,7 @@ user.get(
 
 user.get(
   "/fleet",
-  ...featureAccess("fleet"),
+  ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.fleetData),
   fleetController.getAllFleet
 );
 
@@ -240,7 +242,7 @@ user.post(
 // 5. Get Rotable Movements for the Modal
 user.get(
   "/maintenance/rotables",
-  ...featureAccess("maintenance"),
+  ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.maintenanceRotables),
   maintenanceController.getRotables
 );
 
@@ -336,9 +338,9 @@ user.post("/poo/update", ...featureAccess("poo", "edit"), jsonParser, pooControl
 user.post("/poo/transit", ...featureAccess("poo", "edit"), jsonParser, pooController.upsertTransit);
 user.delete("/poo/transit/:odGroupKey", ...featureAccess("poo", "edit"), pooController.deleteTransit);
 user.delete("/poo", ...featureAccess("poo", "edit"), jsonParser, pooController.deletePooRecords);
-user.get("/revenue/config", ...featureAccess("revenue"), pooController.getRevenueConfig);
+user.get("/revenue/config", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.financialConfig), pooController.getRevenueConfig);
 user.post("/revenue/config", ...featureAccess("revenue", "edit"), jsonParser, pooController.saveRevenueConfig);
-user.get("/revenue-config", ...featureAccess("revenue"), pooController.getRevenueConfig);
+user.get("/revenue-config", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.financialConfig), pooController.getRevenueConfig);
 user.post("/revenue-config", ...featureAccess("revenue", "edit"), jsonParser, pooController.saveRevenueConfig);
 user.post("/revenue-config/reporting-currency", ...featureAccess(["revenue", "dashboard"], "edit"), jsonParser, pooController.saveReportingCurrency);
 user.post("/revenue-config/fx-rates", ...featureAccess(["revenue", "dashboard"], "edit"), jsonParser, pooController.saveFxRates);

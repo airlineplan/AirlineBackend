@@ -16,6 +16,7 @@ const {
 const { verifyBootstrapToken } = require("../controller/tenantUserController");
 const { validateSubdomain } = require("../services/subdomainValidation");
 const { signAdminToken, verifyAdminCredentials, verifyAdminToken } = require("../utils/adminAuth");
+const { SUPPORTING_PAGE_READ_ACCESS } = require("../config/supportingPageAccess");
 
 test("subdomain validation accepts tenant slugs and blocks reserved/unsafe values", () => {
   assert.deepEqual(validateSubdomain("Star-Air").valid, true);
@@ -291,6 +292,59 @@ test("regular user page access enforces read and edit levels", () => {
   assert.equal(noAccessNextCalled, false);
   assert.equal(noAccess.statusCode, 403);
 });
+
+const supportingReadCases = [
+  ["networkData", "sectors"],
+  ["sectorData", "cost"],
+  ["dashboardDropdowns", "list"],
+  ["dashboardDropdowns", "connections"],
+  ["stationData", "view"],
+  ["stationData", "cost"],
+  ["fleetData", "maintenance"],
+  ["fleetData", "cost"],
+  ["maintenanceRotables", "cost"],
+  ["financialConfig", "cost"],
+  ["financialConfig", "poo"],
+  ["financialConfig", "stations"],
+  ["apuFuelRows", "dashboard"],
+];
+
+supportingReadCases.forEach(([policyName, pageId]) => test(`${pageId} access permits the ${policyName} support read`, () => {
+  const res = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+  let nextCalled = false;
+  const isolatedPageAccess = Object.fromEntries(
+    Object.keys(createDefaultPageAccess()).map((featureId) => [featureId, "none"])
+  );
+  isolatedPageAccess[pageId] = "read";
+
+  requireFeatureAccess(SUPPORTING_PAGE_READ_ACCESS[policyName], "read")(
+    {
+      user: {
+        role: "user",
+        pageAccess: isolatedPageAccess,
+        pageAccessConfigured: true,
+      },
+    },
+    res,
+    () => {
+      nextCalled = true;
+    }
+  );
+
+  assert.equal(nextCalled, true);
+  assert.equal(res.statusCode, 200);
+}));
 
 test("tenant admin bootstrap requires the provisioning secret", () => {
   const previous = process.env.TENANT_BOOTSTRAP_SECRET;

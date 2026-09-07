@@ -3066,15 +3066,15 @@ exports.saveFxRates = async (req, res) => {
         const userId = req.user.id;
         const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
         const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "INR";
-        const collected = await collectRevenueConfigCurrencyCodes(userId, {
-            ...current,
-            reportingCurrency,
-            currencyCodes: mergeRevenueCurrencyCodes(reportingCurrency, current.currencyCodes, req.body?.currencyCodes),
-        });
+        const currencyCodes = Array.isArray(req.body?.currencyCodes)
+            ? req.body.currencyCodes
+            : current.currencyCodes;
         const payload = normalizeRevenueConfig({
             ...current,
             reportingCurrency,
-            currencyCodes: collected.currencyCodes,
+            // The submitted list is the complete FX setup. Merging it with the
+            // current/derived currencies would restore currencies the user removed.
+            currencyCodes: mergeRevenueCurrencyCodes(reportingCurrency, currencyCodes),
             fxRates: Array.isArray(req.body?.fxRates) ? req.body.fxRates : [],
         });
         const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });

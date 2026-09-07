@@ -1081,6 +1081,67 @@ test("maintenance calendar since-new threshold triggers once inside the master d
   assert.equal(calendar?.lastOccurre.toISOString().slice(0, 10), "2026-04-03");
 });
 
+test("maintenance calendar since-new interval triggers at each upcoming multiple", async () => {
+  const day1 = utcDate(2026, 8, 1);
+  const day2 = utcDate(2026, 8, 2);
+  const day3 = utcDate(2026, 8, 3);
+  const day4 = utcDate(2026, 8, 4);
+
+  await seedFlightDays([day1, day2, day3, day4], "EV");
+  await seedFleetAsset({
+    msn: 43563,
+    regn: "VT-YAC",
+    entry: day1,
+    exit: day4,
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: day1,
+    msnEsn: "43563",
+    pn: "B38M",
+    snBn: "43563",
+    tsn: 14290,
+    csn: 6927,
+    dsn: 2534,
+    timeMetric: "BH",
+  });
+  await UtilisationAssumption.create({
+    userId: USER_ID,
+    msn: "43563",
+    fromDate: day2,
+    toDate: day4,
+    hours: 2500,
+    cycles: 1,
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "43563",
+    calPn: "B38M",
+    snBn: "43563",
+    schEvent: "C check",
+    eTsn: 5000,
+  });
+
+  const res = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, res);
+
+  const [firstTrigger, betweenTriggers, secondTrigger, calendar] = await Promise.all([
+    Utilisation.findOne({ userId: USER_ID, date: day2, msnEsn: "43563" }).lean(),
+    Utilisation.findOne({ userId: USER_ID, date: day3, msnEsn: "43563" }).lean(),
+    Utilisation.findOne({ userId: USER_ID, date: day4, msnEsn: "43563" }).lean(),
+    MaintenanceCalendar.findOne({ userId: USER_ID, calMsn: "43563" }).lean(),
+  ]);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(firstTrigger?.remarks, "Maintenance Check Triggered");
+  assert.equal(betweenTriggers?.remarks, undefined);
+  assert.equal(secondTrigger?.remarks, "Maintenance Check Triggered");
+  assert.deepEqual(
+    calendar?.generatedOccurrences.map(occurrence => occurrence.triggerThreshold),
+    [15000, 20000]
+  );
+});
+
 test("maintenance compute revalidates assignments against generated ground days", async () => {
   const day1 = utcDate(2026, 4, 1);
   const day2 = utcDate(2026, 4, 2);
@@ -1157,10 +1218,109 @@ test("maintenance compute revalidates assignments against generated ground days"
   assert.equal(res.body.assignmentImpact.deletedCount, 1);
   assert.equal(res.body.assignmentImpact.daysTouched, 1);
   assert.equal(res.body.assignmentDiagnostics.rejections.groundConflicts, 1);
-  assert.equal(assignment, null);
+  assert.equal(assignment?.isValid, false);
+  assert.equal(assignment?.removedReason, "GROUND_DAY_CONFLICT");
+  assert.equal(assignment?.aircraft?.msn, 4150);
   assert.ok(!flight?.aircraft?.registration);
   assert.equal(groundDay?.event, "Performance restoration");
   assert.equal(triggerDay?.tsn, 100);
+});
+
+test("maintenance event remains stable when assumptions overlap its final ground day", async () => {
+  const aug1 = utcDate(2026, 8, 1);
+  const sep16 = utcDate(2026, 9, 16);
+  const sep17 = utcDate(2026, 9, 17);
+  const oct1 = utcDate(2026, 10, 1);
+  const oct2 = utcDate(2026, 10, 2);
+
+  await seedFlightDays([aug1, sep16, sep17, oct1, oct2], "ST");
+  await seedFleetAsset({
+    msn: 43563,
+    regn: "VT-YAC",
+    entry: aug1,
+    exit: oct2,
+  });
+  await MaintenanceReset.create({
+    userId: USER_ID,
+    date: aug1,
+    msnEsn: "43563",
+    pn: "B38M",
+    snBn: "43563",
+    tsn: 14290,
+    csn: 6927,
+    dsn: 2534,
+    timeMetric: "BH",
+  });
+  await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "43563",
+    calPn: "B38M",
+    snBn: "43563",
+    schEvent: "C check",
+    eTsn: 5000,
+    downDays: 15,
+  });
+  await seedAssignment({
+    date: sep17,
+    flightNumber: "ST17",
+    msn: 43563,
+    registration: "VT-YAC",
+    bh: 710,
+    cycles: 73,
+  });
+  await Flight.updateOne(
+    { userId: USER_ID, date: sep17, flight: "ST17" },
+    { $set: { variant: "A320" } }
+  );
+
+  const firstCompute = createMockResponse();
+  await maintenanceController.computeMaintenanceLogic({ user: { id: USER_ID } }, firstCompute);
+
+  let calendar = await MaintenanceCalendar.findOne({ userId: USER_ID, calMsn: "43563" }).lean();
+  let retainedAssignment = await Assignment.findOne({
+    userId: USER_ID,
+    date: sep17,
+    flightNumber: "ST17",
+  }).lean();
+
+  assert.equal(firstCompute.statusCode, 200);
+  assert.equal(calendar?.firstOccurrenceDate.toISOString().slice(0, 10), "2026-09-17");
+  assert.equal(retainedAssignment?.isValid, false);
+  assert.equal(retainedAssignment?.removedReason, "GROUND_DAY_CONFLICT");
+
+  const saveAssumption = createMockResponse();
+  await maintenanceController.bulkSaveUtilisationAssumptions({
+    user: { id: USER_ID },
+    body: {
+      utilisationAssumptions: [{
+        msn: "43563",
+        fromDate: "2026-10-01",
+        toDate: "2026-10-02",
+        hours: 15,
+        cycles: 6,
+      }],
+    },
+  }, saveAssumption);
+
+  const [sep16Status, sep17Status, oct1Status, oct2Status, finalGroundDay] = await Promise.all([
+    Utilisation.findOne({ userId: USER_ID, date: sep16, msnEsn: "43563" }).lean(),
+    Utilisation.findOne({ userId: USER_ID, date: sep17, msnEsn: "43563" }).lean(),
+    Utilisation.findOne({ userId: USER_ID, date: oct1, msnEsn: "43563" }).lean(),
+    Utilisation.findOne({ userId: USER_ID, date: oct2, msnEsn: "43563" }).lean(),
+    GroundDay.findOne({ userId: USER_ID, date: oct1, msn: "43563" }).lean(),
+  ]);
+  calendar = await MaintenanceCalendar.findOne({ userId: USER_ID, calMsn: "43563" }).lean();
+
+  assert.equal(saveAssumption.statusCode, 200);
+  assert.equal(calendar?.firstOccurrenceDate.toISOString().slice(0, 10), "2026-09-17");
+  assert.equal(calendar?.generatedOccurrences[0]?.triggerThreshold, 15000);
+  assert.equal(finalGroundDay?.event, "C check");
+  assert.equal(sep16Status?.tsn, 14290);
+  assert.equal(sep17Status?.tsn, 14290);
+  assert.equal(oct1Status?.tsn, 14290);
+  assert.equal(oct2Status?.tsn, 14305);
+  assert.equal(oct1Status?.csn, 6927);
+  assert.equal(oct2Status?.csn, 6933);
 });
 
 test("maintenance calendar restoration intervals reset and repeat", async () => {

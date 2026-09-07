@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const config = require("../config/config");
 const Otp = require("../model/otp");
-const { sendOtpEmail, sendContactQueryEmail } = require("../services/emailService");
+const { sendOtpEmail } = require("../services/emailService");
 const { TENANT_ADMIN_ROLES, USER_TOKEN_AUDIENCE } = require("../middlware/auth");
 const { getEffectivePageAccess, normalizePageAccessInput } = require("../config/pageAccess");
 
@@ -216,21 +216,4 @@ exports.sendEmail = async (req, res) => {
     console.error(error);
     res.status(500).json({ statusText: "error", message: "An error occurred" });
   }
-};
-
-exports.sendContactEmail = async (req, res) => {
-  try {
-    const { name, email, subject, message } = req.body;
-
-    if (!name || !email || !message) {
-      return res.status(400).json({ message: "Name, email, and message are required" });
-    }
-
-    await sendContactQueryEmail({ name, email: normalizeEmail(email), subject, message });
-    res.status(200).json({ message: 'Email sent successfully' });
-  } catch (error) {
-    console.error('Error sending email:', error);
-    res.status(500).json({ message: 'Error sending email' });
-  }
-
 };

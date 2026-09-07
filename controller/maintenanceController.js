@@ -129,6 +129,15 @@ const nextMultipleAfter = (value, interval) => {
     return normalizeThresholdNumber(multiplier * numericInterval);
 };
 
+const nextMultipleAtOrAfter = (value, interval) => {
+    const numericInterval = Number(interval);
+    if (!Number.isFinite(numericInterval) || numericInterval <= 0) return null;
+
+    const numericValue = normalizeThresholdNumber(value || 0);
+    const multiplier = Math.max(1, Math.ceil(numericValue / numericInterval));
+    return normalizeThresholdNumber(multiplier * numericInterval);
+};
+
 const getCalendarTriggerDefinitions = (cal = {}) => maintenanceMetricDefinitions
     .map(definition => {
         const interval = Number(cal?.[definition.limitKey]);
@@ -161,8 +170,16 @@ const addSuppressedThreshold = (state, metricCode, threshold) => {
     return wasMissing;
 };
 
-const getNextUnsuppressedThreshold = ({ state, metricCode, currentValue, interval }) => {
-    let threshold = nextMultipleAfter(currentValue, interval);
+const getNextUnsuppressedThreshold = ({
+    state,
+    metricCode,
+    currentValue,
+    interval,
+    includeCurrentBoundary = false
+}) => {
+    let threshold = includeCurrentBoundary
+        ? nextMultipleAtOrAfter(currentValue, interval)
+        : nextMultipleAfter(currentValue, interval);
     let guard = 0;
 
     while (threshold !== null && hasSuppressedThreshold(state, metricCode, threshold) && guard < 1000) {
@@ -183,7 +200,7 @@ const findCalendarTriggerCandidate = ({ cal, state, currentValues, projectedValu
         const projectedValue = normalizeMetricNumber(projectedValues?.[definition.valueKey]);
         if (projectedValue === null) continue;
 
-        if (definition.group === "sinceNew") {
+        if (definition.group === "sinceNew" && definition.metricCode !== "TSN") {
             const alreadyTriggered = state?.triggeredSinceNewMetrics?.has(definition.metricCode);
             const threshold = definition.interval;
             if (!alreadyTriggered && projectedValue >= threshold && (currentValue === null || currentValue < threshold)) {
@@ -196,11 +213,14 @@ const findCalendarTriggerCandidate = ({ cal, state, currentValues, projectedValu
             continue;
         }
 
+        // TSN is a recurring lifetime interval. Its next due point is the next
+        // multiple (for example, 15,000 when TSN is 14,290 and every is 5,000).
         const threshold = getNextUnsuppressedThreshold({
             state,
             metricCode: definition.metricCode,
             currentValue,
-            interval: definition.interval
+            interval: definition.interval,
+            includeCurrentBoundary: definition.metricCode === "TSN"
         });
 
         if (threshold !== null && projectedValue >= threshold) {
@@ -915,6 +935,260 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
     return getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
 };
 
+const getUtcDateKey = (value) => moment.utc(value).format("YYYY-MM-DD");
+
+/**
+ * Loads all data needed by a dashboard projection in a small, fixed number of
+ * queries. The previous dashboard path repeated the ownership, assignment and
+ * flight lookups for every asset on every projected day, so its query count
+ * grew with both the number of rotables and the selected date.
+ */
+const createMaintenanceDashboardUsageResolver = async ({
+    userId,
+    resets = [],
+    selectedDate,
+    assumptions = []
+}) => {
+    const targetDate = moment.utc(selectedDate).startOf("day");
+    const projectionResets = (Array.isArray(resets) ? resets : [])
+        .filter(Boolean)
+        .map(reset => ({ reset, resetDate: moment.utc(reset.date).startOf("day") }))
+        .filter(({ reset, resetDate }) => reset.msnEsn && resetDate.isValid() && !resetDate.isSame(targetDate, "day"));
+
+    if (!targetDate.isValid() || projectionResets.length === 0) return null;
+
+    const projectionStarts = projectionResets.map(({ resetDate }) => (
+        targetDate.isBefore(resetDate)
+            ? targetDate.clone().add(1, "day")
+            : resetDate.clone().add(1, "day")
+    ));
+    const projectionEnds = projectionResets.map(({ resetDate }) => (
+        targetDate.isBefore(resetDate) ? resetDate.clone() : targetDate.clone()
+    ));
+    const rangeStart = moment.min(projectionStarts).startOf("day");
+    const rangeEnd = moment.max(projectionEnds).startOf("day");
+    const userKey = userId ? String(userId) : null;
+    const assetKeys = [...new Set(projectionResets
+        .map(({ reset }) => String(reset.msnEsn || "").trim())
+        .filter(Boolean))];
+    const assetIdentities = new Set(assetKeys.map(normalizeAssetIdentity));
+
+    const movementFilter = {
+        date: { $lte: rangeEnd.clone().subtract(1, "day").endOf("day").toDate() }
+    };
+    if (userKey) movementFilter.userId = userKey;
+
+    const onwingAssetFilter = {
+        $or: onwingFields.map(field => ({ [field]: { $in: assetKeys } }))
+    };
+    if (userKey) onwingAssetFilter.userId = userKey;
+
+    const [movementRecords, assetOnwingRows] = await Promise.all([
+        RotableMovement.find(movementFilter)
+            .select("date msn position installedSN removedSN createdAt")
+            .lean(),
+        assetKeys.length > 0
+            ? AircraftOnwing.find(onwingAssetFilter).select("msn date pos1Esn pos2Esn apun").lean()
+            : []
+    ]);
+
+    const candidateMsnsByAsset = new Map(assetKeys.map(assetKey => [assetKey, new Set()]));
+    for (const row of assetOnwingRows) {
+        for (const field of onwingFields) {
+            const assetKey = row?.[field];
+            if (candidateMsnsByAsset.has(assetKey)) {
+                candidateMsnsByAsset.get(assetKey).add(String(row.msn || "").trim());
+            }
+        }
+    }
+
+    const candidateMsns = [...new Set([...candidateMsnsByAsset.values()]
+        .flatMap(msns => [...msns])
+        .filter(Boolean))];
+    const onwingHistoryFilter = {
+        msn: { $in: candidateMsns },
+        date: { $lte: rangeEnd.clone().endOf("day").toDate() }
+    };
+    if (userKey) onwingHistoryFilter.userId = userKey;
+    const onwingHistory = candidateMsns.length > 0
+        ? await AircraftOnwing.find(onwingHistoryFilter)
+            .select("msn date pos1Esn pos2Esn apun")
+            .sort({ date: -1 })
+            .lean()
+        : [];
+
+    const movementEventsByAsset = new Map();
+    const slotEvents = new Map();
+    const possibleEffectiveMsns = new Set(assetKeys);
+    for (const record of movementRecords) {
+        const effectiveMoment = getRotableEffectiveMoment(record);
+        if (!effectiveMoment) continue;
+
+        const slotKey = JSON.stringify([record.msn, record.position]);
+        if (!slotEvents.has(slotKey)) slotEvents.set(slotKey, []);
+        slotEvents.get(slotKey).push({ record, effectiveMoment });
+
+        const installedIdentity = normalizeAssetIdentity(record.installedSN);
+        const removedIdentity = normalizeAssetIdentity(record.removedSN);
+        if (assetIdentities.has(installedIdentity)) {
+            if (!movementEventsByAsset.has(installedIdentity)) movementEventsByAsset.set(installedIdentity, []);
+            movementEventsByAsset.get(installedIdentity).push({ record, effectiveMoment, type: "installed" });
+            if (record.msn) possibleEffectiveMsns.add(String(record.msn).trim());
+        }
+        if (assetIdentities.has(removedIdentity)) {
+            if (!movementEventsByAsset.has(removedIdentity)) movementEventsByAsset.set(removedIdentity, []);
+            movementEventsByAsset.get(removedIdentity).push({ record, effectiveMoment, type: "removed" });
+            if (record.msn) possibleEffectiveMsns.add(String(record.msn).trim());
+        }
+    }
+    candidateMsns.forEach(msn => possibleEffectiveMsns.add(msn));
+    movementEventsByAsset.forEach(events => events.sort((left, right) => compareRotableEvents(right, left)));
+    slotEvents.forEach(events => events.sort((left, right) => compareRotableEvents(right, left)));
+
+    const onwingHistoryByMsn = new Map();
+    for (const row of onwingHistory) {
+        const msn = String(row.msn || "").trim();
+        if (!onwingHistoryByMsn.has(msn)) onwingHistoryByMsn.set(msn, []);
+        onwingHistoryByMsn.get(msn).push(row);
+    }
+
+    const resolveEffectiveMsn = (assetKey, date) => {
+        const normalizedAssetKey = String(assetKey || "").trim();
+        const assetIdentity = normalizeAssetIdentity(assetKey);
+        const targetDay = moment.utc(date).startOf("day");
+        const movementDateLimit = targetDay.clone().subtract(1, "day").endOf("day");
+        const latestAssetEvent = (movementEventsByAsset.get(assetIdentity) || []).find(({ record, effectiveMoment }) => (
+            moment.utc(record.date).isSameOrBefore(movementDateLimit) &&
+            effectiveMoment.isSameOrBefore(targetDay, "day")
+        ));
+
+        if (latestAssetEvent) {
+            if (latestAssetEvent.type === "removed") return normalizedAssetKey;
+
+            const installedMsn = String(latestAssetEvent.record?.msn || "").trim();
+            const installedPosition = String(latestAssetEvent.record?.position || "").trim();
+            if (!installedMsn || !installedPosition) return normalizedAssetKey;
+
+            const installedDate = moment.utc(latestAssetEvent.record.date).startOf("day");
+            const slotKey = JSON.stringify([installedMsn, installedPosition]);
+            const latestSlotEvent = (slotEvents.get(slotKey) || []).find(({ record, effectiveMoment }) => (
+                moment.utc(record.date).isSameOrAfter(installedDate) &&
+                moment.utc(record.date).isSameOrBefore(movementDateLimit) &&
+                effectiveMoment.isSameOrBefore(targetDay, "day")
+            ));
+            return latestSlotEvent && normalizeAssetIdentity(latestSlotEvent.record?.installedSN) === assetIdentity
+                ? installedMsn
+                : normalizedAssetKey;
+        }
+
+        const matchingConfigs = [];
+        for (const candidateMsn of candidateMsnsByAsset.get(normalizedAssetKey) || []) {
+            const latestConfig = (onwingHistoryByMsn.get(candidateMsn) || []).find(row => (
+                moment.utc(row.date).isSameOrBefore(targetDay.clone().endOf("day"))
+            ));
+            if (onwingRowHasAsset(latestConfig, normalizedAssetKey)) matchingConfigs.push(latestConfig);
+        }
+        matchingConfigs.sort((left, right) => moment.utc(right.date).valueOf() - moment.utc(left.date).valueOf());
+        return String(matchingConfigs[0]?.msn || normalizedAssetKey).trim();
+    };
+
+    const numericMsns = [...new Set([...possibleEffectiveMsns]
+        .map(msn => Number(msn))
+        .filter(Number.isFinite))];
+    const assignmentFilter = {
+        date: {
+            $gte: rangeStart.toDate(),
+            $lt: rangeEnd.clone().endOf("day").toDate()
+        },
+        "aircraft.msn": { $in: numericMsns }
+    };
+    if (userKey) assignmentFilter.userId = userKey;
+    const assignments = numericMsns.length > 0
+        ? await Assignment.find(assignmentFilter)
+            .select("date aircraft.msn flightNumber metrics")
+            .lean()
+        : [];
+
+    const flightNumbers = [...new Set(assignments
+        .map(assignment => String(assignment.flightNumber || "").trim().toUpperCase())
+        .filter(Boolean))];
+    const flightFilter = {
+        date: {
+            $gte: rangeStart.toDate(),
+            $lt: rangeEnd.clone().endOf("day").toDate()
+        },
+        flight: { $in: flightNumbers.map(flightNumber => new RegExp(`^${escapeRegex(flightNumber)}$`, "i")) }
+    };
+    if (userKey) flightFilter.userId = userKey;
+    const flightRecords = flightNumbers.length > 0
+        ? await Flight.find(flightFilter).select("date flight bh fh").lean()
+        : [];
+
+    const assignmentsByDateAndMsn = new Map();
+    for (const assignment of assignments) {
+        const key = `${getUtcDateKey(assignment.date)}|${Number(assignment.aircraft?.msn)}`;
+        if (!assignmentsByDateAndMsn.has(key)) assignmentsByDateAndMsn.set(key, []);
+        assignmentsByDateAndMsn.get(key).push(assignment);
+    }
+    const flightsByDateAndNumber = new Map();
+    for (const flight of flightRecords) {
+        const flightNumber = String(flight.flight || "").trim().toUpperCase();
+        const key = `${getUtcDateKey(flight.date)}|${flightNumber}`;
+        if (!flightsByDateAndNumber.has(key)) flightsByDateAndNumber.set(key, []);
+        flightsByDateAndNumber.get(key).push(flight);
+    }
+
+    const usageByAssetDateAndMetric = new Map();
+    return ({ assetKey, date, metric }) => {
+        const usageKey = `${normalizeAssetIdentity(assetKey)}|${getUtcDateKey(date)}|${metric || "BH"}`;
+        if (usageByAssetDateAndMetric.has(usageKey)) return usageByAssetDateAndMetric.get(usageKey);
+
+        const effectiveMsn = resolveEffectiveMsn(assetKey, date) || String(assetKey || "").trim();
+        const msnNumber = Number(effectiveMsn);
+        if (!Number.isFinite(msnNumber)) {
+            const usage = getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
+            usageByAssetDateAndMetric.set(usageKey, usage);
+            return usage;
+        }
+
+        const dateKey = getUtcDateKey(date);
+        const dailyAssignments = assignmentsByDateAndMsn.get(`${dateKey}|${msnNumber}`) || [];
+        if (dailyAssignments.length === 0) {
+            const usage = getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
+            usageByAssetDateAndMetric.set(usageKey, usage);
+            return usage;
+        }
+
+        const primaryTimeKey = metric === "FH" ? "flightHours" : "blockHours";
+        const fallbackTimeKey = metric === "FH" ? "blockHours" : "flightHours";
+        const sumAssignmentTime = (key) => dailyAssignments.reduce((sum, assignment) => {
+            const metricValue = Number(assignment.metrics?.[key]);
+            if (Number.isFinite(metricValue) && metricValue > 0) return sum + metricValue;
+
+            const flightNumber = String(assignment.flightNumber || "").trim().toUpperCase();
+            const matchedFlights = flightsByDateAndNumber.get(`${dateKey}|${flightNumber}`) || [];
+            const flightKey = key === "flightHours" ? "fh" : "bh";
+            return sum + matchedFlights.reduce((flightSum, flight) => {
+                const flightValue = Number(flight?.[flightKey]);
+                return flightSum + (Number.isFinite(flightValue) ? flightValue : 0);
+            }, 0);
+        }, 0);
+
+        const primaryTimeUsage = sumAssignmentTime(primaryTimeKey);
+        const fallbackTimeUsage = sumAssignmentTime(fallbackTimeKey);
+        const usage = {
+            timeUsage: primaryTimeUsage || fallbackTimeUsage,
+            cycleUsage: dailyAssignments.reduce((sum, assignment) => {
+                const cycles = Number(assignment.metrics?.cycles);
+                return sum + (Number.isFinite(cycles) && cycles > 0 ? cycles : 1);
+            }, 0),
+            hasUsage: true
+        };
+        usageByAssetDateAndMetric.set(usageKey, usage);
+        return usage;
+    };
+};
+
 const recomputeMaintenanceTimeline = async ({ userId, resetGroups: requestedResetGroups } = {}) => {
     const flightBounds = await getFlightDateBounds({ userId });
 
@@ -1589,7 +1863,13 @@ const getUtilisationWindow = ({ masterStartDate, masterEndDate, fleet }) => {
     return { startBoundaryDate, endBoundaryDate };
 };
 
-const buildMaintenanceStatusFromReset = async ({ userId, reset, selectedDate, assumptions = [] }) => {
+const buildMaintenanceStatusFromReset = async ({
+    userId,
+    reset,
+    selectedDate,
+    assumptions = [],
+    usageResolver = null
+}) => {
     if (!reset || !selectedDate) return null;
 
     const resetDate = moment.utc(reset.date).startOf("day");
@@ -1607,18 +1887,28 @@ const buildMaintenanceStatusFromReset = async ({ userId, reset, selectedDate, as
     let currentDsr = normalizeMetricNumber(reset.dsRplmt);
 
     const applyUsage = async (date, direction) => {
-        const utilizationContext = await getEffectiveUtilisationContext({
-            userId,
-            msnEsn: reset.msnEsn,
-            date
-        });
-        const { timeUsage, cycleUsage } = await getEffectiveUsageForDate({
-            userId,
-            effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
-            date,
-            metric: reset.timeMetric,
-            assumptions
-        });
+        let usage;
+        if (usageResolver) {
+            usage = await usageResolver({
+                assetKey: reset.msnEsn,
+                date,
+                metric: reset.timeMetric
+            });
+        } else {
+            const utilizationContext = await getEffectiveUtilisationContext({
+                userId,
+                msnEsn: reset.msnEsn,
+                date
+            });
+            usage = await getEffectiveUsageForDate({
+                userId,
+                effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
+                date,
+                metric: reset.timeMetric,
+                assumptions
+            });
+        }
+        const { timeUsage, cycleUsage } = usage;
         const dayUsage = 1;
 
         if (currentTsn !== null) currentTsn = Number((currentTsn + (direction * timeUsage)).toFixed(2));
@@ -1698,20 +1988,12 @@ exports.getMaintenanceDashboard = async (req, res) => {
 
         const aircraft = [];
 
-        // 2. Fetch recent Utilisation
-        const utilisation = await Utilisation.find({ userId })
-            .sort({ date: -1 })
-            .limit(10)
-            .lean();
-
-        // 3. Fetch Maintenance Status
-        const status = await MaintenanceStatus.find({ userId }).lean();
-
-        // 4. Fetch Rotable Movements
-        const rotables = await RotableMovement.find({ userId })
-            .sort({ date: -1 })
-            .limit(10)
-            .lean();
+        // 2-4. Fetch independent dashboard summaries in parallel.
+        const [utilisation, status, rotables] = await Promise.all([
+            Utilisation.find({ userId }).sort({ date: -1 }).limit(10).lean(),
+            MaintenanceStatus.find({ userId }).lean(),
+            RotableMovement.find({ userId }).sort({ date: -1 }).limit(10).lean()
+        ]);
 
         // 5. Build maintenance dashboard rows from the reset/status model
         let maintenanceData = [];
@@ -1854,7 +2136,7 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 return activeFleetSnSet.has(msnEsn) || activeFleetSnSet.has(snBn);
             });
 
-            const rows = await Promise.all(rowSourceEntries.map(async ([utilKey, util]) => {
+            const rowPlans = rowSourceEntries.map(([utilKey, util]) => {
                 const resetRecordsForKey = resetRecordsByKey.get(utilKey) || [];
                 const record = resetRecordsForKey.find(reset =>
                     moment.utc(reset.date).isSameOrBefore(selectedDateMoment)
@@ -1865,13 +2147,24 @@ exports.getMaintenanceDashboard = async (req, res) => {
                     isSameUtcDay(reset.date, selectedDateMoment)
                 );
                 const sourceRecord = exactResetRecord || record || util;
+                return { utilKey, util, exactResetRecord, sourceRecord };
+            });
+            const dashboardUsageResolver = await createMaintenanceDashboardUsageResolver({
+                userId,
+                resets: rowPlans.map(({ sourceRecord }) => sourceRecord),
+                selectedDate: selectedDateMoment,
+                assumptions: utilisationAssumptions
+            });
+
+            const rows = await Promise.all(rowPlans.map(async ({ utilKey, util, exactResetRecord, sourceRecord }) => {
                 const savedResetDate = sourceRecord?.date ? moment.utc(sourceRecord.date).format("YYYY-MM-DD") : "";
                 const computedMetricSource = sourceRecord
                     ? await buildMaintenanceStatusFromReset({
                         userId,
                         reset: sourceRecord,
                         selectedDate: selectedDateMoment,
-                        assumptions: utilisationAssumptions
+                        assumptions: utilisationAssumptions,
+                        usageResolver: dashboardUsageResolver
                     })
                     : null;
                 const hasCalendarSchedule = calendarKeys.has(utilKey);
@@ -3078,3 +3371,11 @@ exports.deleteCalendar = async (req, res) => {
         res.status(500).json({ message: "Failed to delete calendar input", error: error.message });
     }
 };
+
+// Expose the pure recurrence primitives for focused regression tests without
+// widening the HTTP API or duplicating scheduler logic in the test suite.
+exports.__recurrenceTestables = Object.freeze({
+    addSuppressedThreshold,
+    findCalendarTriggerCandidate,
+    getNextUnsuppressedThreshold
+});

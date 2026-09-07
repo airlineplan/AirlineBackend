@@ -49,6 +49,7 @@ const CostConfigSchema = new mongoose.Schema({
   maintenanceReserveSchedule: { type: [MaintenanceReserveScheduleRowSchema], default: [] },
   aircraftOnwing: { type: Array, default: [] },
   schMxEvents: { type: Array, default: [] },
+  schMxEventExclusions: { type: Array, default: [] },
   transitMx: { type: Array, default: [] },
   otherMx: { type: Array, default: [] },
   rotableChanges: { type: Array, default: [] },

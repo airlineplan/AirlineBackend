@@ -61,6 +61,22 @@ const isGeneratedScheduledMaintenanceEvent = (row = {}) => (
   String(row?.source || "").trim().toUpperCase() === SCHEDULED_MAINTENANCE_SOURCE
 );
 
+const isSameScheduledMaintenanceEvent = (left = {}, right = {}) => {
+  const leftOccurrenceKey = getScheduledMaintenanceOccurrenceKey(left);
+  const rightOccurrenceKey = getScheduledMaintenanceOccurrenceKey(right);
+  if (leftOccurrenceKey && rightOccurrenceKey) {
+    return leftOccurrenceKey === rightOccurrenceKey;
+  }
+
+  const leftDetailKey = getScheduledMaintenanceDetailKey(left);
+  const rightDetailKey = getScheduledMaintenanceDetailKey(right);
+  return Boolean(
+    leftDetailKey.replace(/\|/g, "") &&
+    rightDetailKey.replace(/\|/g, "") &&
+    leftDetailKey === rightDetailKey
+  );
+};
+
 const buildScheduledMaintenanceEventsForUser = async (userId) => {
   const calendars = await MaintenanceCalendar.find({ userId: String(userId) })
     .select("calMsn schEvent calPn snBn generatedOccurrences")
@@ -137,9 +153,11 @@ const buildScheduledMaintenanceEventsForUser = async (userId) => {
   return [...rowsByKey.values()];
 };
 
-const mergeScheduledMaintenanceEvents = (savedRows = [], generatedRows = []) => {
-  const saved = Array.isArray(savedRows) ? savedRows : [];
-  const generated = Array.isArray(generatedRows) ? generatedRows : [];
+const mergeScheduledMaintenanceEvents = (savedRows = [], generatedRows = [], excludedRows = []) => {
+  const exclusions = Array.isArray(excludedRows) ? excludedRows : [];
+  const isExcluded = (row) => exclusions.some((excludedRow) => isSameScheduledMaintenanceEvent(row, excludedRow));
+  const saved = (Array.isArray(savedRows) ? savedRows : []).filter((row) => !isExcluded(row));
+  const generated = (Array.isArray(generatedRows) ? generatedRows : []).filter((row) => !isExcluded(row));
   const savedByOccurrence = new Map();
   const savedByDetails = new Map();
 
@@ -368,7 +386,7 @@ exports.getCostConfig = async (req, res) => {
       config = {
         allocationTable: [],
         fuelConsum: [], fuelConsumIndex: [], apuUsage: [], plfEffect: [], ccyFuel: [],
-        leasedReserve: [], maintenanceReserveSchedule: [], aircraftOnwing: [], schMxEvents: [], transitMx: [], otherMx: [], rotableChanges: [],
+        leasedReserve: [], maintenanceReserveSchedule: [], aircraftOnwing: [], schMxEvents: [], schMxEventExclusions: [], transitMx: [], otherMx: [], rotableChanges: [],
         navMtowTiers: [73000, 77000, 78000, 79000],
         navEnr: [], navTerm: [], airportLanding: [], airportDom: [], airportIntl: [], airportAvsec: [], airportOther: [], otherDoc: []
       };
@@ -408,7 +426,11 @@ exports.getCostConfig = async (req, res) => {
       config.navTerm = serializeNavigationCostRows(config.navTerm || [], "arrStn", config.navMtowTiers);
     }
     const generatedSchMxEvents = await buildScheduledMaintenanceEventsForUser(userId);
-    config.schMxEvents = mergeScheduledMaintenanceEvents(config.schMxEvents || [], generatedSchMxEvents);
+    config.schMxEvents = mergeScheduledMaintenanceEvents(
+      config.schMxEvents || [],
+      generatedSchMxEvents,
+      config.schMxEventExclusions || []
+    );
     config.schMxEvents = await hydrateSchMxEventsForUser(
       userId,
       config.schMxEvents,

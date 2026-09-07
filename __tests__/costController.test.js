@@ -368,6 +368,48 @@ test("cost config populates scheduled maintenance events from generated ground d
   assert.equal(event.occurrenceId, `${calendar._id}:1`);
 });
 
+test("deleted generated scheduled maintenance events stay deleted after saving and reopening cost inputs", async () => {
+  const calendar = await MaintenanceCalendar.create({
+    userId: USER_ID,
+    calMsn: "1600",
+    calPn: "ATR72",
+    snBn: "1600",
+    schEvent: "48mo SI",
+    generatedOccurrences: [
+      {
+        occurrenceNumber: 1,
+        triggerDate: utcDate(2026, 6, 11),
+        groundStartDate: utcDate(2026, 6, 11),
+        groundEndDate: utcDate(2026, 6, 20),
+        downtimeApplied: 10,
+      },
+    ],
+  });
+  await CostConfig.create({ userId: USER_ID });
+
+  const initialLoadRes = createMockResponse();
+  await costController.getCostConfig({ user: { id: USER_ID } }, initialLoadRes);
+  const generatedEvent = initialLoadRes.body.data.schMxEvents[0];
+  assert.equal(generatedEvent.occurrenceId, `${calendar._id}:1`);
+
+  const saveRes = createMockResponse();
+  await costController.saveCostConfig({
+    user: { id: USER_ID },
+    body: {
+      schMxEvents: [],
+      schMxEventExclusions: [generatedEvent],
+    },
+  }, saveRes);
+  assert.equal(saveRes.statusCode, 200);
+
+  const reopenedRes = createMockResponse();
+  await costController.getCostConfig({ user: { id: USER_ID } }, reopenedRes);
+
+  assert.equal(reopenedRes.statusCode, 200);
+  assert.deepEqual(reopenedRes.body.data.schMxEvents, []);
+  assert.equal(reopenedRes.body.data.schMxEventExclusions[0].occurrenceId, `${calendar._id}:1`);
+});
+
 test("revenue config preserves reporting currency, entered CCYs, and FX rates", async () => {
   const payload = {
     reportingCurrency: "inr",
@@ -424,6 +466,40 @@ test("reporting currency endpoint saves newly entered reporting CCY and resets F
   assert.equal(saved.reportingCurrency, "INR");
   assert.deepEqual(saved.currencyCodes, ["INR", "USD"]);
   assert.deepEqual(saved.fxRates, []);
+});
+
+test("FX rate endpoint permanently removes currencies omitted from the submitted setup", async () => {
+  await RevenueConfig.create({
+    userId: USER_ID,
+    reportingCurrency: "THB",
+    currencyCodes: ["THB", "AED", "INR", "USD"],
+    fxRates: [
+      { pair: "AED/THB", dateKey: "2026-09-01", rate: 8.96 },
+      { pair: "INR/THB", dateKey: "2026-09-01", rate: 1 },
+      { pair: "USD/THB", dateKey: "2026-09-01", rate: 1 },
+    ],
+  });
+
+  const payload = {
+    reportingCurrency: "THB",
+    currencyCodes: ["THB", "AED", "USD"],
+    fxRates: [
+      { pair: "AED/THB", dateKey: "2026-09-01", rate: 8.96 },
+      { pair: "USD/THB", dateKey: "2026-09-01", rate: 1 },
+    ],
+  };
+
+  const saveRes = createMockResponse();
+  await pooController.saveFxRates({ user: { id: USER_ID }, body: payload }, saveRes);
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(saveRes.body.success, true);
+  assert.deepEqual(saveRes.body.data.currencyCodes, ["THB", "AED", "USD"]);
+  assert.deepEqual(saveRes.body.data.fxRates, payload.fxRates);
+
+  const saved = await RevenueConfig.findOne({ userId: USER_ID }).lean();
+  assert.deepEqual(saved.currencyCodes, ["THB", "AED", "USD"]);
+  assert.deepEqual(saved.fxRates, payload.fxRates);
 });
 
 test("cost page controller computes representative cost inputs into flight cost fields", async () => {
