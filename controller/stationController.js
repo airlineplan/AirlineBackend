@@ -24,6 +24,7 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const { syncAllPooForUser } = require("./pooController");
+const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
 const createConnections = require('../helper/createConnections');
 
@@ -118,10 +119,12 @@ const saveStation = async (req, res) => {
   try {
     const { stations, homeTimeZone } = req.body;
     const userId = req.user.id;
+    let assignmentInputsChanged = false;
 
     // Update the home timezone of the user
     const user = await User.findById(userId);
     if (user) {
+      assignmentInputsChanged = String(user.hometimeZone || "").trim() !== String(homeTimeZone || "").trim();
       user.hometimeZone = homeTimeZone;
       await user.save();
     }
@@ -146,7 +149,7 @@ const saveStation = async (req, res) => {
         if (legacyCurrencyCode) updateFields.currencyCode = legacyCurrencyCode;
       }
 
-      const existingStation = await Stations.findById(_id);
+      const existingStation = await Stations.findOne({ _id, userId });
 
       if (!existingStation) {
         updatedStations.push(null);
@@ -157,6 +160,13 @@ const saveStation = async (req, res) => {
       const taxiTimesChanged =
         (updateFields.avgTaxiOutTime !== undefined && updateFields.avgTaxiOutTime !== existingStation.avgTaxiOutTime) ||
         (updateFields.avgTaxiInTime !== undefined && updateFields.avgTaxiInTime !== existingStation.avgTaxiInTime);
+
+      const validationFields = ["stationName", "stdtz", "dsttz", "nextDSTStart", "nextDSTEnd"];
+      const stationValidationChanged = validationFields.some((field) => (
+        Object.prototype.hasOwnProperty.call(updateFields, field) &&
+        String(updateFields[field] ?? "").trim() !== String(existingStation[field] ?? "").trim()
+      ));
+      assignmentInputsChanged = assignmentInputsChanged || stationValidationChanged;
 
       // Update the existing document
       await existingStation.updateOne(updateFields);
@@ -187,6 +197,9 @@ const saveStation = async (req, res) => {
     }
 
     await syncPooAfterStationChange(userId);
+    if (assignmentInputsChanged) {
+      await revalidateAssignmentsForUser({ userId });
+    }
 
     res.status(200).json(updatedStations);
 

@@ -7,6 +7,7 @@ const {
     applyAssignmentSyncPlan,
     buildAssignmentSyncPlan,
     buildDateFlightKey,
+    revalidateAssignmentsForUser,
 } = require('../utils/assignmentSync');
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -23,11 +24,14 @@ const buildUploadMessage = (diagnostics) => {
     const flightNotFound = diagnostics?.rejections?.flightNotFound || 0;
     const variantMismatches = diagnostics?.rejections?.variantMismatches || 0;
     const overlaps = diagnostics?.rejections?.acftOverlaps || 0;
+    const outsideMasterDateRange = diagnostics?.rejections?.outsideMasterDateRange || 0;
+    const invalidTimezoneData = diagnostics?.rejections?.invalidTimezoneData || 0;
     const rejectedRows = Array.isArray(diagnostics?.discardedRows)
         ? diagnostics.discardedRows
         : (Array.isArray(diagnostics?.rejectedRows) ? diagnostics.rejectedRows : []);
 
-    if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches && !overlaps) {
+    if (!missingFleet && !preEntryDates && !postExitDates && !flightNotFound && !variantMismatches &&
+        !overlaps && !outsideMasterDateRange && !invalidTimezoneData) {
         if (Number(diagnostics?.discardedCount || 0) > 0) {
             return `Assignments uploaded with warnings. ${diagnostics.discardedCount} row(s) were disregarded.`;
         }
@@ -55,6 +59,12 @@ const buildUploadMessage = (diagnostics) => {
     }
     if (overlaps) {
         parts.push(`${overlaps} row(s) overlapped another assignment for the same aircraft.`);
+    }
+    if (outsideMasterDateRange) {
+        parts.push(`${outsideMasterDateRange} row(s) were outside the master schedule date range.`);
+    }
+    if (invalidTimezoneData) {
+        parts.push(`${invalidTimezoneData} row(s) could not be validated because station or home timezone data was invalid.`);
     }
 
     if (rejectedRows.length > 0) {
@@ -131,6 +141,7 @@ exports.uploadAssignments = async (req, res) => {
         const rawData = xlsx.utils.sheet_to_json(sheet, { raw: false });
 
         const validRows = [];
+        const sourceUploadedAt = new Date();
 
         for (let i = 0; i < rawData.length; i++) {
             const row = rawData[i];
@@ -154,7 +165,9 @@ exports.uploadAssignments = async (req, res) => {
                 assignDate: parsedDate,
                 dateKey,
                 flight,
-                acft: cleanAcft
+                acft: cleanAcft,
+                sourceOrder: i,
+                sourceUploadedAt,
             });
         }
 
@@ -172,12 +185,28 @@ exports.uploadAssignments = async (req, res) => {
         });
 
         await applyAssignmentSyncPlan(syncResult);
+        const revalidationDiagnostics = await revalidateAssignmentsForUser({
+            userId,
+            priorityKeys: uploadedKeys,
+            includeGroundDays: false,
+        });
         // Assignment is source data. Existing on-ground rows were derived from
         // the old assignment plan and are stale until the user runs Compute.
         await GroundDay.deleteMany({ userId: String(userId) });
         const diagnostics = {
             ...syncResult.diagnostics,
-            revalidatedCount: 0,
+            discardedCount:
+                Number(syncResult.diagnostics?.discardedCount || 0) +
+                Number(revalidationDiagnostics?.discardedCount || 0),
+            revalidatedCount: revalidationDiagnostics?.revalidatedCount || 0,
+            rejections: Object.fromEntries(
+                Object.keys(syncResult.diagnostics?.rejections || {}).map((key) => [
+                    key,
+                    Number(syncResult.diagnostics?.rejections?.[key] || 0) +
+                    Number(revalidationDiagnostics?.rejections?.[key] || 0),
+                ])
+            ),
+            revalidation: revalidationDiagnostics,
             groundDaysCleared: true,
         };
         const message = buildUploadMessage(diagnostics);
@@ -190,7 +219,7 @@ exports.uploadAssignments = async (req, res) => {
 
     } catch (error) {
         console.error("🔥 Upload Error:", error);
-        res.status(500).json({ message: "Failed to process assignments", error: error.message });
+        res.status(500).json({ message: "Failed to process assignments" });
     }
 };
 

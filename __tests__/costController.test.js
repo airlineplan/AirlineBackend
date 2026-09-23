@@ -10,6 +10,8 @@ const mongoose = require("mongoose");
 const CostConfig = require("../model/costConfigSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
 const Flight = require("../model/flight");
+const PooTable = require("../model/pooTable");
+const Station = require("../model/stationSchema");
 const Fleet = require("../model/fleet");
 const MaintenanceCalendar = require("../model/maintenanceCalendarSchema");
 const GroundDay = require("../model/groundDay");
@@ -466,6 +468,85 @@ test("reporting currency endpoint saves newly entered reporting CCY and resets F
   assert.equal(saved.reportingCurrency, "INR");
   assert.deepEqual(saved.currencyCodes, ["INR", "USD"]);
   assert.deepEqual(saved.fxRates, []);
+});
+
+test("reporting currency changes do not restore currencies from historical records", async () => {
+  const activeCurrencyCodes = ["THB", "AUD", "INR", "HKD", "SGD", "JPY"];
+  await Promise.all([
+    RevenueConfig.create({
+      userId: USER_ID,
+      reportingCurrency: "THB",
+      currencyCodes: activeCurrencyCodes,
+    }),
+    Flight.create([
+      { userId: USER_ID, date: utcDate(2026, 9, 1), flight: "AP101" },
+      { userId: USER_ID, date: utcDate(2026, 9, 8), flight: "AP102" },
+    ]),
+    PooTable.create({
+      userId: USER_ID,
+      sNo: 1,
+      rowKey: "historical-usd-row",
+      flightId: "historical-flight",
+      trafficType: "leg",
+      pooCcy: "USD",
+    }),
+    Station.create({ userId: USER_ID, stationName: "OLD", currencyCode: "AED" }),
+    CostConfig.create({ userId: USER_ID, ccyFuel: [{ ccy: "AED" }] }),
+  ]);
+
+  const saveRes = createMockResponse();
+  await pooController.saveReportingCurrency({
+    user: { id: USER_ID },
+    body: {
+      reportingCurrency: "AUD",
+      currencyCodes: activeCurrencyCodes,
+    },
+  }, saveRes);
+
+  assert.equal(saveRes.statusCode, 200);
+  assert.equal(saveRes.body.data.reportingCurrency, "AUD");
+  assert.deepEqual(saveRes.body.data.currencyCodes, ["AUD", "THB", "INR", "HKD", "SGD", "JPY"]);
+  assert.equal(saveRes.body.data.currencyCodes.includes("USD"), false);
+  assert.equal(saveRes.body.data.currencyCodes.includes("AED"), false);
+  assert.deepEqual(
+    [...new Set(saveRes.body.data.fxRates.map((row) => row.dateKey))],
+    ["2026-09-01", "2026-09-08"]
+  );
+  assert.deepEqual(
+    [...new Set(saveRes.body.data.fxRates.map((row) => row.pair))].sort(),
+    ["HKD/AUD", "INR/AUD", "JPY/AUD", "SGD/AUD", "THB/AUD"].sort()
+  );
+  assert.equal(saveRes.body.data.fxRates.length, 10);
+  assert.ok(saveRes.body.data.fxRates.every((row) => row.rate === 1));
+
+  const loadRes = createMockResponse();
+  await pooController.getRevenueConfig({ user: { id: USER_ID } }, loadRes);
+
+  assert.equal(loadRes.statusCode, 200);
+  assert.deepEqual(loadRes.body.data, saveRes.body.data);
+  assert.equal(loadRes.body.data.currencyCodes.includes("USD"), false);
+  assert.equal(loadRes.body.data.currencyCodes.includes("AED"), false);
+});
+
+test("accounts without RevenueConfig retain legacy currency discovery", async () => {
+  await Promise.all([
+    PooTable.create({
+      userId: USER_ID,
+      sNo: 1,
+      rowKey: "legacy-usd-row",
+      flightId: "legacy-flight",
+      trafficType: "leg",
+      pooCcy: "USD",
+    }),
+    Station.create({ userId: USER_ID, stationName: "LEG", currencyCode: "AED" }),
+  ]);
+
+  const loadRes = createMockResponse();
+  await pooController.getRevenueConfig({ user: { id: USER_ID } }, loadRes);
+
+  assert.equal(loadRes.statusCode, 200);
+  assert.equal(loadRes.body.data.reportingCurrency, "USD");
+  assert.deepEqual(loadRes.body.data.currencyCodes, ["USD", "AED"]);
 });
 
 test("FX rate endpoint permanently removes currencies omitted from the submitted setup", async () => {

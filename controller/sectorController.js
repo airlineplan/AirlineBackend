@@ -25,6 +25,7 @@ const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const { scopedUserQuery } = require("./accessScope");
 const { syncAllPooForUser, syncPooForUserDates } = require("./pooController");
+const { revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
 const createConnections = require('../helper/createConnections');
 
@@ -339,8 +340,8 @@ const updateSector = async (req, res) => {
         .lean();
       affectedDates.push(...existingFlightsForSector.map((flight) => flight.date));
 
-      const updatedSector = await Sector.findByIdAndUpdate(
-        sectorObjectId,
+      const updatedSector = await Sector.findOneAndUpdate(
+        scopedUserQuery(req, { _id: sectorObjectId }),
         {
           acftType,
           sta,
@@ -364,6 +365,9 @@ const updateSector = async (req, res) => {
 
     //  Assuming you want to send a response after updating all sectors
     await syncPooAfterSectorChange(req.user.id, affectedDates, "sector update");
+    if (sta !== undefined) {
+      await revalidateAssignmentsForUser({ userId: req.user.id });
+    }
     res.json({ updatedSectors, message: "Sectors updated successfully" });
   } catch (error) {
     console.error(error);

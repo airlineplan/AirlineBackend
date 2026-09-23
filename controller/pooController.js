@@ -466,11 +466,10 @@ function collectCurrencyCodesFromRows(rows = []) {
 }
 
 async function collectRevenueConfigCurrencyCodes(userId, current = {}) {
-    const [pooCurrencies, costConfig, stations, flights] = await Promise.all([
+    const [pooCurrencies, costConfig, stations] = await Promise.all([
         PooTable.distinct("pooCcy", { userId }),
         CostConfig.findOne({ userId }).lean(),
         Station.find({ userId }).lean(),
-        Flight.find({ userId }).select("date").lean(),
     ]);
 
     const stationCurrencies = stations.flatMap((station) => [
@@ -489,9 +488,13 @@ async function collectRevenueConfigCurrencyCodes(userId, current = {}) {
             stationCurrencies,
             costCurrencies
         ),
-        flightDateKeys: [...new Set(flights.map((flight) => normalizeDateKey(flight.date)).filter(Boolean))]
-            .sort((a, b) => a.localeCompare(b)),
     };
+}
+
+async function collectFlightDateKeys(userId) {
+    const flights = await Flight.find({ userId }).select("date").lean();
+    return [...new Set(flights.map((flight) => normalizeDateKey(flight.date)).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
 }
 
 function buildResetFxRates(currencyCodes = [], reportingCurrency = "", dateKeys = []) {
@@ -3000,11 +3003,16 @@ exports.getRevenueConfig = async (req, res) => {
     try {
         const userId = req.user.id;
         const rawConfig = await RevenueConfig.findOne({ userId }).lean();
+        if (rawConfig) {
+            return res.status(200).json({
+                success: true,
+                data: normalizeRevenueConfig(rawConfig),
+            });
+        }
+
         const config = normalizeRevenueConfig(rawConfig || {});
-        const collected = await collectRevenueConfigCurrencyCodes(userId, rawConfig ? config : { currencyCodes: [], reportingCurrency: "" });
-        const reportingCurrency = rawConfig?.reportingCurrency
-            ? config.reportingCurrency
-            : (collected.currencyCodes.find(Boolean) || config.reportingCurrency || "INR");
+        const collected = await collectRevenueConfigCurrencyCodes(userId, { currencyCodes: [], reportingCurrency: "" });
+        const reportingCurrency = collected.currencyCodes.find(Boolean) || config.reportingCurrency || "INR";
         res.status(200).json({
             success: true,
             data: normalizeRevenueConfig({
@@ -3041,16 +3049,16 @@ exports.saveReportingCurrency = async (req, res) => {
         const userId = req.user.id;
         const current = normalizeRevenueConfig(await RevenueConfig.findOne({ userId }).lean() || {});
         const reportingCurrency = normalizeCurrencyCode(req.body?.reportingCurrency) || current.reportingCurrency || "INR";
-        const collected = await collectRevenueConfigCurrencyCodes(userId, {
-            ...current,
-            reportingCurrency,
-            currencyCodes: mergeRevenueCurrencyCodes(reportingCurrency, current.currencyCodes, req.body?.currencyCodes),
-        });
+        const submittedCodes = Array.isArray(req.body?.currencyCodes)
+            ? req.body.currencyCodes
+            : current.currencyCodes;
+        const activeCurrencyCodes = mergeRevenueCurrencyCodes(reportingCurrency, submittedCodes);
+        const flightDateKeys = await collectFlightDateKeys(userId);
         const payload = normalizeRevenueConfig({
             ...current,
             reportingCurrency,
-            currencyCodes: collected.currencyCodes,
-            fxRates: buildResetFxRates(collected.currencyCodes, reportingCurrency, collected.flightDateKeys),
+            currencyCodes: activeCurrencyCodes,
+            fxRates: buildResetFxRates(activeCurrencyCodes, reportingCurrency, flightDateKeys),
         });
         const config = await RevenueConfig.findOneAndUpdate({ userId }, { $set: payload }, { upsert: true, new: true });
         await recalculatePooRevenueForConfig(userId, normalizeRevenueConfig(config.toObject()));

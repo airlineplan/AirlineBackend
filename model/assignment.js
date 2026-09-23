@@ -29,6 +29,19 @@ const assignmentSchema = new mongoose.Schema(
             required: true
         },
 
+        // Optional upload provenance used to preserve spreadsheet precedence
+        // during later schedule/fleet/station revalidation. Legacy records
+        // remain valid and fall back to createdAt/_id ordering.
+        sourceOrder: {
+            type: Number,
+            required: false
+        },
+
+        sourceUploadedAt: {
+            type: Date,
+            required: false
+        },
+
         aircraft: {
             msn: {
                 type: Number,

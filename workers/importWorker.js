@@ -242,13 +242,18 @@ function parseOptionalNumber(value) {
 }
 
 function validateRow(row) {
-    return (row.flight && /^[a-zA-Z0-9]{1,8}$/.test(row.flight) && /^[a-zA-Z0-9]{1,4}$/.test(row.depStn) && /^[a-zA-Z0-9]{1,4}$/.test(row.arrStn));
+    const flight = String(row.flight ?? "").trim();
+    const validFlight = /^(?=.{1,8}$)(?=.*[a-zA-Z0-9])[a-zA-Z0-9 ]+$/.test(flight);
+
+    return validFlight
+        && /^[a-zA-Z0-9]{1,4}$/.test(row.depStn)
+        && /^[a-zA-Z0-9]{1,4}$/.test(row.arrStn);
 }
 
 function processExcelRow(row) {
     return {
         sourceSerialNo: parseOptionalNumber(row["S.No"] ?? row["S No"] ?? row["SNo"] ?? row["Serial No"]),
-        flight: row["Flight #"] ?? row["Flight No"],
+        flight: String(row["Flight #"] ?? row["Flight No"] ?? "").trim(),
         depStn: row["Dep Stn"],
         std: parseExcelTime(row["STD (LT)"] ?? row["STD"]),
         bt: parseExcelTime(row["BT"]),

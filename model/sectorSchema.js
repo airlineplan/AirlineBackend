@@ -131,12 +131,14 @@ const syncFlightsForSector = async (doc) => {
       ft: ft               
     };
 
+    if (doc.sta !== undefined) updatedFields.sta = doc.sta;
+
     const allFieldsValid = Object.values(updatedFields).every((value) => Number.isFinite(value) || typeof value === "string");
 
     updatedFields.isComplete = allFieldsValid;
 
     // 7. Update flights associated with this sector
-    await FLIGHT.updateMany({ networkId: doc.networkId }, { $set: updatedFields });
+    await FLIGHT.updateMany({ networkId: doc.networkId, userId: doc.userId }, { $set: updatedFields });
 
     console.log(`Flights updated successfully. Calculated FH: ${fh.toFixed(2)} | Calculated BH: ${bh.toFixed(2)}`);
   } catch (error) {

@@ -2,6 +2,8 @@ const Assignment = require("../model/assignment");
 const Flight = require("../model/flight");
 const Fleet = require("../model/fleet");
 const GroundDay = require("../model/groundDay");
+const Station = require("../model/stationSchema");
+const User = require("../model/userSchema");
 const moment = require("moment");
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -52,20 +54,137 @@ const parseTimeToMinutes = (value) => {
   return parsed.hours() * 60 + parsed.minutes();
 };
 
-const buildFlightInterval = (flightRecord, assignDate) => {
-  if (!flightRecord || !assignDate) return null;
+const parseUtcOffsetToMinutes = (value) => {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^UTC\s*([+-])\s*(\d{1,2})(?::([0-5]\d))?$/i);
+  if (!match) return null;
 
-  const stdMinutes = parseTimeToMinutes(flightRecord.std);
-  const staMinutes = parseTimeToMinutes(flightRecord.sta);
-  if (stdMinutes === null || staMinutes === null) return null;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3] || 0);
+  if (!Number.isInteger(hours) || hours > 14 || (hours === 14 && minutes !== 0)) return null;
 
-  const start = moment.utc(assignDate).startOf("day").add(stdMinutes, "minutes");
-  let end = moment.utc(assignDate).startOf("day").add(staMinutes, "minutes");
-  if (end.isSameOrBefore(start)) {
-    end = end.add(1, "day");
+  const total = (hours * 60) + minutes;
+  return match[1] === "-" ? -total : total;
+};
+
+const parseBusinessDateKey = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return moment.utc(value).format("YYYY-MM-DD");
   }
 
-  return { start, end };
+  const text = String(value).trim();
+  if (!text) return null;
+  const isoDatePrefix = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoDatePrefix && moment.utc(isoDatePrefix[1], "YYYY-MM-DD", true).isValid()) {
+    return isoDatePrefix[1];
+  }
+
+  const parsed = moment.utc(text, [
+    "YYYY-MM-DD",
+    "DD-MM-YYYY",
+    "D-MM-YYYY",
+    "DD/MM/YYYY",
+    "D/MM/YYYY",
+    "DD-MMM-YYYY",
+    "D-MMM-YYYY",
+  ], true);
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+};
+
+const addDaysToDateKey = (dateKey, days) => (
+  moment.utc(dateKey, "YYYY-MM-DD", true).add(days, "days").format("YYYY-MM-DD")
+);
+
+const getEffectiveStationOffsetForDate = (station, localDateKey) => {
+  if (!station || !localDateKey) return null;
+
+  let offsetText = station.stdtz;
+  const hasStart = Boolean(String(station.nextDSTStart || "").trim());
+  const hasEnd = Boolean(String(station.nextDSTEnd || "").trim());
+
+  if (hasStart !== hasEnd) return null;
+  if (hasStart && hasEnd) {
+    const startKey = parseBusinessDateKey(station.nextDSTStart);
+    const endKey = parseBusinessDateKey(station.nextDSTEnd);
+    if (!startKey || !endKey) return null;
+
+    const isInDst = startKey <= endKey
+      ? localDateKey >= startKey && localDateKey <= endKey
+      : localDateKey >= startKey || localDateKey <= endKey;
+    if (isInDst) offsetText = station.dsttz || station.stdtz;
+  }
+
+  return parseUtcOffsetToMinutes(offsetText);
+};
+
+const buildStationLocalInstant = ({ localDateKey, localTime, station }) => {
+  const timeMinutes = parseTimeToMinutes(localTime);
+  const offsetMinutes = getEffectiveStationOffsetForDate(station, localDateKey);
+  if (timeMinutes === null || offsetMinutes === null) return null;
+
+  const localMidnightMs = moment.utc(localDateKey, "YYYY-MM-DD", true).valueOf();
+  if (!Number.isFinite(localMidnightMs)) return null;
+
+  return {
+    instantUtcMs: localMidnightMs + (timeMinutes - offsetMinutes) * 60 * 1000,
+    localDateKey,
+    localTimeMinutes: timeMinutes,
+    effectiveOffsetMinutes: offsetMinutes,
+  };
+};
+
+const buildFlightInterval = ({
+  flightRecord,
+  assignDate,
+  departureStation,
+  arrivalStation,
+  homeTimezone,
+}) => {
+  const sourceDateKey = parseBusinessDateKey(assignDate);
+  const homeOffsetMinutes = parseUtcOffsetToMinutes(homeTimezone);
+  if (!flightRecord || !sourceDateKey || homeOffsetMinutes === null) return null;
+
+  const departure = buildStationLocalInstant({
+    localDateKey: sourceDateKey,
+    localTime: flightRecord.std,
+    station: departureStation,
+  });
+  if (!departure) return null;
+
+  let arrivalDateKey = sourceDateKey;
+  let arrival = null;
+  for (let dayOffset = 0; dayOffset <= 2; dayOffset += 1) {
+    arrivalDateKey = addDaysToDateKey(sourceDateKey, dayOffset);
+    arrival = buildStationLocalInstant({
+      localDateKey: arrivalDateKey,
+      localTime: flightRecord.sta,
+      station: arrivalStation,
+    });
+    if (!arrival) return null;
+    if (arrival.instantUtcMs > departure.instantUtcMs) break;
+  }
+  if (!arrival || arrival.instantUtcMs <= departure.instantUtcMs) return null;
+
+  const homeOffsetMs = homeOffsetMinutes * 60 * 1000;
+  const stdHomeDateTime = moment.utc(departure.instantUtcMs + homeOffsetMs);
+  const staHomeDateTime = moment.utc(arrival.instantUtcMs + homeOffsetMs);
+
+  return {
+    start: moment.utc(departure.instantUtcMs),
+    end: moment.utc(arrival.instantUtcMs),
+    departureInstantUtc: new Date(departure.instantUtcMs),
+    arrivalInstantUtc: new Date(arrival.instantUtcMs),
+    stdHomeDateTime,
+    staHomeDateTime,
+    stdHomeDateKey: stdHomeDateTime.format("YYYY-MM-DD"),
+    staHomeDateKey: staHomeDateTime.format("YYYY-MM-DD"),
+    departureEffectiveOffset: departure.effectiveOffsetMinutes,
+    arrivalEffectiveOffset: arrival.effectiveOffsetMinutes,
+    homeTimezoneOffset: homeOffsetMinutes,
+    arrivalLocalDateKey: arrivalDateKey,
+  };
 };
 
 const intervalsOverlap = (a, b) => {
@@ -138,6 +257,10 @@ const normalizeAssignmentRow = (row) => {
     dateKey,
     flight,
     acft: acftText || null,
+    sourceOrder: Number.isInteger(row.sourceOrder) ? row.sourceOrder : undefined,
+    sourceUploadedAt: row.sourceUploadedAt ? new Date(row.sourceUploadedAt) : undefined,
+    sourceCreatedAt: row.sourceCreatedAt ? new Date(row.sourceCreatedAt) : undefined,
+    sourceId: row.sourceId ? String(row.sourceId) : undefined,
   };
 };
 
@@ -162,6 +285,8 @@ const buildEmptyDiagnostics = (duplicateComboCount = 0) => ({
     groundConflicts: 0,
     acftOverlaps: 0,
     flightNotFound: 0,
+    outsideMasterDateRange: 0,
+    invalidTimezoneData: 0,
   },
   rejectedRows: [],
   discardedRows: [],
@@ -175,20 +300,25 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
   const acftSet = new Set();
   let duplicateComboCount = 0;
 
-  let sequence = 0;
+  let inputIndex = 0;
   for (const row of rows || []) {
     const normalized = normalizeAssignmentRow(row);
-    if (!normalized) continue;
+    if (!normalized) {
+      inputIndex += 1;
+      continue;
+    }
 
     const rowKey = buildDateFlightKey(normalized.dateKey, normalized.flight);
     if (seenRowKeys.has(rowKey)) {
       duplicateComboCount++;
+      inputIndex += 1;
       continue;
     }
 
     seenRowKeys.add(rowKey);
-    normalized.sequence = sequence;
-    sequence += 1;
+    normalized.sequence = inputIndex;
+    if (!Number.isInteger(normalized.sourceOrder)) normalized.sourceOrder = inputIndex;
+    inputIndex += 1;
     normalizedRows.push(normalized);
     flightSet.add(normalized.flight);
     dateSet.add(normalized.assignDate.getTime());
@@ -202,6 +332,9 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
       flights: [],
       fleetData: [],
       groundDays: [],
+      stations: [],
+      user: null,
+      masterDateRange: null,
     };
   }
 
@@ -210,13 +343,13 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
   const flightRegexArray = [...flightSet].map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
   const acftRegexArray = [...acftSet].map((acft) => new RegExp(`^${escapeRegExp(acft)}$`, "i"));
 
-  const [flights, fleetData, groundDays] = await Promise.all([
+  const [flights, fleetData, groundDays, stations, user, masterDateRangeRows] = await Promise.all([
     Flight.find({
       userId,
       date: { $gte: minDate, $lte: maxDate },
       flight: { $in: flightRegexArray },
     })
-      .select("_id flight date std sta variant rotationNumber addedByRotation legNumber")
+      .select("_id flight date depStn arrStn std sta variant rotationNumber addedByRotation legNumber")
       .lean(),
     Fleet.find({
       userId,
@@ -233,6 +366,16 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
         .select("msn date event")
         .lean()
       : Promise.resolve([]),
+    Station.find({ userId })
+      .select("stationName stdtz dsttz nextDSTStart nextDSTEnd")
+      .lean(),
+    User.findById(userId)
+      .select("hometimeZone")
+      .lean(),
+    Flight.aggregate([
+      { $match: { userId: String(userId) } },
+      { $group: { _id: null, minDate: { $min: "$date" }, maxDate: { $max: "$date" } } },
+    ]),
   ]);
 
   return {
@@ -241,6 +384,9 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
     flights,
     fleetData,
     groundDays,
+    stations,
+    user,
+    masterDateRange: masterDateRangeRows[0] || null,
   };
 };
 
@@ -248,9 +394,19 @@ const buildAssignmentSyncPlan = async ({
   userId,
   rows,
   priorityKeys = [],
-  includeGroundDays = true
+  includeGroundDays = true,
+  allowCreate = true,
 }) => {
-  const { normalizedRows, duplicateComboCount, flights, fleetData, groundDays } = await buildValidationContext({
+  const {
+    normalizedRows,
+    duplicateComboCount,
+    flights,
+    fleetData,
+    groundDays,
+    stations,
+    user,
+    masterDateRange,
+  } = await buildValidationContext({
     userId,
     rows,
     includeGroundDays
@@ -288,8 +444,18 @@ const buildAssignmentSyncPlan = async ({
     groundDayMap.set(key, gd);
   }
 
+  const stationMap = new Map();
+  for (const station of stations) {
+    const stationKey = String(station.stationName || "").trim().toUpperCase();
+    if (stationKey) stationMap.set(stationKey, station);
+  }
+
+  const masterMinDateKey = parseBusinessDateKey(masterDateRange?.minDate);
+  const masterMaxDateKey = parseBusinessDateKey(masterDateRange?.maxDate);
+  const homeTimezone = user?.hometimeZone;
+
   const processedRowsByFlightKey = new Map();
-  const acceptedIntervalsByAcftDate = new Map();
+  const acceptedIntervalsByAcft = new Map();
   const rejectedRows = [];
   const discardedDateKeys = new Set();
 
@@ -300,6 +466,8 @@ const buildAssignmentSyncPlan = async ({
   let groundConflictCount = 0;
   let variantMismatchCount = 0;
   let overlapConflictCount = 0;
+  let outsideMasterDateRangeCount = 0;
+  let invalidTimezoneDataCount = 0;
   let successfulAcftLinks = 0;
 
   const priorityKeySet = new Set(
@@ -312,18 +480,58 @@ const buildAssignmentSyncPlan = async ({
     return (a.sequence || 0) - (b.sequence || 0);
   });
 
-  for (const row of rowsForValidation) {
+  const validationRows = rowsForValidation.map((row) => {
     const flightKey = buildDateFlightKey(row.dateKey, row.flight);
     const flightRecord = flightMap.get(flightKey);
     const fleetRecordsForRegn = row.acft ? (fleetMap.get(row.acft) || []) : [];
     const fleetRecord = pickFleetRecordForDate(fleetRecordsForRegn, row.assignDate);
+    const departureStation = flightRecord
+      ? stationMap.get(String(flightRecord.depStn || "").trim().toUpperCase())
+      : null;
+    const arrivalStation = flightRecord
+      ? stationMap.get(String(flightRecord.arrStn || "").trim().toUpperCase())
+      : null;
+    const interval = flightRecord
+      ? buildFlightInterval({
+        flightRecord,
+        assignDate: row.assignDate,
+        departureStation,
+        arrivalStation,
+        homeTimezone,
+      })
+      : null;
+
+    return {
+      ...row,
+      flightKey,
+      flightRecord,
+      fleetRecord,
+      departureStation,
+      arrivalStation,
+      homeTimezone,
+      interval,
+      flightVariant: normalizeVariantForCompare(flightRecord?.variant),
+      fleetVariant: normalizeVariantForCompare(fleetRecord?.variant),
+    };
+  });
+
+  for (const row of validationRows) {
+    const { flightKey, flightRecord, fleetRecord } = row;
 
     const errors = [];
     let isValid = true;
     let removedReason = null;
     let assignedAcft = row.acft;
 
-    if (!flightRecord) {
+    const outsideMasterDateRange = !masterMinDateKey || !masterMaxDateKey ||
+      row.dateKey < masterMinDateKey || row.dateKey > masterMaxDateKey;
+
+    if (outsideMasterDateRange) {
+      outsideMasterDateRangeCount++;
+      isValid = false;
+      removedReason = "OUTSIDE_MASTER_DATE_RANGE";
+      errors.push("Assignment date is outside the master schedule date range");
+    } else if (!flightRecord) {
       notFoundCount++;
       isValid = false;
       errors.push("Flight not found in master schedule");
@@ -352,9 +560,10 @@ const buildAssignmentSyncPlan = async ({
         removedReason = "OUTSIDE_FLEET_DATES";
         postExitCount++;
         errors.push("Date succeeds fleet exit");
+      } else if (!flightRecord || outsideMasterDateRange) {
+        assignedAcft = null;
       } else {
-        const flightVariant = normalizeVariantForCompare(flightRecord?.variant);
-        const fleetVariant = normalizeVariantForCompare(fleetRecord?.variant);
+        const { flightVariant, fleetVariant } = row;
 
         if (!variantsMatch(flightVariant, fleetVariant)) {
           isValid = false;
@@ -374,10 +583,15 @@ const buildAssignmentSyncPlan = async ({
             groundConflictCount++;
             errors.push(`Aircraft ${msn} is on ground for this date`);
           } else {
-            const interval = buildFlightInterval(flightRecord, row.assignDate);
-            if (interval) {
-              const acftDateKey = `${row.dateKey}_${row.acft}`;
-              const priorIntervals = acceptedIntervalsByAcftDate.get(acftDateKey) || [];
+            const { interval } = row;
+            if (!interval) {
+              isValid = false;
+              assignedAcft = null;
+              removedReason = "INVALID_TIMEZONE_DATA";
+              invalidTimezoneDataCount++;
+              errors.push("Flight interval could not be normalized using station and home timezone data");
+            } else {
+              const priorIntervals = acceptedIntervalsByAcft.get(row.acft) || [];
               const hasOverlap = priorIntervals.some((existingInterval) => intervalsOverlap(interval, existingInterval));
 
               if (hasOverlap) {
@@ -385,10 +599,10 @@ const buildAssignmentSyncPlan = async ({
                 assignedAcft = null;
                 removedReason = "ACFT_ASSIGNMENT_OVERLAP";
                 overlapConflictCount++;
-                errors.push(`Assignment overlaps with a previous assignment for aircraft ${row.acft} on ${row.dateKey}`);
+                errors.push(`Assignment overlaps with a previous assignment for aircraft ${row.acft}`);
               } else {
                 priorIntervals.push(interval);
-                acceptedIntervalsByAcftDate.set(acftDateKey, priorIntervals);
+                acceptedIntervalsByAcft.set(row.acft, priorIntervals);
               }
             }
           }
@@ -459,9 +673,13 @@ const buildAssignmentSyncPlan = async ({
               isValid: true,
               validationErrors: [],
               removedReason: null,
+              ...(Number.isInteger(row.sourceOrder) ? { sourceOrder: row.sourceOrder } : {}),
+              ...(row.sourceUploadedAt && !Number.isNaN(row.sourceUploadedAt.getTime())
+                ? { sourceUploadedAt: row.sourceUploadedAt }
+                : {}),
             },
           },
-          upsert: true,
+          upsert: allowCreate,
         },
       });
     } else if (removedReason === "GROUND_DAY_CONFLICT" && assignedAcft && msnVal !== null) {
@@ -484,9 +702,13 @@ const buildAssignmentSyncPlan = async ({
               isValid: false,
               validationErrors: errors,
               removedReason,
+              ...(Number.isInteger(row.sourceOrder) ? { sourceOrder: row.sourceOrder } : {}),
+              ...(row.sourceUploadedAt && !Number.isNaN(row.sourceUploadedAt.getTime())
+                ? { sourceUploadedAt: row.sourceUploadedAt }
+                : {}),
             },
           },
-          upsert: true,
+          upsert: allowCreate,
         },
       });
     } else {
@@ -539,6 +761,8 @@ const buildAssignmentSyncPlan = async ({
         groundConflicts: groundConflictCount,
         acftOverlaps: overlapConflictCount,
         flightNotFound: notFoundCount,
+        outsideMasterDateRange: outsideMasterDateRangeCount,
+        invalidTimezoneData: invalidTimezoneDataCount,
       },
       rejectedRows,
       discardedRows: rejectedRows,
@@ -563,7 +787,7 @@ const applyAssignmentSyncPlan = async (result = {}) => {
   return { assignmentWriteResult, flightWriteResult };
 };
 
-const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [] }) => {
+const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [], includeGroundDays = true }) => {
   if (Assignment.db?.readyState !== 1) {
     return buildEmptyDiagnostics();
   }
@@ -571,18 +795,39 @@ const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [] }) => {
   const assignments = await Assignment.find({
     userId,
   })
-    .select("date flightNumber aircraft.registration")
-    .sort({ date: 1, flightNumber: 1, _id: 1 })
+    .select("date flightNumber aircraft.registration sourceOrder sourceUploadedAt createdAt")
     .lean();
+
+  assignments.sort((a, b) => {
+    const aUploadedAt = a.sourceUploadedAt || a.createdAt;
+    const bUploadedAt = b.sourceUploadedAt || b.createdAt;
+    const uploadedDifference = new Date(aUploadedAt || 0).getTime() - new Date(bUploadedAt || 0).getTime();
+    if (uploadedDifference !== 0) return uploadedDifference;
+
+    const aOrder = Number.isInteger(a.sourceOrder) ? a.sourceOrder : Number.MAX_SAFE_INTEGER;
+    const bOrder = Number.isInteger(b.sourceOrder) ? b.sourceOrder : Number.MAX_SAFE_INTEGER;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return String(a._id).localeCompare(String(b._id));
+  });
 
   const rows = assignments.map((assignment) => ({
     assignDate: assignment.date,
     dateKey: moment.utc(assignment.date).format("YYYY-MM-DD"),
     flight: assignment.flightNumber,
     acft: assignment.aircraft?.registration || null,
+    sourceOrder: assignment.sourceOrder,
+    sourceUploadedAt: assignment.sourceUploadedAt,
+    sourceCreatedAt: assignment.createdAt,
+    sourceId: assignment._id,
   }));
 
-  const result = await buildAssignmentSyncPlan({ userId, rows, priorityKeys });
+  const result = await buildAssignmentSyncPlan({
+    userId,
+    rows,
+    priorityKeys,
+    includeGroundDays,
+    allowCreate: false,
+  });
   await applyAssignmentSyncPlan(result);
 
   return {
@@ -716,4 +961,12 @@ module.exports = {
   purgeStaleAssignmentsForUser,
   deleteAssignmentsForAircraftDate,
   buildDateFlightKey,
+  __testables__: {
+    parseUtcOffsetToMinutes,
+    parseBusinessDateKey,
+    getEffectiveStationOffsetForDate,
+    buildStationLocalInstant,
+    buildFlightInterval,
+    intervalsOverlap,
+  },
 };

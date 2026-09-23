@@ -21,12 +21,15 @@ const Sector = require("../model/sectorSchema");
 const Flight = require("../model/flight");
 const Assignment = require("../model/assignment");
 const Fleet = require("../model/fleet");
+const Station = require("../model/stationSchema");
+const User = require("../model/userSchema");
 const { uploadAssignments, getWeeklyAssignments } = require("../controller/assignmentController");
 const { deleteFlightsAndUpdateSectors } = require("../controller/dataController");
 const fleetController = require("../controller/fleetController");
-const { buildAssignmentSyncPlan } = require("../utils/assignmentSync");
+const stationController = require("../controller/stationController");
+const { buildAssignmentSyncPlan, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 
-const USER_ID = "test-user";
+const USER_ID = "65f000000000000000000001";
 const BASE_FLIGHT = "AB123";
 const BASE_VARIANT = "A320";
 const BASE_DEP = "DEL";
@@ -320,6 +323,26 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase();
+  await User.create({
+    _id: USER_ID,
+    email: "assignment-validation@example.com",
+    password: "test-password",
+    hometimeZone: "UTC+5:30",
+  });
+  await Station.create([
+    {
+      userId: USER_ID,
+      stationName: BASE_DEP,
+      stdtz: "UTC+5:30",
+      dsttz: "UTC+5:30",
+    },
+    {
+      userId: USER_ID,
+      stationName: BASE_ARR,
+      stdtz: "UTC+5:30",
+      dsttz: "UTC+5:30",
+    },
+  ]);
 });
 
 test("generates one flight occurrence per valid date in the effective range", async () => {
@@ -811,6 +834,153 @@ test("fleet save revalidates and deletes assignments for removed aircraft regist
   assert.equal(res.body?.assignmentDiagnostics?.discardedCount, 1);
   assert.equal(assignment, null);
   assert.ok(!flight?.aircraft?.registration);
+});
+
+test("station timezone changes revalidate existing assignments using stable source order", async () => {
+  const shiftStation = await Station.create({
+    userId: USER_ID,
+    stationName: "SHIFT",
+    stdtz: "UTC+0:00",
+    dsttz: "UTC+0:00",
+  });
+  await Fleet.create({
+    userId: USER_ID,
+    category: "Aircraft",
+    type: BASE_VARIANT,
+    variant: BASE_VARIANT,
+    sn: "9001",
+    regn: "VT-TZ1",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 4, 30),
+  });
+  await Flight.create([
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 10),
+      flight: "TZ100",
+      depStn: BASE_DEP,
+      arrStn: BASE_DEP,
+      std: "10:00",
+      sta: "12:00",
+      variant: BASE_VARIANT,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 10),
+      flight: "TZ200",
+      depStn: "SHIFT",
+      arrStn: "SHIFT",
+      std: "13:00",
+      sta: "15:00",
+      variant: BASE_VARIANT,
+    },
+  ]);
+  const uploadedAt = new Date("2026-03-01T00:00:00.000Z");
+  await Assignment.create([
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 10),
+      flightNumber: "TZ100",
+      aircraft: { registration: "VT-TZ1", msn: 9001 },
+      sourceUploadedAt: uploadedAt,
+      sourceOrder: 0,
+    },
+    {
+      userId: USER_ID,
+      date: utcDate(2026, 4, 10),
+      flightNumber: "TZ200",
+      aircraft: { registration: "VT-TZ1", msn: 9001 },
+      sourceUploadedAt: uploadedAt,
+      sourceOrder: 1,
+    },
+  ]);
+
+  const initial = await revalidateAssignmentsForUser({ userId: USER_ID });
+  assert.equal(initial.discardedCount, 0);
+
+  const res = createMockResponse();
+  await stationController.saveStation({
+    user: { id: USER_ID },
+    body: {
+      homeTimeZone: "UTC+5:30",
+      stations: [{
+        _id: shiftStation._id,
+        stationName: "SHIFT",
+        stdtz: "UTC+7:00",
+        dsttz: "UTC+7:00",
+        nextDSTStart: "",
+        nextDSTEnd: "",
+      }],
+    },
+  }, res);
+
+  const assignments = await Assignment.find({ userId: USER_ID }).sort({ sourceOrder: 1 }).lean();
+  const rejectedFlight = await Flight.findOne({ userId: USER_ID, flight: "TZ200" }).lean();
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].flightNumber, "TZ100");
+  assert.ok(!rejectedFlight.aircraft?.registration);
+});
+
+test("network time changes revalidate and drop a later overlapping assignment", async () => {
+  const firstNetwork = await seedNetwork({ flight: "NW100", std: "08:00", bt: "02:00", sta: "10:00" });
+  const secondNetwork = await seedNetwork({ flight: "NW200", std: "10:00", bt: "02:00", sta: "12:00" });
+  const occurrenceDate = utcDate(2026, 4, 6);
+
+  await Fleet.create({
+    userId: USER_ID,
+    category: "Aircraft",
+    type: BASE_VARIANT,
+    variant: BASE_VARIANT,
+    sn: "9101",
+    regn: "VT-NW1",
+    entry: utcDate(2026, 4, 1),
+    exit: utcDate(2026, 4, 30),
+  });
+  const uploadedAt = new Date("2026-03-01T00:00:00.000Z");
+  await Assignment.create([
+    {
+      userId: USER_ID,
+      date: occurrenceDate,
+      flightNumber: "NW100",
+      aircraft: { registration: "VT-NW1", msn: 9101 },
+      sourceUploadedAt: uploadedAt,
+      sourceOrder: 0,
+    },
+    {
+      userId: USER_ID,
+      date: occurrenceDate,
+      flightNumber: "NW200",
+      aircraft: { registration: "VT-NW1", msn: 9101 },
+      sourceUploadedAt: uploadedAt,
+      sourceOrder: 1,
+    },
+  ]);
+
+  const initial = await revalidateAssignmentsForUser({ userId: USER_ID });
+  assert.equal(initial.discardedCount, 0);
+
+  await Data.findByIdAndUpdate(
+    secondNetwork.data._id,
+    { $set: { std: "09:00" } },
+    { new: true, runValidators: true }
+  );
+
+  const assignments = await Assignment.find({ userId: USER_ID }).sort({ sourceOrder: 1 }).lean();
+  const rejectedFlight = await Flight.findOne({
+    networkId: secondNetwork.networkId,
+    date: occurrenceDate,
+  }).lean();
+  const retainedFlight = await Flight.findOne({
+    networkId: firstNetwork.networkId,
+    date: occurrenceDate,
+  }).lean();
+
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].flightNumber, "NW100");
+  assert.equal(retainedFlight.aircraft?.registration, "VT-NW1");
+  assert.ok(!rejectedFlight.aircraft?.registration);
 });
 
 test("assignment and flight tenant indexes reject duplicate rows for the same user scope", async () => {
