@@ -21,7 +21,7 @@ const attachUserFromToken = async (req, token) => {
     throw error;
   }
 
-  const user = await User.findById(decoded.id).select("_id email role isActive firstName lastName pageAccess pageAccessConfigured").lean();
+  const user = await User.findById(decoded.id).select("_id email role isActive firstName lastName pageAccess pageAccessConfigured hometimeZone").lean();
   if (!user || user.isActive === false) {
     const error = new Error("User is inactive or no longer exists");
     error.statusCode = 401;
@@ -36,6 +36,7 @@ const attachUserFromToken = async (req, token) => {
     lastName: user.lastName,
     pageAccess: getEffectivePageAccess(user),
     pageAccessConfigured: user.pageAccessConfigured === true,
+    hometimeZone: user.hometimeZone || "UTC+5:30",
   };
   return req.user;
 };

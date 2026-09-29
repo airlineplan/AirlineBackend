@@ -98,7 +98,7 @@ const getStationsTableData = async (req, res) => {
 
     // Retrieve user information to get home timezone
     const user = await User.findById(userId);
-    const hometimeZone = user ? user.hometimeZone : '';
+    const hometimeZone = (user && user.hometimeZone) ? user.hometimeZone : 'UTC+5:30';
 
     // Retrieve station data
     const data = (await Stations.find({ userId }).lean()).map((station) => ({
@@ -109,7 +109,7 @@ const getStationsTableData = async (req, res) => {
     }));
 
     // Return response with station data and home timezone
-    res.json({ data, hometimeZone });
+    res.json({ data, hometimeZone, homeTimeZone: hometimeZone });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Internal Server Error' });
@@ -123,7 +123,7 @@ const saveStation = async (req, res) => {
 
     // Update the home timezone of the user
     const user = await User.findById(userId);
-    if (user) {
+    if (user && homeTimeZone) {
       assignmentInputsChanged = String(user.hometimeZone || "").trim() !== String(homeTimeZone || "").trim();
       user.hometimeZone = homeTimeZone;
       await user.save();
@@ -132,7 +132,7 @@ const saveStation = async (req, res) => {
     const updatedStations = [];
 
     // Iterate over stations array and update each station sequentially
-    for (const stationData of stations) {
+    for (const stationData of (Array.isArray(stations) ? stations : [])) {
       const { _id, ...updateFields } = stationData;
 
       // Keep taxi times in canonical HH:MM format before persisting.
