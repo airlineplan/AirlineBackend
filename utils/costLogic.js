@@ -6,6 +6,8 @@
  * costs in one batch so every consumer sees the same output.
  */
 
+const { lookupSeverityRate } = require("./severityMatrix");
+const { COST_COMPONENTS } = require("./costFields");
 const {
   normalizeCurrencyCode: normalizeFxCurrencyCode,
   normalizeDateKey: normalizeFxDateKey,
@@ -1092,7 +1094,8 @@ const normalizeLeasedReserve = (rows = []) => rows.map((row) => ({
   pn: normalize(pick(row, ["pn"])),
   sn: normalize(pick(row, ["sn", "esn", "apun", "msn"])),
   setBalance: toNumber(pick(row, ["setBalance"])),
-  setRate: toNumber(pick(row, ["setRate", "rate", "contribution"])),
+  setRate: row.setRateType === "SM" ? 0 : toNumber(pick(row, ["setRate", "rate", "contribution"])),
+  setRateType: row.setRateType === "SM" ? "SM" : "VALUE",
   asOnDate: pick(row, ["asOnDate", "date", "fromDate"]),
   ccy: normalize(pick(row, ["ccy", "currency"])),
   driver: normalizeMetric(pick(row, ["driver"])),
@@ -1178,7 +1181,7 @@ const getScheduleIdentity = (row = {}) => [
   normalize(row.sn || row.msn),
   toDayKey(row.date),
   normalize(row.transactionType || row.source),
-  normalize(row.sourceEventId || row.eventId || row._id),
+  normalize(row.transactionType) === "MONTHLY CONTRIBUTION" ? "" : normalize(row.sourceEventId || row.eventId || row._id),
 ].join("|");
 
 const parseAnniversaryParts = (setting = {}) => {
@@ -1220,6 +1223,8 @@ const getEscalatedReserveRate = (setting = {}, scheduleDateValue) => {
   }
   return round2(baseRate * ((1 + escalation / 100) ** anniversaries));
 };
+
+const getEscalationFactor = (setting, date) => getEscalatedReserveRate({ ...setting, setRate: 1000000, rate: 1000000 }, date) / 1000000;
 
 const generateMonthlyDates = (asOnDateValue, endDateValue) => {
   const asOnDate = parseDate(asOnDateValue);
@@ -1371,7 +1376,7 @@ const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingSche
   const existing = normalizeMaintenanceReserveSchedule(existingScheduleRows);
   const rows = [];
 
-  const manualRows = existing.filter((row) => !isGeneratedScheduleRow(row));
+  const manualRows = existing.filter((row) => !isGeneratedScheduleRow(row) || row.invoiceLocked);
   manualRows.forEach((row) => rows.push(row));
 
   settings.forEach((setting) => {
@@ -1441,6 +1446,15 @@ const generateMaintenanceReserveSchedule = (leasedReserveRows = [], existingSche
   rows.forEach((row) => {
     const key = getScheduleIdentity(row);
     if (!key.replace(/\|/g, "")) return;
+    const previous = existing.find((saved) => getScheduleIdentity(saved) === key);
+    if (previous?.invoiceLocked) {
+      Object.assign(row, {
+        ...previous, generatedRate: previous.generatedRate ?? row.rate, generatedDriverValue: previous.generatedDriverValue ?? row.driverValue,
+        generatedContribution: previous.generatedContribution ?? row.contribution,
+      });
+    } else if (previous?.smDetail && normalize(row.transactionType) === "MONTHLY CONTRIBUTION") {
+      Object.assign(row, { rate: previous.rate, smDetail: previous.smDetail });
+    }
     deduped.set(key, row);
   });
 
@@ -1823,6 +1837,8 @@ const normalizeCostConfig = (config = {}) => {
     : normalizeMaintenanceReserveSchedule(config.maintenanceReserveSchedule || []);
   return {
     __normalized: true,
+    ctdByEsn: config.ctdByEsn || {},
+    severityMatrices: config.severityMatrices || {},
     reportingCurrency: normalize(pick(config, ["reportingCurrency"])) || "INR",
     fxRates: Array.isArray(config.fxRates) ? config.fxRates : [],
     allocationTable: normalizeAllocationTable(config.allocationTable || config.costAllocation || []),
@@ -2259,8 +2275,18 @@ const generateMaintenanceReserveScheduleWithContributions = (
       }
 
       const driver = normalizeMetric(row.driver || setting.driver);
-      const rate = toNumber(row.rate) || getEscalatedReserveRate(setting, row.date);
       const matchedFlights = getFlightsForReserveScheduleRow(flights, setting, row, aircraftOnwing);
+      let rate = getEscalatedReserveRate(setting, row.date);
+      if (setting.setRateType === "SM") {
+        const period = getPreviousUtilisationPeriod(row.date, setting.asOnDate);
+        const dateKey = toDayKey(period.to);
+        const timeline = config.ctdByEsn instanceof Map ? config.ctdByEsn.get(setting.sn) : config.ctdByEsn?.[setting.sn];
+        const ctd = timeline instanceof Map ? timeline.get(dateKey) : timeline?.[dateKey];
+        const matrix = config.severityMatrices instanceof Map ? config.severityMatrices.get(normalize(setting.mrAccId)) : config.severityMatrices?.[normalize(setting.mrAccId)];
+        row.smDetail = lookupSeverityRate(matrix, ctd || { condition: "Normal", thrust: 0, derate: 0 },
+          matchedFlights.reduce((sum, flight) => sum + toNumber(flight.fh), 0), matchedFlights.length);
+        rate = round2(row.smDetail.baseRate * getEscalationFactor(setting, row.date));
+      }
       const driverValue = driver === "MONTH"
         ? getExactExampleMonthlyFactor(
             new Date(Date.UTC(
@@ -2272,16 +2298,22 @@ const generateMaintenanceReserveScheduleWithContributions = (
             setting.endDate
           )
         : round2(matchedFlights.reduce((sum, flight) => sum + getMaintenanceReserveDriverValue(driver, flight), 0));
-      const contribution = round2(rate * driverValue);
+      const generatedContribution = round2(rate * driverValue);
+      row.generatedRate = rate;
+      row.generatedDriverValue = driverValue;
+      row.generatedContribution = generatedContribution;
+      const contribution = row.invoiceLocked ? toNumber(row.contribution) : generatedContribution;
+      const effectiveRate = row.invoiceLocked ? toNumber(row.rate) : rate;
+      const effectiveDriverValue = row.invoiceLocked ? toNumber(row.driverValue) : driverValue;
       const drawdown = toNumber(row.drawdown || row.mrDrawdown);
       const openingBalance = previousClosing;
       const closingBalance = round2(openingBalance + contribution - drawdown);
 
       Object.assign(row, {
         driver,
-        rate,
-        driverValue,
-        monthNumber: driverValue,
+        rate: effectiveRate,
+        driverValue: effectiveDriverValue,
+        monthNumber: effectiveDriverValue,
         contribution,
         openingBalance,
         openingBal: openingBalance,
@@ -2327,8 +2359,9 @@ const resolveMaintenanceReserveRate = (flight, config = {}) => {
   settingsMatches.forEach((setting) => {
     const schedule = findScheduleRowForSetting(setting, scheduleRows, rateDate, snList);
     const driver = normalizeMetric(schedule?.driver || setting?.driver);
-    const scheduleRate = toNumber(schedule?.rate);
-    const rate = scheduleRate > 0 ? scheduleRate : getEscalatedReserveRate(setting, rateDate || flightDate);
+    const scheduleRate = toNumber(schedule?.invoiceLocked && flight.category !== "Invoiced" ? schedule.generatedRate : schedule?.rate);
+    const rate = schedule && (schedule.invoiceLocked || setting.setRateType === "SM") ? scheduleRate
+      : scheduleRate > 0 ? scheduleRate : getEscalatedReserveRate(setting, rateDate || flightDate);
     const currency = schedule?.ccy || setting?.ccy || "";
     const driverValue = getMaintenanceReserveDriverValue(driver, flight);
     if (driver === "APUHR" && driverValue <= 0) {
@@ -2388,7 +2421,7 @@ const resolveMaintenanceReserveMonthlyContribution = (flight, config = {}) => {
   if (engineSns.length === 0) return 0;
 
   const monthlyReserveRows = (Array.isArray(config.maintenanceReserveSchedule) ? config.maintenanceReserveSchedule : [])
-    .filter((row) => normalizeMetric(row?.driver) === "MONTH" && toNumber(row?.contribution) > 0);
+    .filter((row) => normalizeMetric(row?.driver) === "MONTH" && toNumber(row?.invoiceLocked && flight.category !== "Invoiced" ? row.generatedContribution : row?.contribution) > 0);
   if (monthlyReserveRows.length === 0) return 0;
 
   return monthlyReserveRows.reduce((sum, row) => {
@@ -2396,7 +2429,7 @@ const resolveMaintenanceReserveMonthlyContribution = (flight, config = {}) => {
     if (rowMonthNumber !== flightMonthNumber) return sum;
     if (row?.msn && !engineSns.includes(normalize(row.msn))) return sum;
     if (row?.acftReg && normalize(row.acftReg) && normalize(row.acftReg) !== getFlightRegistration(flight)) return sum;
-    return sum + toNumber(row.contribution);
+    return sum + toNumber(row.invoiceLocked && flight.category !== "Invoiced" ? row.generatedContribution : row.contribution);
   }, 0);
 };
 
@@ -2535,6 +2568,11 @@ const initializeFlight = (flight, config) => {
   next.otherDoc1 = 0;
   next.otherDoc2 = 0;
   next.otherDoc3 = 0;
+  for (const field of COST_COMPONENTS) {
+    next[field] = 0;
+    next[`${field}CCY`] = "";
+    next[`${field}RCCY`] = 0;
+  }
   next.crewOverlay = 0;
   next.crewPositioning = 0;
   next.reportingCurrency = reportingCurrency;
@@ -2546,7 +2584,8 @@ const addAllocation = (flight, field, amount, currency, reportingCurrency, expli
   const effectiveFxRates = fxRates.length ? fxRates : (flight.__costFxRates || []);
   const numeric = round2((flight[field] || 0) + amount);
   flight[field] = numeric;
-  flight[`${field}CCY`] = currency || flight[`${field}CCY`] || "";
+  const previousCurrency = flight[`${field}CCY`];
+  flight[`${field}CCY`] = previousCurrency && currency && previousCurrency !== currency ? "MIXED" : currency || previousCurrency || "";
   flight[`${field}RCCY`] = round2((flight[`${field}RCCY`] || 0) + convertToRccy(amount, currency, reportingCurrency, explicitRccy, effectiveFxRates, date || flight?.date, flight));
 };
 
@@ -2847,7 +2886,7 @@ const enrichDirectCosts = (flights, config) => {
       if (!matchesOptional(row.sn, msn) && !matchesOptional(row.sn, acftReg)) return -1;
       return scoreSpecificity([row.acftRegn, row.sn, row.pn, row.endDate]) * 10;
     });
-    if (mrDirectRule && mrDerived.amount <= 0) {
+    if (mrDirectRule && mrDerived.details.length === 0) {
       let mrAmount = mrDirectRule.setRate;
       if (mrDirectRule.driver === "BH") mrAmount *= bh;
       else if (mrDirectRule.driver === "FH") mrAmount *= fh;
@@ -2907,6 +2946,11 @@ const enrichDirectCosts = (flights, config) => {
       flight.otherMaintenance1 = round2(perBhTotal + perFhTotal);
       flight.otherMaintenance2 = round2(perDepTotal);
       flight.otherMaintenance3 = round2(perMonthTotal);
+      for (const [field, amountFor] of [["otherMaintenance1", row => row.costPerBh * bh + row.costPerFh * fh],
+        ["otherMaintenance2", row => row.costPerDeparture * departures], ["otherMaintenance3", row => row.costPerMonth]]) {
+        flight[field] = 0;
+        for (const row of matchingOtherMxRows) addAllocation(flight, field, amountFor(row) || 0, row.ccy, config.reportingCurrency, 0);
+      }
       applyCostField(
         flight,
         "otherMaintenance",
@@ -2933,6 +2977,8 @@ const enrichDirectCosts = (flights, config) => {
     });
     flight.navEnr = round2(getNavigationTieredCost(enrRule, mtow));
     flight.navTrml = round2(getNavigationTieredCost(termRule, mtow));
+    applyCostField(flight, "navEnr", flight.navEnr, enrRule?.ccy, config.reportingCurrency, enrRule?.costRCCY);
+    applyCostField(flight, "navTrml", flight.navTrml, termRule?.ccy, config.reportingCurrency, termRule?.costRCCY);
     applyCostField(
       flight,
       "navigation",
@@ -2980,6 +3026,9 @@ const enrichDirectCosts = (flights, config) => {
     flight.aptHandlingCost = round2(handlingRule?.cost || 0);
     flight.aptAvsecCost = round2(avsecRule?.cost || 0);
     flight.aptOtherCost = round2(otherAirportCost ?? 0);
+    for (const [field, rule] of [["aptLandingCost", landingRule], ["aptHandlingCost", handlingRule], ["aptAvsecCost", avsecRule], ["aptOtherCost", otherAirportRule]]) {
+      applyCostField(flight, field, flight[field], rule?.ccy, config.reportingCurrency, rule?.costRCCY);
+    }
     applyCostField(
       flight,
       "airport",
@@ -3021,6 +3070,10 @@ const enrichDirectCosts = (flights, config) => {
     flight.otherDoc1 = round2(directOtherDocAmounts[0] || 0);
     flight.otherDoc2 = round2(directOtherDocAmounts[1] || 0);
     flight.otherDoc3 = round2(directOtherDocAmounts[2] || 0);
+    for (let index = 0; index < 3; index += 1) {
+      const rule = directOtherDocRows[index];
+      applyCostField(flight, `otherDoc${index + 1}`, directOtherDocAmounts[index] || 0, rule?.ccy, config.reportingCurrency, rule?.costRCCY);
+    }
     applyCostField(
       flight,
       "otherDoc",
@@ -3137,7 +3190,9 @@ const enrichAllocatedCosts = (flights, config) => {
     );
   });
 
-  const monthlyReserveRows = (config.maintenanceReserveSchedule || []).filter((row) => normalizeMetric(row.driver) === "MONTH" && toNumber(row.contribution) > 0);
+  const monthlyReserveRows = (config.maintenanceReserveSchedule || []).map((row) => row.invoiceLocked && flights[0]?.category !== "Invoiced"
+    ? { ...row, contribution: row.generatedContribution ?? 0 } : row)
+    .filter((row) => normalizeMetric(row.driver) === "MONTH" && toNumber(row.contribution) > 0);
   if (monthlyReserveRows.length > 0) {
     const monthlyReserveGroups = new Map();
 
@@ -3379,6 +3434,11 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
   enrichDirectCosts(flights, config);
   enrichAllocatedCosts(flights, config);
   flights.forEach((flight) => {
+    // Direct and monthly Other Mx expense components are shown separately;
+    // the existing total-cost buckets count each source amount once.
+    for (const [field, source] of [["otherMxExpenses1", "otherMaintenance1"], ["otherMxExpenses2", "otherMaintenance2"], ["otherMxExpenses3", "otherMxExpenses"]]) {
+      for (const suffix of ["", "CCY", "RCCY"]) flight[field + suffix] = flight[source + suffix] || (suffix === "CCY" ? "" : 0);
+    }
     applyCompatibilityAliases(flight);
     applyTotals(flight, config.reportingCurrency);
     delete flight.__costFxRates;
@@ -3388,6 +3448,12 @@ const computeFlightCostsBatch = (inputFlights = [], rawConfig = {}) => {
 };
 
 const computeFlightCosts = (flight, rawConfig = {}) => computeFlightCostsBatch([flight], rawConfig)[0];
+const computeCategoryFlightCostsBatch = (flights = [], config = {}) => {
+  const planned = flights.filter((row) => !row.category || row.category === "Planned");
+  const computed = computeFlightCostsBatch(planned, config);
+  const byRow = new Map(planned.map((row, index) => [row, computed[index]]));
+  return flights.map((row) => byRow.get(row) || row);
+};
 
 module.exports = {
   normalizeCostConfig,
@@ -3414,8 +3480,12 @@ module.exports = {
   serializeAirportMtowCostRows,
   hydrateSchMxEvents,
   getFlightSnContext,
+  getEscalationFactor,
+  resolveMaintenanceReserveRate,
+  resolveMaintenanceReserveMonthlyContribution,
   getLatestFlightForAircraft,
   getApuFuelPriceSourceFlight,
   computeFlightCostsBatch,
+  computeCategoryFlightCostsBatch,
   computeFlightCosts,
 };

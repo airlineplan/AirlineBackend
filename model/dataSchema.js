@@ -721,6 +721,7 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
       if (assignmentOccurrenceFilters.length > 0) {
         const assignmentDeleteResult = await Assignment.deleteMany({
           userId: doc.userId,
+          source: { $ne: "ACTUALS" },
           $or: assignmentOccurrenceFilters
         });
 

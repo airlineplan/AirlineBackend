@@ -1,3 +1,5 @@
+const { buildOwnershipCache, loadOwnershipCache, resolveFromCache, validateOwnershipHistory } = require("../services/utilisationOwnership");
+const { getUtilisationFlights, selectUtilisationFlights } = require("../utils/utilisationFlights");
 const Aircraft = require("../model/aircraftSchema.js");
 const Utilisation = require("../model/utilisation.js");
 const MaintenanceStatus = require("../model/maintenanceStatusSchema.js");
@@ -463,7 +465,7 @@ const getFlightDateBounds = async ({ userId } = {}) => {
     const userMatch = userId ? { userId: String(userId) } : {};
     const [datedBounds, effectiveBounds] = await Promise.all([
         Flight.aggregate([
-            { $match: { ...userMatch, date: { $type: "date" } } },
+            { $match: { ...userMatch, category: { $in: ["Planned", "Actual"] }, date: { $type: "date" } } },
             {
                 $group: {
                     _id: null,
@@ -763,88 +765,12 @@ const rebuildOnwingTimelineForRotableMovement = async ({ userId, movement }) => 
     );
 };
 
-const getEffectiveUtilisationContext = async ({ userId, msnEsn, date }) => {
-    const assetKey = String(msnEsn || "").trim();
-    const lookupDate = date ? moment.utc(date).endOf("day").toDate() : null;
-    const rotableOwnership = await getRotableOwnershipContextForDate({
-        userId,
-        assetKey,
-        date
-    });
-
-    if (rotableOwnership?.isExplicitSpare) {
-        const fleetFilter = assetKey ? { sn: assetKey } : {};
-        if (userId) {
-            fleetFilter.userId = String(userId);
-        }
-
-        return {
-            assetKey,
-            effectiveMsn: assetKey,
-            fleet: assetKey ? await Fleet.findOne(fleetFilter).lean() : null,
-        };
-    }
-
-    if (rotableOwnership?.effectiveMsn) {
-        const fleetFilter = { sn: rotableOwnership.effectiveMsn };
-        if (userId) {
-            fleetFilter.userId = String(userId);
-        }
-
-        return {
-            assetKey,
-            effectiveMsn: rotableOwnership.effectiveMsn,
-            fleet: await Fleet.findOne(fleetFilter).lean(),
-        };
-    }
-
-    const historicalOwnershipFilter = {
-        $or: [
-            { pos1Esn: assetKey },
-            { pos2Esn: assetKey },
-            { apun: assetKey }
-        ]
-    };
-
-    if (userId) {
-        historicalOwnershipFilter.userId = String(userId);
-    }
-
-    const candidateMsns = assetKey
-        ? await AircraftOnwing.distinct("msn", historicalOwnershipFilter)
-        : [];
-
-    const matchingConfigs = [];
-    for (const candidateMsn of candidateMsns) {
-        const latestConfigFilter = { msn: candidateMsn };
-        if (userId) {
-            latestConfigFilter.userId = String(userId);
-        }
-        if (lookupDate) {
-            latestConfigFilter.date = { $lte: lookupDate };
-        }
-
-        const latestConfig = await AircraftOnwing.findOne(latestConfigFilter).sort({ date: -1 }).lean();
-        if (onwingRowHasAsset(latestConfig, assetKey)) {
-            matchingConfigs.push(latestConfig);
-        }
-    }
-    matchingConfigs.sort((a, b) => moment.utc(b.date).valueOf() - moment.utc(a.date).valueOf());
-    const owningAircraft = matchingConfigs[0] || null;
-
-    const effectiveMsn = String(owningAircraft?.msn || assetKey).trim();
-    const fleetFilter = effectiveMsn ? { sn: effectiveMsn } : {};
-    if (userId) {
-        fleetFilter.userId = String(userId);
-    }
-
-    const fleet = effectiveMsn ? await Fleet.findOne(fleetFilter).lean() : null;
-
-    return {
-        assetKey,
-        effectiveMsn,
-        fleet,
-    };
+const getEffectiveUtilisationContext = async ({ userId, msnEsn, date, cache }) => {
+    const ownershipCache = cache || await loadOwnershipCache(userId);
+    const owner = resolveFromCache({ sn: msnEsn, date: date || new Date(), cache: ownershipCache });
+    return { assetKey: String(msnEsn || ""), effectiveMsn: owner.rootMsn || "",
+        fleet: owner.rootMsn ? ownershipCache.fleet.find(row => String(row.sn) === owner.rootMsn) || null : null,
+        chain: owner.chain };
 };
 
 const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, assumptions = [] }) => {
@@ -876,14 +802,8 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
             .filter(Boolean))];
         const flightRegexArray = flightNumbers.map((flightNumber) => new RegExp(`^${escapeRegex(flightNumber)}$`, "i"));
         const flightRecords = flightRegexArray.length > 0
-            ? await Flight.find({
-                ...(userId ? { userId: String(userId) } : {}),
-                date: {
-                    $gte: date.toDate(),
-                    $lt: moment.utc(date).endOf("day").toDate()
-                },
-                flight: { $in: flightRegexArray }
-            }).select("flight bh fh").lean()
+            ? (await getUtilisationFlights({ userId: String(userId), from: date.toDate(), to: date.toDate(), select: "flight bh fh aircraft" }))
+                .filter(row => (!row.aircraft?.msn || Number(row.aircraft.msn) === msnNumber) && flightRegexArray.some(pattern => pattern.test(row.flight)))
             : [];
         const flightsByNumber = new Map();
         flightRecords.forEach((flight) => {
@@ -966,7 +886,7 @@ const createMaintenanceDashboardUsageResolver = async ({
     const projectionResets = (Array.isArray(resets) ? resets : [])
         .filter(Boolean)
         .map(reset => ({ reset, resetDate: moment.utc(reset.date).startOf("day") }))
-        .filter(({ reset, resetDate }) => reset.msnEsn && resetDate.isValid() && !resetDate.isSame(targetDate, "day"));
+        .filter(({ reset, resetDate }) => (reset.snBn || reset.msnEsn) && resetDate.isValid() && !resetDate.isSame(targetDate, "day"));
 
     if (!targetDate.isValid() || projectionResets.length === 0) return null;
 
@@ -982,7 +902,7 @@ const createMaintenanceDashboardUsageResolver = async ({
     const rangeEnd = moment.max(projectionEnds).startOf("day");
     const userKey = userId ? String(userId) : null;
     const assetKeys = [...new Set(projectionResets
-        .map(({ reset }) => String(reset.msnEsn || "").trim())
+        .map(({ reset }) => String(reset.snBn || reset.msnEsn || "").trim())
         .filter(Boolean))];
     const assetIdentities = new Set(assetKeys.map(normalizeAssetIdentity));
 
@@ -1004,6 +924,11 @@ const createMaintenanceDashboardUsageResolver = async ({
             ? AircraftOnwing.find(onwingAssetFilter).select("msn date pos1Esn pos2Esn apun").lean()
             : []
     ]);
+    const ownershipFilter = userKey ? { userId: userKey } : {};
+    const [ownershipFleet, ownershipResets, ownershipOnwings] = await Promise.all([
+        Fleet.find(ownershipFilter).lean(), MaintenanceReset.find(ownershipFilter).lean(), AircraftOnwing.find(ownershipFilter).lean()
+    ]);
+    const ownershipCache = buildOwnershipCache({ fleet: ownershipFleet, resets: ownershipResets, onwings: ownershipOnwings, movements: movementRecords });
 
     const candidateMsnsByAsset = new Map(assetKeys.map(assetKey => [assetKey, new Set()]));
     for (const row of assetOnwingRows) {
@@ -1033,6 +958,7 @@ const createMaintenanceDashboardUsageResolver = async ({
     const movementEventsByAsset = new Map();
     const slotEvents = new Map();
     const possibleEffectiveMsns = new Set(assetKeys);
+    ownershipFleet.filter(asset => !asset.category || asset.category === "Aircraft").forEach(asset => possibleEffectiveMsns.add(String(asset.sn)));
     for (const record of movementRecords) {
         const effectiveMoment = getRotableEffectiveMoment(record);
         if (!effectiveMoment) continue;
@@ -1118,7 +1044,7 @@ const createMaintenanceDashboardUsageResolver = async ({
     if (userKey) assignmentFilter.userId = userKey;
     const assignments = numericMsns.length > 0
         ? await Assignment.find(assignmentFilter)
-            .select("date aircraft.msn flightNumber metrics")
+            .select("date aircraft.msn flightNumber metrics source")
             .lean()
         : [];
 
@@ -1126,6 +1052,7 @@ const createMaintenanceDashboardUsageResolver = async ({
         .map(assignment => String(assignment.flightNumber || "").trim().toUpperCase())
         .filter(Boolean))];
     const flightFilter = {
+        category: { $in: ["Planned", "Actual"] },
         date: {
             $gte: rangeStart.toDate(),
             $lt: rangeEnd.clone().endOf("day").toDate()
@@ -1133,9 +1060,9 @@ const createMaintenanceDashboardUsageResolver = async ({
         flight: { $in: flightNumbers.map(flightNumber => new RegExp(`^${escapeRegex(flightNumber)}$`, "i")) }
     };
     if (userKey) flightFilter.userId = userKey;
-    const flightRecords = flightNumbers.length > 0
-        ? await Flight.find(flightFilter).select("date flight bh fh").lean()
-        : [];
+    const flightRecords = selectUtilisationFlights(flightNumbers.length > 0
+        ? await Flight.find(flightFilter).select("date flight bh fh category aircraft msn").lean()
+        : []);
 
     const assignmentsByDateAndMsn = new Map();
     for (const assignment of assignments) {
@@ -1156,7 +1083,15 @@ const createMaintenanceDashboardUsageResolver = async ({
         const usageKey = `${normalizeAssetIdentity(assetKey)}|${getUtcDateKey(date)}|${metric || "BH"}`;
         if (usageByAssetDateAndMetric.has(usageKey)) return usageByAssetDateAndMetric.get(usageKey);
 
-        const effectiveMsn = resolveEffectiveMsn(assetKey, date) || String(assetKey || "").trim();
+        const legacyAsset = ownershipFleet.find(asset => normalizeAssetIdentity(asset.sn) === normalizeAssetIdentity(assetKey) && !asset.category);
+        const effectiveMsn = legacyAsset
+            ? resolveEffectiveMsn(assetKey, date) || String(assetKey || "").trim()
+            : resolveFromCache({ sn: assetKey, date, cache: ownershipCache }).rootMsn;
+        if (!effectiveMsn) {
+            const usage = { timeUsage: 0, cycleUsage: 0, hasUsage: false, source: "SPARE", assumption: null, assumptionId: null };
+            usageByAssetDateAndMetric.set(usageKey, usage);
+            return usage;
+        }
         const msnNumber = Number(effectiveMsn);
         if (!Number.isFinite(msnNumber)) {
             const usage = getAssumptionUsageForDate({ assumptions, effectiveMsn, date });
@@ -1176,10 +1111,11 @@ const createMaintenanceDashboardUsageResolver = async ({
         const fallbackTimeKey = metric === "FH" ? "blockHours" : "flightHours";
         const sumAssignmentTime = (key) => dailyAssignments.reduce((sum, assignment) => {
             const metricValue = Number(assignment.metrics?.[key]);
-            if (Number.isFinite(metricValue) && metricValue > 0) return sum + metricValue;
+            if (Number.isFinite(metricValue) && (metricValue > 0 || (assignment.source === "ACTUALS" && metricValue === 0))) return sum + metricValue;
 
             const flightNumber = String(assignment.flightNumber || "").trim().toUpperCase();
-            const matchedFlights = flightsByDateAndNumber.get(`${dateKey}|${flightNumber}`) || [];
+            const matchedFlights = (flightsByDateAndNumber.get(`${dateKey}|${flightNumber}`) || [])
+                .filter(flight => !flight.aircraft?.msn || Number(flight.aircraft.msn) === msnNumber);
             const flightKey = key === "flightHours" ? "fh" : "bh";
             return sum + matchedFlights.reduce((flightSum, flight) => {
                 const flightValue = Number(flight?.[flightKey]);
@@ -1190,7 +1126,7 @@ const createMaintenanceDashboardUsageResolver = async ({
         const primaryTimeUsage = sumAssignmentTime(primaryTimeKey);
         const fallbackTimeUsage = sumAssignmentTime(fallbackTimeKey);
         const usage = {
-            timeUsage: primaryTimeUsage || fallbackTimeUsage,
+            timeUsage: dailyAssignments.some(assignment => assignment.source === "ACTUALS") ? primaryTimeUsage : primaryTimeUsage || fallbackTimeUsage,
             cycleUsage: dailyAssignments.reduce((sum, assignment) => {
                 const cycles = Number(assignment.metrics?.cycles);
                 return sum + (Number.isFinite(cycles) && cycles > 0 ? cycles : 1);
@@ -1226,6 +1162,9 @@ const recomputeMaintenanceTimeline = async ({
     const shouldPersistDate = (date) => !recomputeFrom || moment.utc(date).isSameOrAfter(recomputeFrom, "day");
     const effectiveTraceWriter = traceWriter || createConfiguredProjectionTraceWriter();
 
+    const ownershipCache = await loadOwnershipCache(userId);
+    const actualFlights = await Flight.find({ userId: String(userId), category: "Actual" }).select("date aircraft.msn").lean();
+    const actualAircraftDays = new Set(actualFlights.map(row => `${String(row.aircraft?.msn)}|${getUtcDateKey(row.date)}`));
     const allCalendars = await MaintenanceCalendar.find({ userId: String(userId) }).lean();
     const utilisationAssumptions = await UtilisationAssumption.find({ userId: String(userId) }).lean();
 
@@ -1233,7 +1172,7 @@ const recomputeMaintenanceTimeline = async ({
         ? [...new Map(
             requestedResetGroups
                 .map(normalizeResetGroup)
-                .filter(group => group.msnEsn && group.pn && group.snBn)
+                .filter(group => group.pn && group.snBn)
                 .map(group => [buildResetGroupKey(group), { _id: group }])
         ).values()]
         : await MaintenanceReset.aggregate([
@@ -1398,7 +1337,8 @@ const recomputeMaintenanceTimeline = async ({
             const nextReset = resets[i + 1];
             const utilizationContext = await getEffectiveUtilisationContext({
                 userId,
-                msnEsn,
+                msnEsn: snBn && snBn !== msnEsn ? snBn : msnEsn,
+                cache: ownershipCache,
                 date: currentReset.date
             });
             const effectiveMsn = utilizationContext.effectiveMsn || msnEsn;
@@ -1475,17 +1415,19 @@ const recomputeMaintenanceTimeline = async ({
             while (currDate.isSameOrBefore(segmentEnd)) {
                 const currentUtilizationContext = await getEffectiveUtilisationContext({
                     userId,
-                    msnEsn,
+                    msnEsn: snBn && snBn !== msnEsn ? snBn : msnEsn,
+                    cache: ownershipCache,
                     date: currDate
                 });
-                const currentEffectiveMsn = currentUtilizationContext.effectiveMsn || msnEsn;
+                const currentEffectiveMsn = currentUtilizationContext.effectiveMsn ||
+                    (snBn === msnEsn && !ownershipCache.eventsBySn.has(String(snBn).trim().toUpperCase()) ? msnEsn : "");
                 const startingValues = getMetricValuesFromCurrent({
                     currentTsn, currentCsn, currentDsn,
                     currentTso, currentCso, currentDso,
                     currentTsr, currentCsr, currentDsr
                 });
 
-                if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil)) {
+                if (inMaintenanceUntil && currDate.isSameOrBefore(inMaintenanceUntil) && !actualAircraftDays.has(`${currentEffectiveMsn}|${getUtcDateKey(currDate)}`)) {
                     const downtimeProjection = projectDailyState({
                         tsn: currentTsn, csn: currentCsn, dsn: currentDsn,
                         tsoTsr: currentTso, csoCsr: currentCso, dsoDsr: currentDso,
@@ -1950,19 +1892,19 @@ const buildMaintenanceStatusFromReset = async ({
         let usage;
         if (usageResolver) {
             usage = await usageResolver({
-                assetKey: reset.msnEsn,
+                assetKey: reset.snBn || reset.msnEsn,
                 date,
                 metric: reset.timeMetric
             });
         } else {
             const utilizationContext = await getEffectiveUtilisationContext({
                 userId,
-                msnEsn: reset.msnEsn,
+                msnEsn: reset.snBn && reset.snBn !== reset.msnEsn ? reset.snBn : reset.msnEsn,
                 date
             });
             usage = await getEffectiveUsageForDate({
                 userId,
-                effectiveMsn: utilizationContext.effectiveMsn || reset.msnEsn,
+                effectiveMsn: utilizationContext.effectiveMsn,
                 date,
                 metric: reset.timeMetric,
                 assumptions
@@ -2103,8 +2045,8 @@ exports.getMaintenanceDashboard = async (req, res) => {
             const [utils, resetRecords, fleetAssets, allFleetAssets, utilisationAssumptions] = await Promise.all([
                 Utilisation.find(utilFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
                 MaintenanceReset.find(resetFilter).sort({ date: -1, updatedAt: -1, createdAt: -1 }).lean(),
-                Fleet.find(fleetFilter).select("sn titled regn").lean(),
-                Fleet.find(allFleetFilter).select("sn titled regn").lean(),
+                Fleet.find(fleetFilter).select("sn titled regn category").lean(),
+                Fleet.find(allFleetFilter).select("sn titled regn category").lean(),
                 UtilisationAssumption.find({ userId: String(userId) }).lean(),
             ]);
 
@@ -2120,11 +2062,6 @@ exports.getMaintenanceDashboard = async (req, res) => {
             const titledBySn = new Map();
             fleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
             allFleetAssets.forEach(asset => addTitledBySn(titledBySn, asset));
-            const activeFleetSnSet = new Set(
-                allFleetAssets
-                    .map(asset => String(asset.sn || "").trim().toUpperCase())
-                    .filter(Boolean)
-            );
 
             const utilByKey = new Map();
             utils.forEach(record => {
@@ -2164,10 +2101,13 @@ exports.getMaintenanceDashboard = async (req, res) => {
                 }
             });
 
-            const rowSourceEntries = Array.from(rowSourcesByKey.entries()).filter(([utilKey]) => {
-                if (activeFleetSnSet.size === 0) return true;
-                const [msnEsn, , snBn] = utilKey.split("|");
-                return activeFleetSnSet.has(msnEsn) || activeFleetSnSet.has(snBn);
+            // Parts and spare stock may have their own SN without a Fleet row.
+            // Legacy Fleet baselines identify the aircraft/engine as its own parent;
+            // retain the existing rule hiding those baselines after Fleet removal.
+            const fleetSerials = new Set(allFleetAssets.map(asset => normalizeAssetIdentity(asset.sn)));
+            const rowSourceEntries = Array.from(rowSourcesByKey.entries()).filter(([, row]) => {
+                const parent = normalizeAssetIdentity(row.msnEsn), sn = normalizeAssetIdentity(row.snBn);
+                return !fleetSerials.size || !parent || parent !== sn || fleetSerials.has(sn);
             });
 
             const rowPlans = rowSourceEntries.map(([utilKey]) => {
@@ -2340,10 +2280,10 @@ exports.bulkSaveResetRecords = async (req, res) => {
             const hasAnyValue = values.some(value => String(value ?? "").trim() !== "");
             if (!hasAnyValue) continue;
 
-            if (!msnEsn || !pn || !snBn) {
+            if (!pn || !snBn) {
                 return res.status(400).json({
                     success: false,
-                    message: "MSN/ESN, PN, and SN/BN are required before saving reset records."
+                    message: "PN and SN/BN are required before saving reset records."
                 });
             }
 
@@ -2432,6 +2372,8 @@ exports.bulkSaveResetRecords = async (req, res) => {
         }
 
         if (bulkOperations.length > 0) {
+            try { await validateOwnershipHistory({ userId: String(userId), resets: resetData.filter(row => row.pn || row.snBn).map(row => ({ ...row, date: fallbackResetDate || row.date })) }); }
+            catch (error) { return res.status(400).json({ message: error.message }); }
             await MaintenanceReset.bulkWrite(bulkOperations, { ordered: false });
         }
 
@@ -2596,6 +2538,8 @@ exports.bulkSaveRotables = async (req, res) => {
         if (!rotablesData || !Array.isArray(rotablesData)) {
             return res.status(400).json({ message: "Invalid payload. Expected an array of records." });
         }
+        try { await validateOwnershipHistory({ userId: String(userId), movements: rotablesData }); }
+        catch (error) { return res.status(400).json({ message: error.message }); }
 
         const bulkOperations = [];
         const onwingOps = [];
@@ -2640,7 +2584,7 @@ exports.bulkSaveRotables = async (req, res) => {
             });
 
             // Update AircraftOnwing if an Engine is assigned to Position #1 or #2
-            if ((position === "#1" || position === "#2") && record.date) {
+            if ((position === "#1" || position === "#2") && record.date && (await Fleet.exists({ userId: String(userId), category: "Aircraft", sn: msn }) || await AircraftOnwing.exists({ userId: String(userId), msn }))) {
                 const effectiveDate = moment.utc(record.date, moment.ISO_8601, true).add(1, "day").startOf("day").toDate();
                 if (!isNaN(effectiveDate.getTime())) {
 
@@ -2729,6 +2673,8 @@ exports.deleteRotable = async (req, res) => {
         if (!userId) return res.status(401).json({ message: "Unauthorized user context missing" });
         if (!isValidObjectId(id)) return res.status(400).json({ message: "Invalid rotable movement id." });
 
+        try { await validateOwnershipHistory({ userId: String(userId), deleteMovementId: id }); }
+        catch (error) { return res.status(400).json({ message: error.message }); }
         const deletedRecord = await RotableMovement.findOneAndDelete({ _id: id, userId: String(userId) });
 
         if (!deletedRecord) {
@@ -3425,3 +3371,5 @@ exports.__recurrenceTestables = Object.freeze({
     findCalendarTriggerCandidate,
     getNextUnsuppressedThreshold
 });
+
+exports.recomputeMaintenanceTimeline = recomputeMaintenanceTimeline;

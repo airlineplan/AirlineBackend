@@ -7,6 +7,8 @@ const assignmentSchema = new mongoose.Schema(
             required: true,
             index: true
         },
+        source: { type: String, enum: ["PLANNED", "ACTUALS"], default: "PLANNED" },
+        actualUploadId: String,
 
         date: {
             type: Date,

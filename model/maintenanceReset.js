@@ -9,7 +9,7 @@ const maintenanceResetSchema = new mongoose.Schema(
         },
         msnEsn: { // MSN/ESN column
             type: String,
-            required: true,
+            default: "",
             trim: true,
             index: true
         },

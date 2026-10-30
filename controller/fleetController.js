@@ -114,6 +114,7 @@ const purgeMaintenanceDataForFleetAssets = async ({ userId, assets = [] } = {}) 
     }
 
     const userKey = String(userId);
+    if (Fleet.db.readyState === 1) await require("../model/engineOperatingSettingSchema").deleteMany({ userId: userKey, esn: { $in: assetSns } });
     const resetUtilClauses = buildAssetMatchClauses(["msnEsn", "snBn"], assetSns);
     const calendarClauses = buildAssetMatchClauses(["calMsn", "snBn"], assetSns);
     const statusClauses = buildAssetMatchClauses(["targetId"], assetSns);
@@ -174,6 +175,19 @@ const purgeOrphanMaintenanceDataForActiveFleet = async ({ userId, activeAssetSns
         return { activeAssetCount: 0, deletedCounts: {}, updatedCounts: {} };
     }
 
+    const activeFleetCount = activeAssetSns.length;
+    if (Fleet.db.readyState === 1) {
+        const [parts, movements] = await Promise.all([
+            MaintenanceReset.find({ userId: String(userId) }).select("msnEsn snBn").lean(),
+            RotableMovement.find({ userId: String(userId) }).select("msn installedSN removedSN").lean()
+        ]);
+        // Set/Reset and movement histories now declare valid assets outside Fleet,
+        // including spare stock. A routine Fleet save must preserve those records.
+        activeAssetSns = [...new Set([...activeAssetSns,
+            ...parts.flatMap(row => [row.msnEsn, row.snBn]),
+            ...movements.flatMap(row => [row.msn, row.installedSN, row.removedSN])
+        ].filter(Boolean))];
+    }
     const activeValues = expandAssetSnsForExactMatch(activeAssetSns);
     const userKey = String(userId);
     const [
@@ -241,7 +255,7 @@ const purgeOrphanMaintenanceDataForActiveFleet = async ({ userId, activeAssetSns
     ]);
 
     return {
-        activeAssetCount: activeAssetSns.length,
+        activeAssetCount: activeFleetCount,
         deletedCounts: {
             maintenanceReset: resetResult.deletedCount || 0,
             utilisation: utilisationResult.deletedCount || 0,
@@ -277,11 +291,9 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 .select("msn date event")
                 .lean(),
             Assignment.find({ userId, date: { $gte: startDt, $lte: endDt }, isValid: true })
-                .select("date flightNumber aircraft.msn")
+                .select("date flightNumber aircraft.msn source metrics")
                 .lean(),
-            Flight.find({ userId, date: { $gte: startDt, $lte: endDt } })
-                .select("date flight bh fh")
-                .lean(),
+            require("../utils/utilisationFlights").getUtilisationFlights({ userId, from: startDt, to: endDt, select: "date flight bh fh category aircraft" }),
             AircraftOnwing.find({ userId, date: { $lte: endDt } })
                 .select("msn date pos1Esn pos2Esn apun")
                 .sort({ date: 1, msn: 1, _id: 1 })
@@ -310,6 +322,8 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             Engine: {},
             APU: {}
         };
+        const actualAircraftDays = new Set(assignments.filter((row) => row.source === "ACTUALS")
+            .map((row) => `${row.aircraft?.msn}|${moment.utc(row.date).format("DD MMM YY")}`));
 
         const spareComponentKeys = new Set(
             fleetAssets
@@ -328,6 +342,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
 
         groundDays.forEach((gd) => {
             const dateStr = moment.utc(gd.date).format("DD MMM YY");
+            if (actualAircraftDays.has(`${gd.msn}|${dateStr}`)) return;
             const aircraftKey = createMetricKey("Aircraft", gd.msn);
             const engineKey = createMetricKey("Engine", gd.msn);
             const apuKey = createMetricKey("APU", gd.msn);
@@ -381,7 +396,7 @@ exports.getFleetScheduleMetrics = async (req, res) => {
             const dateStr = moment.utc(assign.date).format("DD MMM YY");
             const dateKey = moment.utc(assign.date).format("YYYY-MM-DD");
             const fKey = `${dateKey}_${String(assign.flightNumber || "").trim().toUpperCase()}`;
-            const matchedFlights = flightMap.get(fKey) || [];
+            const matchedFlights = (flightMap.get(fKey) || []).filter(row => !row.aircraft?.msn || Number(row.aircraft.msn) === Number(assign.aircraft?.msn));
             if (matchedFlights.length === 0) return;
 
             if (!metricsMap[snKey]) metricsMap[snKey] = {};
@@ -453,10 +468,11 @@ exports.getFleetScheduleMetrics = async (req, res) => {
                 if (!metricsMap[componentSn]) metricsMap[componentSn] = {};
 
                 const existingComponentMetric = metricsMap[componentSn][dDisp];
-                if (existingComponentMetric?.status === "maintenance") return;
+                const hasActuals = actualAircraftDays.has(`${String(ownerAcftSn).split(":").slice(1).join(":")}|${dDisp}`);
+                if (existingComponentMetric?.status === "maintenance" && !hasActuals) return;
 
                 const aircraftGroundEvent = groundMap[dDisp]?.[ownerAcftSn];
-                if (aircraftGroundEvent) {
+                if (aircraftGroundEvent && !hasActuals) {
                     metricsMap[componentSn][dDisp] = createMaintenanceMetricEntry(aircraftGroundEvent || "Maintenance");
                     return;
                 }
@@ -591,6 +607,15 @@ exports.bulkUpsertFleet = async (req, res) => {
         // STEP 1: Save data to the main Fleet table
         // --------------------------------------------------------
         const savedSnSet = new Set();
+        if (Fleet.db.readyState === 1) {
+            const previous = await Fleet.find({ userId }).lean();
+            for (const asset of fleetData) {
+                const old = previous.find(row => String(row._id) === String(asset.id || asset._id));
+                if (old?.category === "Engine" && String(old.sn) !== String(asset.sn).trim()) {
+                    await require("../model/engineOperatingSettingSchema").updateMany({ userId, esn: old.sn }, { $set: { esn: String(asset.sn).trim().toUpperCase() } });
+                }
+            }
+        }
         const fleetBulkOps = fleetData.map((asset, index) => {
             const updateData = { ...asset };
 

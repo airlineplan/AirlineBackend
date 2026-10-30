@@ -22,7 +22,7 @@ const rotableMovementSchema = new Schema({
   },
   position: {
     type: String, // e.g., #1, #2, APU
-    required: true,
+    default: "",
   },
   removedSN: {
     type: String,

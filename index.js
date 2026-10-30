@@ -14,6 +14,7 @@ const start = async () => {
   const mode = getAppMode();
   validateRuntimeConfig();
   await connectDatabase();
+  const stopActualsWorker = mode === "tenant" ? require("./workers/actualsWorker").startActualsWorker() : () => {};
 
   if (mode === "tenant" && process.env.REDIS_URL) {
     await connectRedis();
@@ -27,6 +28,7 @@ const start = async () => {
   });
 
   const shutdown = async (signal) => {
+    stopActualsWorker();
     console.log(`Received ${signal}; shutting down`);
     server.close(async () => {
       const { closeFlightQueue } = require("./helper/createConnections");

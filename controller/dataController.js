@@ -25,7 +25,9 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
-const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { normalizeCostConfig, computeCategoryFlightCostsBatch: computeFlightCostsBatch } = require("../utils/costLogic");
+const { categoryFilter, normalizeCategory } = require("../utils/flightCategory");
+const { COST_COMPONENTS, COST_PERSIST_FIELDS } = require("../utils/costFields");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const { scopedUserQuery } = require("./accessScope");
@@ -355,6 +357,7 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
 
     if (flightNumbersToDelete.length > 0) {
       await Assignment.deleteMany({
+        source: { $ne: "ACTUALS" },
         userId,
         flightNumber: { $in: flightNumbersToDelete }
       });
@@ -482,10 +485,14 @@ const downloadExpenses = async (req, res) => {
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    res.setHeader("Content-Disposition", `attachment; filename=FLGTs.xlsx`);
+    res.setHeader("Content-Disposition", `attachment; filename=FLGTs_${normalizeCategory(req.query.category)}.xlsx`);
 
     let count = 1;
-    const products = await Flights.find({ userId }).lean();
+    const existingExportKeys = new Set(worksheet.columns.map(column => column.key));
+    worksheet.columns = [...worksheet.columns.map(column => ({ header: column.header, key: column.key })),
+      { header: "Category", key: "category" }, ...COST_PERSIST_FIELDS.filter(field => !existingExportKeys.has(field) && field !== "mrDebug" && field !== "snList")
+        .map(field => ({ header: field.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([^0-9])([123])(?= |$)/g, "$1 $2").replace(/^./, letter => letter.toUpperCase()), key: field }))];
+    const products = await Flights.find({ userId, ...categoryFilter(req.query.category) }).lean();
     const mrContext = await buildMaintenanceReserveContext(userId, products);
     const enrichedProducts = computeFlightCostsBatch(products, { ...costConfig, ...mrContext });
 
@@ -494,7 +501,7 @@ const downloadExpenses = async (req, res) => {
         s_no: count,
         ...excelProduct,
         date: excelProduct.date ? new Date(excelProduct.date).toISOString().split("T")[0] : "",
-        ft: excelProduct.ft ? parseFloat(excelProduct.ft) : 0,
+        ft: excelProduct.ft || "",
         acftType: excelProduct.acftType || "",
         bh: excelProduct.bh ? parseFloat(excelProduct.bh) : 0,
         fh: excelProduct.fh ? parseFloat(excelProduct.fh) : 0,
@@ -879,7 +886,7 @@ const getListPageData = async (req, res) => {
     // =====================================
     // 1️⃣ BUILD MATCH QUERY
     // =====================================
-    const matchQuery = { userId };
+    const matchQuery = { userId, ...categoryFilter(req.body.category) };
 
     if (label && label.value !== "both") {
       matchQuery.domIntl = label.value.toLowerCase();
@@ -970,6 +977,7 @@ const getViewData = async (req, res) => {
 
     const weekFlights = await Flights.find({
       userId,
+      ...categoryFilter(req.query.category),
       date: { $gte: startDate, $lte: endDate }
     }).lean();
 

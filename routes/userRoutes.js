@@ -42,6 +42,7 @@ const crewController = require("../controller/crewController");
 // 🔥 UNCOMMENT AND IMPORT THE HELPER
 const createConnections = require('../helper/createConnections');
 const featureAccess = (featureId, requiredAccess = "read") => [verifyToken, requireFeatureAccess(featureId, requiredAccess)];
+require("./maintenancePlanningRoutes")(user, { featureAccess, jsonParser });
 
 user.post(
   "/importUser",

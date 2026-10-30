@@ -24,7 +24,8 @@ const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 const CostConfig = require("../model/costConfigSchema");
-const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { normalizeCostConfig, computeCategoryFlightCostsBatch: computeFlightCostsBatch } = require("../utils/costLogic");
+const { categoryFilter } = require("../utils/flightCategory");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { scopedUserQuery } = require("./accessScope");
 const { dayNamesForDow, utcDateOnly } = require("../utils/rotationDates");
@@ -99,7 +100,7 @@ const searchFlights = async (req, res) => {
     } = req.body;
 
     // Build a query object
-    let query = {};
+    let query = categoryFilter(req.body.category);
 
     // Add filters based on request parameters
     const addRegexFilter = (field, value) => {

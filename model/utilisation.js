@@ -14,7 +14,7 @@ const utilisationSchema = new mongoose.Schema(
         },
         msnEsn: { // Maps to "MSN/ESN" column
             type: String,
-            required: true,
+            default: "",
             trim: true,
             index: true
         },

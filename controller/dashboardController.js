@@ -28,7 +28,8 @@ require("dotenv").config();
 const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
-const { normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
+const { normalizeCostConfig, computeCategoryFlightCostsBatch: computeFlightCostsBatch } = require("../utils/costLogic");
+const { categoryFilter } = require("../utils/flightCategory");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { normalizeCurrencyCode, normalizeDateKey, convertLocalToReporting } = require("../utils/fx");
 
@@ -308,19 +309,19 @@ const populateDashboardDropDowns = async (req, res) => {
     }
 
     const distinctSectors = await Flights.aggregate([
-      { $match: { userId: userId } },
+      { $match: { userId: userId, ...categoryFilter(req.query?.category) } },
       { $group: { _id: null, sector: { $addToSet: "$sector" } } },
       { $project: { _id: 0, sector: 1 } },
     ]);
 
     const distinctFlights = await Flights.aggregate([
-      { $match: { userId: userId } },
+      { $match: { userId: userId, ...categoryFilter(req.query?.category) } },
       { $group: { _id: null, flight: { $addToSet: "$flight" } } },
       { $project: { _id: 0, flight: 1 } },
     ]);
 
-    const distinctValues = await Data.aggregate([
-      { $match: { userId: userId } },
+    const distinctValues = await (req.query?.category && req.query.category !== "Planned" ? Flights : Data).aggregate([
+      { $match: { userId: userId, ...(req.query?.category && req.query.category !== "Planned" ? categoryFilter(req.query.category) : {}) } },
       {
         $group: {
           _id: null,
@@ -1409,9 +1410,10 @@ const getDashboardData = async (req, res) => {
       userTag2: normalizeQueryValues(req.query.userTag2),
     };
     const { flightsQuery, revenueQuery } = buildDashboardQueries({ userId, label, filters });
+    Object.assign(flightsQuery, categoryFilter(req.query.category));
 
     const flightRange = await Flights.aggregate([
-      { $match: { userId } },
+      { $match: { userId, ...categoryFilter(req.query.category) } },
       { $group: { _id: null, minDate: { $min: "$date" }, maxDate: { $max: "$date" } } },
     ]);
 
@@ -1467,8 +1469,10 @@ const getDashboardData = async (req, res) => {
         addCurrencyExposure(currencyExposureBuckets, localCcy, row.date, localRevenue, 0);
       }
     });
-    addSchMxEventCostExposures(currencyExposureBuckets, baseCostConfig.schMxEvents || []);
-    addRotableChangeCostExposures(currencyExposureBuckets, baseCostConfig.rotableChanges || []);
+    if (flightsQuery.category === "Planned") {
+      addSchMxEventCostExposures(currencyExposureBuckets, baseCostConfig.schMxEvents || []);
+      addRotableChangeCostExposures(currencyExposureBuckets, baseCostConfig.rotableChanges || []);
+    }
 
     const mrContext = await buildMaintenanceReserveContext(userId, allFlightsRaw);
     const enrichedFlightsForDashboard = computeFlightCostsBatch(allFlightsRaw, {
@@ -1476,7 +1480,7 @@ const getDashboardData = async (req, res) => {
       ...mergeMaintenanceContext(baseCostConfig, mrContext),
       fleet: fleetRows,
     });
-    const useCrewRunFallback = shouldUseCrewRunFallback(label, filters);
+    const useCrewRunFallback = (!req.query.category || req.query.category === "Planned") && shouldUseCrewRunFallback(label, filters);
     const latestCrewRun = useCrewRunFallback
       ? await CrewCalculationRun.findOne({ userId, status: "COMPLETED" }).sort({ createdAt: -1 }).select("_id").lean()
       : null;
@@ -1556,13 +1560,17 @@ const getDashboardData = async (req, res) => {
         schMxEvent1Detail2RCCY,
         schMxEvent2RCCY,
         schMxEvent2Detail1RCCY,
-      } = getSchMxRecognitionMetrics({
+      } = flightsQuery.category === "Planned" ? getSchMxRecognitionMetrics({
         schMxEvents: baseCostConfig.schMxEvents || [],
         periodStartDay,
         periodEndDay,
         reportingCurrency,
         fxRates: revenueConfig.fxRates || baseCostConfig.fxRates || [],
-      });
+      }) : {
+        qualifyingSchMxEventsRCCY: sumNumericField(flightsInPeriod, "qualifyingSchMxEventsRCCY"),
+        schMxEvent1RCCY: 0, schMxEvent1Detail1RCCY: 0, schMxEvent1Detail2RCCY: 0,
+        schMxEvent2RCCY: 0, schMxEvent2Detail1RCCY: 0,
+      };
 
       const engineFuelCostRCCY = sumNumericField(flightsInPeriod, "engineFuelCostRCCY");
       const apuFuelCostRCCY = sumNumericField(flightsInPeriod, "apuFuelCostRCCY");
@@ -1572,16 +1580,16 @@ const getDashboardData = async (req, res) => {
       const totalMrContributionRCCY = maintenanceReserveContributionRCCY + mrMonthlyRCCY;
       const transitMaintenanceRCCY = sumNumericField(flightsInPeriod, "transitMaintenanceRCCY");
       const otherMaintenanceRCCY = sumNumericField(flightsInPeriod, "otherMaintenanceRCCY");
-      const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1", "otherMaintenance2"]);
+      const otherMaintenanceUtilisationRCCY = sumFlightFields(flightsInPeriod, ["otherMaintenance1RCCY", "otherMaintenance2RCCY"]);
       const otherMxExpensesRCCY = sumNumericField(flightsInPeriod, "otherMxExpensesRCCY");
       const otherMaintenanceCalendarRCCY = otherMxExpensesRCCY;
-      const rotableChangesRCCY = getRotableChangeRecognitionRccy({
+      const rotableChangesRCCY = flightsQuery.category === "Planned" ? getRotableChangeRecognitionRccy({
         rotableChanges: baseCostConfig.rotableChanges || [],
         periodStartDay,
         periodEndDay,
         reportingCurrency,
         fxRates: revenueConfig.fxRates || baseCostConfig.fxRates || [],
-      });
+      }) : sumNumericField(flightsInPeriod, "rotableChangesRCCY");
       const totalMaintenanceCostRCCY = totalMrContributionRCCY + qualifyingSchMxEventsRCCY + transitMaintenanceRCCY + otherMaintenanceRCCY + otherMxExpensesRCCY + rotableChangesRCCY;
       const storedCrewAllowancesRCCY = sumNumericField(flightsInPeriod, "crewAllowancesRCCY");
       const storedLayoverCostRCCY = sumNumericField(flightsInPeriod, "layoverCostRCCY");

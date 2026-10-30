@@ -794,6 +794,7 @@ const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [], include
 
   const assignments = await Assignment.find({
     userId,
+    source: { $ne: "ACTUALS" },
   })
     .select("date flightNumber aircraft.registration sourceOrder sourceUploadedAt createdAt")
     .lean();
@@ -837,7 +838,7 @@ const revalidateAssignmentsForUser = async ({ userId, priorityKeys = [], include
 };
 
 const purgeStaleAssignmentsForUser = async ({ userId }) => {
-  const assignments = await Assignment.find({ userId })
+  const assignments = await Assignment.find({ userId, source: { $ne: "ACTUALS" } })
     .select("_id date flightNumber")
     .lean();
 
@@ -908,6 +909,7 @@ const deleteAssignmentsForAircraftDate = async ({ userId, msn, date, reason = "G
   const end = start.clone().add(1, "day");
   const assignments = await Assignment.find({
     userId: String(userId),
+    source: { $ne: "ACTUALS" },
     date: { $gte: start.toDate(), $lt: end.toDate() },
     "aircraft.msn": msnNumber,
   })
@@ -924,6 +926,7 @@ const deleteAssignmentsForAircraftDate = async ({ userId, msn, date, reason = "G
       updateOne: {
         filter: {
           userId: String(userId),
+          category: { $nin: ["Actual", "Invoiced"] },
           date: {
             $gte: moment.utc(assignment.date).startOf("day").toDate(),
             $lt: moment.utc(assignment.date).startOf("day").add(1, "day").toDate(),

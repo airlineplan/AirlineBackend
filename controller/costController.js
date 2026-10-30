@@ -1,4 +1,8 @@
 const CostConfig = require("../model/costConfigSchema");
+const { COST_PERSIST_FIELDS } = require("../utils/costFields");
+const { getUtilisationFlights } = require("../utils/utilisationFlights");
+const { loadSeverityContext, recalculateActualCosts } = require("../services/maintenanceReserveRecalculation");
+const SeverityMatrix = require("../model/severityMatrixSchema");
 const RevenueConfig = require("../model/revenueConfigSchema");
 const Flights = require("../model/flight");
 const Utilisation = require("../model/utilisation");
@@ -312,24 +316,40 @@ exports.saveCostConfig = async (req, res) => {
   try {
     const userId = req.user.id;
     const configData = req.body;
+    const storedConfig = await CostConfig.findOne({ userId }).lean();
+    const lockedRows = (storedConfig?.maintenanceReserveSchedule || []).filter(row => row.invoiceLocked);
+    const lockIdentity = row => [String(row.mrAccId).trim().toUpperCase(), row.sn || row.msn || "", row.date, row.transactionType].join("|");
+    const lockedIdentities = new Set(lockedRows.map(lockIdentity));
+    configData.maintenanceReserveSchedule = [
+      ...(configData.maintenanceReserveSchedule || []).filter(row => !lockedIdentities.has(lockIdentity(row))).map(row => ({ ...row, invoiceLocked: false, invoiceId: "" })),
+      ...lockedRows,
+    ];
     const apuValidation = validateApuUsageRows(configData.apuUsage || []);
     if (!apuValidation.valid) {
       return res.status(400).json({ success: false, message: apuValidation.message });
     }
 
     const normalizedAircraftOnwing = normalizeAircraftOnwing(configData.aircraftOnwing || []);
-    const flightsForSchedule = await Flights.find({ userId }).lean();
+    const flightsForSchedule = await getUtilisationFlights({ userId });
     const masterStartDate = getMasterStartDateKey(flightsForSchedule);
     const normalizedLeasedReserve = applyMasterStartDateToLeasedReserve(
       normalizeCostConfig({ leasedReserve: configData.leasedReserve || [] }).leasedReserve,
       masterStartDate
     );
+    const smRows = normalizedLeasedReserve.filter((row) => row.setRateType === "SM");
+    // Move a renamed matrix before selecting rates for the new account ID.
+    for (const row of smRows) {
+      const previous = String(row.previousMrAccId || "").trim().toUpperCase();
+      const next = String(row.mrAccId || "").trim().toUpperCase();
+      if (previous && next && previous !== next) await SeverityMatrix.updateOne({ userId, mrAccId: previous }, { $set: { mrAccId: next } });
+    }
     const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
     const normalizedMaintenanceReserveSchedule = generateMaintenanceReserveScheduleWithContributions(
       normalizedLeasedReserve,
       normalizeMaintenanceReserveSchedule(configData.maintenanceReserveSchedule || []),
       flightsForSchedule,
       {
+        ...(await loadSeverityContext(userId, configData, flightsForSchedule)),
         aircraftOnwing: mergeByIdentity(
           normalizedAircraftOnwing,
           mrScheduleContext.aircraftOnwing || [],
@@ -347,6 +367,7 @@ exports.saveCostConfig = async (req, res) => {
 
     const nextConfig = {
       ...configData,
+      userId,
       allocationTable: normalizeAllocationTable(configData.allocationTable || configData.costAllocation || []),
       fuelConsum: flattenFuelConsumRows(configData.fuelConsum || []),
       fuelConsumIndex: flattenFuelConsumIndexRows(configData.fuelConsumIndex || []),
@@ -369,6 +390,8 @@ exports.saveCostConfig = async (req, res) => {
       { new: true, upsert: true }
     );
 
+    await SeverityMatrix.deleteMany({ userId, mrAccId: { $nin: smRows.map((row) => String(row.mrAccId).trim().toUpperCase()) } });
+    await recalculateActualCosts(userId);
     res.status(200).json({ success: true, data: updatedConfig, message: "Cost settings saved successfully." });
   } catch (error) {
     console.error("Error saving cost config:", error);
@@ -400,7 +423,7 @@ exports.getCostConfig = async (req, res) => {
       config.otherMx = normalizeOtherMx(config.otherMx || []);
       config.otherDoc = normalizeOtherDoc(config.otherDoc || []);
       config.transitMx = normalizeTransitMx(config.transitMx || []);
-      const flightsForSchedule = await Flights.find({ userId }).lean();
+      const flightsForSchedule = await getUtilisationFlights({ userId });
       const masterStartDate = getMasterStartDateKey(flightsForSchedule);
       config.leasedReserve = applyMasterStartDateToLeasedReserve(
         normalizeCostConfig({ leasedReserve: config.leasedReserve || [] }).leasedReserve,
@@ -413,6 +436,7 @@ exports.getCostConfig = async (req, res) => {
         config.maintenanceReserveSchedule || [],
         flightsForSchedule,
         {
+          ...(await loadSeverityContext(userId, config, flightsForSchedule)),
           aircraftOnwing: mergeByIdentity(
             config.aircraftOnwing || [],
             mrScheduleContext.aircraftOnwing || [],
@@ -448,7 +472,7 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
     const userId = req.user.id;
     const body = req.body || {};
     const normalizedAircraftOnwing = normalizeAircraftOnwing(body.aircraftOnwing || []);
-    const flightsForSchedule = await Flights.find({ userId }).lean();
+    const flightsForSchedule = await getUtilisationFlights({ userId });
     const masterStartDate = getMasterStartDateKey(flightsForSchedule);
     const normalizedLeasedReserve = applyMasterStartDateToLeasedReserve(
       normalizeCostConfig({ leasedReserve: body.leasedReserve || [] }).leasedReserve,
@@ -460,6 +484,7 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
       normalizeMaintenanceReserveSchedule(body.maintenanceReserveSchedule || []),
       flightsForSchedule,
       {
+        ...(await loadSeverityContext(userId, body, flightsForSchedule)),
         aircraftOnwing: mergeByIdentity(
           normalizedAircraftOnwing,
           mrScheduleContext.aircraftOnwing || [],
@@ -477,7 +502,7 @@ exports.generateMaintenanceReserveSchedulePreview = async (req, res) => {
 };
 
 const buildGeneratedMaintenanceReserveScheduleForConfig = async (userId, config = {}, requestBody = {}) => {
-  const flightsForSchedule = await Flights.find({ userId }).lean();
+  const flightsForSchedule = await getUtilisationFlights({ userId });
   const masterStartDate = getMasterStartDateKey(flightsForSchedule);
   const normalizedAircraftOnwing = normalizeAircraftOnwing(requestBody.aircraftOnwing || config.aircraftOnwing || []);
   const mrScheduleContext = await buildMaintenanceReserveContext(userId, flightsForSchedule);
@@ -499,6 +524,7 @@ const buildGeneratedMaintenanceReserveScheduleForConfig = async (userId, config 
     existingSchedule,
     flightsForSchedule,
     {
+      ...(await loadSeverityContext(userId, config, flightsForSchedule)),
       aircraftOnwing: mergeByIdentity(
         normalizedAircraftOnwing,
         mrScheduleContext.aircraftOnwing || [],
@@ -579,7 +605,7 @@ exports.getCostPageData = async (req, res) => {
     const userId = req.user.id;
 
     // 1. Build Query for flights
-    const matchQuery = { userId };
+    const matchQuery = { userId, ...require("../utils/flightCategory").categoryFilter(req.body.category) };
     if (label && label.value !== "both") {
       matchQuery.domIntl = label.value.toLowerCase();
     }
@@ -615,7 +641,7 @@ exports.getCostPageData = async (req, res) => {
 
     // 4. Compute Costs
     const maintenanceContext = mergeMaintenanceContext(costConfig, mrContext);
-    let enrichedFlights = computeFlightCostsBatch(flights, {
+    let enrichedFlights = require("../utils/costLogic").computeCategoryFlightCostsBatch(flights, {
       ...costConfig,
       ...maintenanceContext,
       fleet: fleetRows,
@@ -694,16 +720,18 @@ exports.recalculateAndSaveCostPageData = async (req, res) => {
       "totalCost", "totalCostCCY", "totalCostRCCY", "ftEffective", "mtowUsed",
       "msn", "eng1Esn", "eng2Esn", "apun", "sn", "snList", "mrDebug",
     ];
+    costColumns.push(...COST_PERSIST_FIELDS);
 
     await Promise.all(enrichedFlights.map((row) => {
       const $set = {};
       costColumns.forEach((key) => {
         if (row[key] !== undefined) $set[key] = row[key];
       });
-      return Flights.updateOne({ _id: row._id, userId }, { $set });
+      return Flights.updateOne({ _id: row._id, userId, category: row.category || "Planned" }, { $set });
     }));
 
-    res.status(200).json({ success: true, updated: enrichedFlights.length });
+    const actualUpdated = await recalculateActualCosts(userId);
+    res.status(200).json({ success: true, updated: enrichedFlights.length, actualUpdated });
   } catch (error) {
     console.error("Error recalculating and saving cost page data:", error);
     res.status(500).json({ success: false, message: "Internal Server Error" });

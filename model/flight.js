@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { CATEGORIES } = require("../utils/flightCategory");
 
 const costField = {
   type: Number,
@@ -15,6 +16,14 @@ const flightSchema = new mongoose.Schema(
     date: { type: Date },
     day: { type: String },
     flight: { type: String },
+    category: {
+      type: String,
+      enum: Object.values(CATEGORIES),
+      default: CATEGORIES.PLANNED,
+    },
+    pairId: { type: String },
+    actualUploadId: { type: String },
+    invoiceId: { type: String },
     sourceSerialNo: { type: Number },
     depStn: { type: String },
     std: { type: String },
@@ -145,8 +154,12 @@ const flightSchema = new mongoose.Schema(
   }
 );
 
+for (const field of require("../utils/costFields").COST_COMPONENTS) {
+  flightSchema.add({ [field]: costField, [`${field}CCY`]: costCurrencyField, [`${field}RCCY`]: costField });
+}
 flightSchema.index({ userId: 1, depStn: 1, arrStn: 1, domIntl: 1, std: 1, date: 1 });
 flightSchema.index({ userId: 1, date: 1, flight: 1 });
+flightSchema.index({ userId: 1, category: 1, date: 1, flight: 1 });
 flightSchema.index({ userId: 1, isComplete: 1, variant: 1, date: 1, day: 1, std: 1, flight: 1, rotationNumber: 1 });
 flightSchema.index(
   { userId: 1, networkId: 1, date: 1, flight: 1 },
@@ -157,4 +170,33 @@ flightSchema.index(
     },
   }
 );
+
+// Only logical filter branches contain nested predicates for this document.
+// Do not mistake a category key in a literal value for a category predicate.
+function hasCategoryFilter(filter) {
+  if (!filter || typeof filter !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(filter, "category")) return true;
+  return ["$and", "$or", "$nor"].some((operator) =>
+    Array.isArray(filter[operator]) && filter[operator].some(hasCategoryFilter)
+  );
+}
+
+function plannedFilter() {
+  // Include legacy documents until the category backfill has run.
+  return { category: { $nin: [CATEGORIES.ACTUAL, CATEGORIES.INVOICED] } };
+}
+
+flightSchema.pre(
+  ["find", "findOne", "countDocuments", "distinct", "updateOne", "updateMany", "deleteOne", "deleteMany", "findOneAndUpdate"],
+  function guardFlightCategory() {
+    if (this.getOptions().allCategories === true || hasCategoryFilter(this.getFilter())) return;
+    this.where(plannedFilter());
+  }
+);
+
+flightSchema.pre("aggregate", function guardFlightAggregateCategory() {
+  if (this.options.allCategories === true || hasCategoryFilter(this.pipeline()[0]?.$match)) return;
+  this.pipeline().unshift({ $match: plannedFilter() });
+});
+
 module.exports = mongoose.model("FLIGHT", flightSchema);

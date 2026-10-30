@@ -1,0 +1,16 @@
+{
+  "month": 9,
+  "year": 2026,
+  "aircraft": { "msn": "4902", "regn": "VT-ZYX" },
+  "total": { "amount": 187327.91, "currency": "USD" },
+  "lines": [
+    { "schMxEvent": "6Y SI", "sn": "", "rate": 12503.58, "utilisation": 1, "utilisationMetric": "MONTH", "amount": 12503.58, "currency": "USD" },
+    { "schMxEvent": "12Y SI", "sn": "", "rate": 8103.30, "utilisation": 1, "utilisationMetric": "MONTH", "amount": 8103.30, "currency": "USD" },
+    { "schMxEvent": "LG set", "sn": "", "rate": 29.89, "utilisation": 154, "utilisationMetric": "DEPARTURES", "amount": 4603.06, "currency": "USD" },
+    { "schMxEvent": "Engine PR", "sn": "749014", "rate": 189.26, "utilisation": 160.91, "utilisationMetric": "FH", "amount": 30453.83, "currency": "USD" },
+    { "schMxEvent": "Engine LLP", "sn": "749014", "rate": 302.75, "utilisation": 92, "utilisationMetric": "DEPARTURES", "amount": 27853.00, "currency": "USD" },
+    { "schMxEvent": "Engine PR", "sn": "749015", "rate": 190.33, "utilisation": 269.36, "utilisationMetric": "FH", "amount": 51267.29, "currency": "USD" },
+    { "schMxEvent": "Engine LLP", "sn": "749015", "rate": 302.75, "utilisation": 154, "utilisationMetric": "DEPARTURES", "amount": 46623.50, "currency": "USD" },
+    { "schMxEvent": "APU PR", "sn": "P-4275", "rate": 40.83, "utilisation": 145, "utilisationMetric": "APUHR", "amount": 5920.35, "currency": "USD" }
+  ]
+}

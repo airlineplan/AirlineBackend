@@ -174,10 +174,15 @@ exports.uploadAssignments = async (req, res) => {
         if (validRows.length === 0) {
             return res.status(400).json({ message: "No valid rows found. Check your Excel column names." });
         }
-        const uploadedKeys = validRows.map((row) => buildDateFlightKey(row.dateKey, row.flight));
+        const actualAssignments = await Assignment.find({ userId, source: "ACTUALS" }).select("date flightNumber aircraft.registration").lean();
+        const covered = new Set(actualAssignments.map((row) => `${moment.utc(row.date).format("YYYY-MM-DD")}|${String(row.aircraft?.registration || "").trim().toUpperCase()}`));
+        const actualFlightKeys = new Set(actualAssignments.map((row) => buildDateFlightKey(moment.utc(row.date).format("YYYY-MM-DD"), row.flightNumber)));
+        const protectedRows = validRows.filter((row) => covered.has(`${row.dateKey}|${row.acft}`) || actualFlightKeys.has(buildDateFlightKey(row.dateKey, row.flight)));
+        const plannedRows = validRows.filter((row) => !protectedRows.includes(row));
+        const uploadedKeys = plannedRows.map((row) => buildDateFlightKey(row.dateKey, row.flight));
         const syncResult = await buildAssignmentSyncPlan({
             userId,
-            rows: validRows,
+            rows: plannedRows,
             priorityKeys: uploadedKeys,
             // Ground days are derived from the previous maintenance compute.
             // They must not reject a new source assignment upload.
@@ -209,7 +214,8 @@ exports.uploadAssignments = async (req, res) => {
             revalidation: revalidationDiagnostics,
             groundDaysCleared: true,
         };
-        const message = buildUploadMessage(diagnostics);
+        diagnostics.actualsProtectedRows = protectedRows.map((row) => ({ date: row.dateKey, flight: row.flight, acft: row.acft, reason: "aircraft/date has actuals" }));
+        const message = buildUploadMessage(diagnostics) + (protectedRows.length ? ` ${protectedRows.length} row(s) skipped: aircraft/date has actuals.` : "");
 
         res.status(200).json({
             message,
