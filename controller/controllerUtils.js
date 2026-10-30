@@ -9,18 +9,15 @@ const RotationSummary = require("../model/rotationSummary");
 const RotationDetails = require("../model/rotationDetails");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
-const csv = require("csvtojson");
 const xlsx = require("xlsx");
 const exceljs = require("exceljs");
 const { getJsDateFromExcel } = require("excel-date-to-js");
 const jwt = require("jsonwebtoken");
 const secretKey = "HelloCableBuddy";
-const CSV = require("csv-parser");
 const fs = require("fs");
 const mongoose = require('mongoose');
 const moment = require("moment-timezone");
 require("dotenv").config();
-const { DateTime } = require('luxon');
 const { isValidObjectId, Types } = require("mongoose");
 const Connections = require("../model/connectionSchema");
 
