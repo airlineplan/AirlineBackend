@@ -2,6 +2,7 @@ const express = require("express");
 const user = express();
 const multer = require("multer");
 const path = require("path");
+const fs = require("fs");
 const verifyToken = require("../middlware/auth.js");
 const { requireTenantAdmin } = require("../middlware/auth.js");
 const { requireFeatureAccess, getTenantAdminFeatures } = require("../middlware/tenantFeatureAccess");
@@ -9,6 +10,7 @@ const { SUPPORTING_PAGE_READ_ACCESS } = require("../config/supportingPageAccess"
 const userLogin = require("../controller/userLogin");
 var bodyParser = require("body-parser");
 const { verify } = require("crypto");
+const crypto = require("crypto");
 const { importUser } = require("../controller/upload.controller");
 
 user.use(bodyParser.urlencoded({ extended: true }));
@@ -18,11 +20,39 @@ var storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "./public/uploads");
   },
+  // A unique name per upload: saving under the original name let two users
+  // uploading "schedule.xlsx" at the same time overwrite each other's file.
   filename: (req, file, cb) => {
-    cb(null, file.originalname);
+    cb(null, `${crypto.randomUUID()}${path.extname(file.originalname || "").toLowerCase()}`);
   },
 });
-var upload = multer({ storage: storage });
+const UPLOAD_MAX_FILE_SIZE_MB = Number(process.env.UPLOAD_MAX_FILE_SIZE_MB) || 50;
+const multerUpload = multer({
+  storage: storage,
+  limits: { fileSize: UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024, files: 1 },
+});
+// Uploads are read synchronously by their handlers, so each file is removed once the
+// response is sent. Pass { keepFile: true } when a background job reads it later.
+var upload = {
+  single: (fieldName, { keepFile = false } = {}) => {
+    const handler = multerUpload.single(fieldName);
+    return (req, res, next) => handler(req, res, (error) => {
+      if (req.file?.path && !keepFile) {
+        const filePath = req.file.path;
+        res.once("close", () => fs.unlink(filePath, () => {}));
+      }
+      if (!error) return next();
+      if (error instanceof multer.MulterError) {
+        return res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({
+          message: error.code === "LIMIT_FILE_SIZE"
+            ? `File is too large. The maximum upload size is ${UPLOAD_MAX_FILE_SIZE_MB} MB.`
+            : error.message,
+        });
+      }
+      return next(error);
+    });
+  },
+};
 
 const dataController = require("../controller/dataController");
 const sectorController = require("../controller/sectorController");
@@ -47,7 +77,7 @@ require("./maintenancePlanningRoutes")(user, { featureAccess, jsonParser });
 user.post(
   "/importUser",
   ...featureAccess("network", "edit"),
-  upload.single("file"),
+  upload.single("file", { keepFile: true }),
   importUser
 );
 user.post("/add-Data", jsonParser, ...featureAccess("network", "edit"), dataController.AddData);
@@ -100,6 +130,7 @@ user.get("/dashboard", ...featureAccess("dashboard"), dashboardController.getDas
 
 // 🔥 USE THE IMPORTED HELPER DIRECTLY FOR THIS ROUTE
 user.get("/createConnections", ...featureAccess(["connections", "view", "dashboard"], "edit"), createConnections);
+user.get("/createConnections/status", ...featureAccess(["connections", "view", "dashboard"], "edit"), createConnections.getConnectionStatus);
 user.get("/getConnections", ...featureAccess("connections"), dataController.getConnections);
 user.get("/dashboard/populateDropDowns", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.dashboardDropdowns), dashboardController.populateDashboardDropDowns);
 user.get("/get-stationData", ...featureAccess(SUPPORTING_PAGE_READ_ACCESS.stationData), stationController.getStationsTableData);

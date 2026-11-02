@@ -39,6 +39,8 @@ const rotationSummarySchema = new mongoose.Schema({
   },
 });
 
+rotationSummarySchema.index({ userId: 1, rotationNumber: 1 });
+
 const RotationSummary = mongoose.model('RotationSummary', rotationSummarySchema);
 
 module.exports = RotationSummary;

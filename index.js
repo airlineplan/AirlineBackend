@@ -27,6 +27,12 @@ const start = async () => {
     console.log(`Server listening on port ${listeningPort} (${mode} mode)`);
   });
 
+  // Keep idle connections open longer than the load balancer's idle timeout (300s),
+  // otherwise Node closes sockets the ALB still reuses and clients see sporadic 502s.
+  const keepAliveTimeoutMs = Number(process.env.SERVER_KEEP_ALIVE_TIMEOUT_MS) || 310000;
+  server.keepAliveTimeout = keepAliveTimeoutMs;
+  server.headersTimeout = keepAliveTimeoutMs + 5000;
+
   const shutdown = async (signal) => {
     stopActualsWorker();
     console.log(`Received ${signal}; shutting down`);

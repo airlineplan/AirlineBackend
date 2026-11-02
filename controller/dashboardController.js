@@ -31,6 +31,7 @@ const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveC
 const { normalizeCurrencyCode, normalizeDateKey, convertLocalToReporting } = require("../utils/fx");
 
 const createConnections = require('../helper/createConnections');
+const { createDateRangeIndex } = require("../utils/dateRangeIndex");
 
 
 moment.tz.setDefault("America/New_York");
@@ -1443,7 +1444,13 @@ const getDashboardData = async (req, res) => {
       CostConfig.findOne({ userId }).lean(),
       RevenueConfig.findOne({ userId }).lean(),
       Fleet.find({ userId }).lean(),
-      Flights.find({ userId }).select("date").lean(),
+      // The client only derives distinct day columns from these, so send each date once
+      // instead of one row per flight.
+      Flights.aggregate([
+        { $match: { userId } },
+        { $group: { _id: "$date" } },
+        { $project: { _id: 0, date: "$_id" } },
+      ]),
       Flights.find(dashboardFlightsQuery).lean(),
     ]);
 
@@ -1489,23 +1496,20 @@ const getDashboardData = async (req, res) => {
       }).lean()
       : [];
 
+    // Index rows by UTC day once, instead of re-filtering every row for every period.
+    const utcDayTime = (value) => (value ? startOfUtcDay(new Date(value)).getTime() : NaN);
+    const flightsByDay = createDateRangeIndex(enrichedFlightsForDashboard, (flight) => utcDayTime(flight?.date));
+    const revenueByDay = createDateRangeIndex(allRevenueRows, (row) => utcDayTime(row?.date));
+    const crewEventsByDay = createDateRangeIndex(crewDiaryEvents, (event) => utcDayTime(event?.startDateTime));
+
     for (const periodEnd of periodEnds) {
       const periodStart = getPeriodStartForDashboard(periodEnd, periodicity);
       const periodStartDay = startOfUtcDay(periodStart);
       const periodEndDay = endOfUtcDay(periodEnd);
-      const flightsInPeriod = enrichedFlightsForDashboard.filter((flight) => {
-        const flightDate = flight?.date ? startOfUtcDay(new Date(flight.date)) : null;
-        return flightDate && flightDate >= periodStartDay && flightDate <= periodEndDay;
-      });
+      const flightsInPeriod = flightsByDay.between(periodStartDay, periodEndDay);
 
-      const revenueInPeriod = allRevenueRows.filter((row) => {
-        const rowDate = row?.date ? startOfUtcDay(new Date(row.date)) : null;
-        return rowDate && rowDate >= periodStartDay && rowDate <= periodEndDay;
-      });
-      const crewDiaryEventsInPeriod = crewDiaryEvents.filter((event) => {
-        const eventDate = event?.startDateTime ? startOfUtcDay(new Date(event.startDateTime)) : null;
-        return eventDate && eventDate >= periodStartDay && eventDate <= periodEndDay;
-      });
+      const revenueInPeriod = revenueByDay.between(periodStartDay, periodEndDay);
+      const crewDiaryEventsInPeriod = crewEventsByDay.between(periodStartDay, periodEndDay);
 
       flightsInPeriod.forEach((flight) => addLocalCostExposures(currencyExposureBuckets, flight));
 

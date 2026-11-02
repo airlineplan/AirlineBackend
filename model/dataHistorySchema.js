@@ -81,4 +81,6 @@ const dataHistorySchema = new mongoose.Schema({
 });
 
 
+dataHistorySchema.index({ addedByRotation: 1, userId: 1 });
+
 module.exports = mongoose.model("DataHistory", dataHistorySchema);

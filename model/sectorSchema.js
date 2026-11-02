@@ -43,6 +43,8 @@ const sectorSchema = new mongoose.Schema({
   bh: { type: Number }  // Block hours (Decimal)
 });
 
+sectorSchema.index({ networkId: 1, userId: 1 });
+sectorSchema.index({ addedByRotation: 1 });
 sectorSchema.index({ userId: 1, sector1: 1, sector2: 1, domINTL: 1, std: 1, date: 1 });
 
 // --- HELPER FUNCTION: Convert 'HH:MM' to Decimal ---

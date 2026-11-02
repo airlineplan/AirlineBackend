@@ -3,6 +3,7 @@ const Assignment = require('../model/assignment');
 const Flight = require('../model/flight');
 const GroundDay = require('../model/groundDay');
 const moment = require('moment');
+const { findByFlightNumbers } = require('../utils/flightNumberMatch');
 const {
     applyAssignmentSyncPlan,
     buildAssignmentSyncPlan,
@@ -256,20 +257,16 @@ exports.getWeeklyAssignments = async (req, res) => {
             return res.status(200).json({ data: [] });
         }
 
-        const flightRegexArray = [...new Set(assignments
+        const flightNumbers = [...new Set(assignments
             .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
-            .filter(Boolean))]
-            .map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
+            .filter(Boolean))];
 
-        const flights = flightRegexArray.length > 0
-            ? await Flight.find({
-                userId,
-                date: { $gte: startDate, $lte: endDate },
-                flight: { $in: flightRegexArray },
-            })
-                .select("date flight")
-                .lean()
-            : [];
+        const flights = await findByFlightNumbers(
+            Flight,
+            { userId, date: { $gte: startDate, $lte: endDate } },
+            flightNumbers,
+            "date flight"
+        );
 
         const activeFlightKeys = new Set(flights.map((flight) => (
             `${moment.utc(flight.date).format("YYYY-MM-DD")}_${String(flight.flight || "").trim().toUpperCase()}`

@@ -8,17 +8,19 @@ const { getUtilisationFlights } = require("../utils/utilisationFlights");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { generateMaintenanceReserveScheduleWithContributions, normalizeCostConfig, computeFlightCostsBatch } = require("../utils/costLogic");
 const { COST_PERSIST_FIELDS } = require("../utils/costFields");
+const { minMaxTime } = require("../utils/dateRangeIndex");
 
 async function loadSeverityContext(userId, config, flights) {
   const accounts = (config.leasedReserve || []).filter((row) => row.setRateType === "SM");
   if (!accounts.length || !flights.length) return {};
   const dates = flights.map((row) => new Date(row.date).getTime()).filter(Number.isFinite);
   if (!dates.length) return {};
-  const to = new Date(Math.max(...dates));
+  const dateRange = minMaxTime(dates);
+  const to = new Date(dateRange.max);
   to.setUTCMonth(to.getUTCMonth() + 1, 0);
   const [matrices, timeline] = await Promise.all([
     Matrix.find({ userId, mrAccId: { $in: accounts.map((row) => String(row.mrAccId).trim().toUpperCase()) } }).lean(),
-    buildCtdTimeline({ userId, esns: [...new Set(accounts.map((row) => row.sn))], from: new Date(Math.min(...dates)), to }),
+    buildCtdTimeline({ userId, esns: [...new Set(accounts.map((row) => row.sn))], from: new Date(dateRange.min), to }),
   ]);
   return { severityMatrices: Object.fromEntries(matrices.map((matrix) => [matrix.mrAccId, matrix])), ctdByEsn: timeline };
 }

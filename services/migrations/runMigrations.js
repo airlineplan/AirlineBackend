@@ -65,6 +65,16 @@ const migrations = [
       );
     },
   },
+  {
+    // createIndexes only adds missing indexes; it never drops existing ones.
+    id: "003-create-scale-indexes",
+    run: async () => {
+      const modelNames = mongoose.modelNames().filter((name) => name !== "SchemaMigration");
+      for (const modelName of modelNames) {
+        await mongoose.model(modelName).createIndexes();
+      }
+    },
+  },
 ];
 
 const runMigrations = async () => {

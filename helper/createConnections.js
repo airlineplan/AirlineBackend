@@ -1,285 +1,344 @@
 /**
- * createConnections.js — Optimized for maximum throughput and accuracy
+ * createConnections.js — builds beyond/behind connections for a user's flights.
  *
  * Key features:
- * 1. Renamed Bull queue to 'flight-processing-v2' to clear stuck Redis jobs.
- * 2. Deduplicated DB queries (groups identical queries to save database load).
- * 3. Cursors instead of .skip() to prevent DB scanning overhead.
- * 4. Restored midnight crossover logic to accurately catch next-day connections.
+ * 1. Loads the user's flights once and evaluates each flight's connection
+ *    query in memory against flights indexed by departure station and date,
+ *    instead of issuing one or two MongoDB queries per flight.
+ * 2. Writes connections and flight flags in chunked bulk operations.
+ * 3. A per-user ConnectionJob row acts as a lock, so repeated or concurrent
+ *    requests (from any instance) join the running build instead of deleting
+ *    its output midway.
+ * 4. Requests wait up to CONNECTION_JOB_WAIT_MS for the build; longer builds
+ *    return 202 and clients poll /createConnections/status, so large schedules
+ *    no longer hit the load balancer's idle timeout.
+ * 5. Restored midnight crossover logic to accurately catch next-day connections.
  */
 
-const Bull = require('bull');
 const mongoose = require('mongoose');
 
 const User = require('../model/userSchema');
 const Stations = require('../model/stationSchema');
 const Flights = require('../model/flight');
 const Connections = require('../model/connectionSchema');
-const { getRedisUrl } = require('../config/redisUrl');
+const ConnectionJob = require('../model/connectionJob');
 
 /* ─────────────────────────────────────────────
-   REDIS + QUEUE CONFIGURATION
+   CONFIGURATION
 ──────────────────────────────────────────── */
 
-let flightQueue;
+const WRITE_CHUNK_SIZE = 5000;
+const YIELD_EVERY_FLIGHTS = 1000;
+const JOB_STALE_MS = 60 * 60 * 1000;
+const STATUS_POLL_MS = 1000;
 
-const getRedisRetryLimit = () => {
-  const configured = Number(process.env.BULL_REDIS_MAX_RETRIES_PER_REQUEST);
-  return Number.isInteger(configured) && configured >= 0 ? configured : 3;
+const getJobWaitMs = () => {
+  const configured = Number(process.env.CONNECTION_JOB_WAIT_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 45000;
 };
 
+const sleep = (ms) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  if (typeof timer.unref === 'function') timer.unref();
+});
+
+const yieldToEventLoop = () => new Promise((resolve) => setImmediate(resolve));
+
 /* ─────────────────────────────────────────────
-   WORKER (High Performance Deduplication)
+   IN-MEMORY QUERY EVALUATION
 ──────────────────────────────────────────── */
 
-const CONCURRENCY = 10;
+const bucketKey = (depStn, date) => `${depStn}\u0000${new Date(date).getTime()}`;
 
-const processFlightBatch = async (job) => {
-  const { flightIdsBatch = [], userId, hometimeZone } = job.data;
+const matchesStdRange = (std, range) => (
+  typeof std === 'string' && std >= range.$gte && std <= range.$lte
+);
 
-  if (flightIdsBatch.length === 0) return;
+const isSameDate = (value, date) => (
+  value instanceof Date && value.getTime() === date.getTime()
+);
 
-  // Convert string IDs back to ObjectId
-  const objectIds = flightIdsBatch.map(id => new mongoose.Types.ObjectId(id));
+// Evaluates a query produced by buildDomQuery/buildIntlQuery against a lean
+// flight exactly as MongoDB would: equality on depStn, $ne on arrStn,
+// $regex on domIntl (strings only), string range on std, equality on date.
+function matchesConnectionQuery(candidate, query) {
+  if (candidate.depStn !== query.depStn) return false;
+  if (candidate.arrStn === query.arrStn.$ne) return false;
+  if (typeof candidate.domIntl !== 'string' || !query.domIntl.$regex.test(candidate.domIntl)) return false;
+  if (query.$or) {
+    return query.$or.some((branch) => (
+      matchesStdRange(candidate.std, branch.std) && isSameDate(candidate.date, branch.date)
+    ));
+  }
+  return matchesStdRange(candidate.std, query.std) && isSameDate(candidate.date, query.date);
+}
 
-  // Load stationsMap inside the worker
-  const stations = await Stations.find({ userId }).lean();
+const queryDates = (query) => (query.$or ? query.$or.map((branch) => branch.date) : [query.date]);
+
+function findConnectionMatches(query, flightsByStationDate) {
+  const matches = [];
+  for (const date of queryDates(query)) {
+    const candidates = flightsByStationDate.get(bucketKey(query.depStn, date)) || [];
+    for (const candidate of candidates) {
+      if (matchesConnectionQuery(candidate, query)) matches.push(candidate._id);
+    }
+  }
+  return matches;
+}
+
+/* ─────────────────────────────────────────────
+   BUILD
+──────────────────────────────────────────── */
+
+async function insertConnectionsChunk(entries) {
+  if (entries.length === 0) return;
+  // Rows are plain strings built above, so skip Mongoose hydration/validation.
+  await Connections.insertMany(entries, { ordered: false, lean: true });
+}
+
+async function setFlightFlag(ids, field) {
+  for (let i = 0; i < ids.length; i += WRITE_CHUNK_SIZE) {
+    await Flights.updateMany(
+      { _id: { $in: ids.slice(i, i + WRITE_CHUNK_SIZE) } },
+      { $set: { [field]: true } }
+    );
+  }
+}
+
+async function buildConnectionsForUser(userId) {
+  const user = await User.findById(userId, { hometimeZone: 1 }).lean();
+  const hometimeZone = user?.hometimeZone;
+
+  // Reset connections and flags in parallel
+  await Promise.all([
+    Connections.deleteMany({ userId }),
+    Flights.updateMany({ userId }, { $set: { beyondODs: false, behindODs: false } })
+  ]);
+
+  const [stations, flights] = await Promise.all([
+    Stations.find({ userId }).lean(),
+    Flights.find(
+      { userId },
+      { _id: 1, depStn: 1, arrStn: 1, std: 1, sta: 1, bt: 1, date: 1, domIntl: 1, userId: 1 }
+    ).lean(),
+  ]);
+
   const stationsMap = {};
   stations.forEach(s => {
     stationsMap[s.stationName.trim().toUpperCase()] = s;
   });
 
-  // Re-fetch the actual flight documents for this batch
-  const flightsBatch = await Flights.find(
-    { _id: { $in: objectIds } },
-    { _id: 1, depStn: 1, arrStn: 1, std: 1, sta: 1, bt: 1, date: 1, domIntl: 1, userId: 1 }
-  ).lean();
+  const flightsByStationDate = new Map();
+  for (const flight of flights) {
+    if (!(flight.date instanceof Date)) continue;
+    const key = bucketKey(flight.depStn, flight.date);
+    if (!flightsByStationDate.has(key)) flightsByStationDate.set(key, []);
+    flightsByStationDate.get(key).push(flight);
+  }
 
-  // ── Step 1: Build all "beyond" queries for the entire batch ──────
-  const orClauses = [];
-  const flightMeta = new Map();
+  let connectionBuffer = [];
+  let connectionCount = 0;
+  const beyondFlightIds = [];
+  const behindFlightIds = new Map();
 
-  for (const flight of flightsBatch) {
-    const arrKey = flight.arrStn.trim().toUpperCase();
-    const depKey = flight.depStn.trim().toUpperCase();
+  for (let index = 0; index < flights.length; index++) {
+    if (index > 0 && index % YIELD_EVERY_FLIGHTS === 0) await yieldToEventLoop();
 
-    const stationArr = stationsMap[arrKey];
-    const stationDep = stationsMap[depKey];
+    const flight = flights[index];
+    if (typeof flight.arrStn !== 'string' || typeof flight.depStn !== 'string') continue;
 
+    const stationArr = stationsMap[flight.arrStn.trim().toUpperCase()];
+    const stationDep = stationsMap[flight.depStn.trim().toUpperCase()];
     if (!stationArr || !stationDep) continue;
 
     const stdHTZ = convertTimeToTZ(flight.std, stationDep.stdtz, stationArr.stdtz);
     const domQ = buildDomQuery(flight, stationDep, stationArr, stdHTZ, hometimeZone);
     const intlQ = buildIntlQuery(flight, stationDep, stationArr, stdHTZ, hometimeZone);
 
-    const tag = flight._id.toString();
-    flightMeta.set(tag, flight);
+    const beyondIds = new Map();
+    for (const id of findConnectionMatches(domQ, flightsByStationDate)) beyondIds.set(id.toString(), id);
+    for (const id of findConnectionMatches(intlQ, flightsByStationDate)) beyondIds.set(id.toString(), id);
+    if (beyondIds.size === 0) continue;
 
-    orClauses.push({ ...domQ, _flightTag: tag });
-    orClauses.push({ ...intlQ, _flightTag: tag });
-  }
-
-  if (orClauses.length === 0) return;
-
-  // ── Step 2: Deduplicate identical queries to save database load ──
-  const queryMap = new Map();
-
-  for (const { _flightTag, ...q } of orClauses) {
-    const key = JSON.stringify(q); // Group identical queries together
-    if (!queryMap.has(key)) queryMap.set(key, { query: q, tags: [] });
-    queryMap.get(key).tags.push(_flightTag);
-  }
-
-  const queryEntries = [...queryMap.values()];
-  const results = [];
-
-  // Chunk queries to prevent DB connection pool exhaustion (50 queries at a time)
-  const DB_QUERY_CHUNK_SIZE = 50;
-  for (let i = 0; i < queryEntries.length; i += DB_QUERY_CHUNK_SIZE) {
-    const chunk = queryEntries.slice(i, i + DB_QUERY_CHUNK_SIZE);
-
-    const chunkResults = await Promise.all(
-      chunk.map(({ query }) => Flights.find(query, { _id: 1 }).lean())
-    );
-    results.push(...chunkResults);
-  }
-
-  // ── Step 3: Map results back to originating flights ────────────────
-  const beyondMap = new Map();
-  for (let i = 0; i < queryEntries.length; i++) {
-    const { tags } = queryEntries[i];
-    const matchedIds = results[i].map(f => f._id);
-    for (const tag of tags) {
-      if (!beyondMap.has(tag)) beyondMap.set(tag, new Set());
-      for (const id of matchedIds) beyondMap.get(tag).add(id.toString());
-    }
-  }
-
-  // ── Step 4: Build bulk writes and connection inserts ───────────────
-  const connectionEntries = [];
-  const flightBulkOps = [];
-  const allBeyondIds = new Set();
-
-  for (const [flightTag, beyondSet] of beyondMap) {
-    if (beyondSet.size === 0) continue;
-    const flight = flightMeta.get(flightTag);
-
-    flightBulkOps.push({
-      updateOne: {
-        filter: { _id: flight._id },
-        update: { $set: { beyondODs: true } }
-      }
-    });
-
-    for (const beyondId of beyondSet) {
-      allBeyondIds.add(beyondId);
-      connectionEntries.push({
+    beyondFlightIds.push(flight._id);
+    for (const [beyondId, beyondObjectId] of beyondIds) {
+      behindFlightIds.set(beyondId, beyondObjectId);
+      connectionBuffer.push({
         flightID: flight._id.toString(),
-        beyondOD: beyondId.toString(),
+        beyondOD: beyondId,
         userId: flight.userId
       });
     }
+
+    if (connectionBuffer.length >= WRITE_CHUNK_SIZE) {
+      await insertConnectionsChunk(connectionBuffer);
+      connectionCount += connectionBuffer.length;
+      connectionBuffer = [];
+    }
   }
 
-  if (allBeyondIds.size > 0) {
-    flightBulkOps.push({
-      updateMany: {
-        filter: { _id: { $in: [...allBeyondIds].map(id => new mongoose.Types.ObjectId(id)) } },
-        update: { $set: { behindODs: true } }
-      }
-    });
-  }
+  await insertConnectionsChunk(connectionBuffer);
+  connectionCount += connectionBuffer.length;
 
-  // ── Step 5: Fire all writes in parallel ────────────────────────────
-  await Promise.all([
-    connectionEntries.length > 0
-      ? Connections.insertMany(connectionEntries, { ordered: false })
-      : Promise.resolve(),
-    flightBulkOps.length > 0
-      ? Flights.bulkWrite(flightBulkOps, { ordered: false })
-      : Promise.resolve()
-  ]);
+  await setFlightFlag(beyondFlightIds, 'beyondODs');
+  await setFlightFlag([...behindFlightIds.values()], 'behindODs');
 
   console.log(
-    `✅ Job done: ${connectionEntries.length} connections | ` +
-    `${flightBulkOps.length} flight updates | batch size: ${flightsBatch.length}`
+    `✅ Connections built: ${connectionCount} connections | ` +
+    `${beyondFlightIds.length} beyond flights | ${flights.length} flights`
   );
-};
 
-const getFlightQueue = () => {
-  if (flightQueue) return flightQueue;
+  return { flightCount: flights.length, connectionCount };
+}
 
-  const redisUrl = getRedisUrl();
-  if (!redisUrl) {
-    const error = new Error('Connection processing is unavailable because REDIS_URL is not configured');
-    error.code = 'QUEUE_UNAVAILABLE';
-    error.statusCode = 503;
+/* ─────────────────────────────────────────────
+   JOB LOCK + STATUS
+──────────────────────────────────────────── */
+
+const localRuns = new Map();
+
+const isStale = (job) => (
+  job?.status === 'processing' && job.startedAt && Date.now() - new Date(job.startedAt).getTime() > JOB_STALE_MS
+);
+
+async function acquireJob(userId) {
+  const runId = new mongoose.Types.ObjectId().toString();
+  const now = new Date();
+  try {
+    const job = await ConnectionJob.findOneAndUpdate(
+      {
+        userId,
+        $or: [
+          { status: { $ne: 'processing' } },
+          { startedAt: { $lt: new Date(now.getTime() - JOB_STALE_MS) } },
+        ],
+      },
+      {
+        $set: {
+          runId,
+          status: 'processing',
+          startedAt: now,
+          finishedAt: null,
+          error: null,
+          flightCount: 0,
+          connectionCount: 0,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+    return { job, acquired: job.runId === runId };
+  } catch (error) {
+    // A processing row already exists, so the upsert collided on the unique userId.
+    if (error?.code === 11000) {
+      return { job: await ConnectionJob.findOne({ userId }).lean(), acquired: false };
+    }
     throw error;
   }
+}
 
-  flightQueue = new Bull('flight-processing-v2', redisUrl, {
-    redis: {
-      connectTimeout: 10000,
-      maxRetriesPerRequest: getRedisRetryLimit(),
-      retryStrategy: retries => Math.min(retries * 200, 3000)
-    },
-    defaultJobOptions: {
-      removeOnComplete: { age: 300 },
-      removeOnFail: { age: 300 }
-    },
-    settings: {
-      maxStalledCount: 3,
-      lockDuration: 600000
+function startRun(userId, runId) {
+  const run = (async () => {
+    try {
+      const result = await buildConnectionsForUser(userId);
+      await ConnectionJob.updateOne(
+        { userId, runId },
+        { $set: { status: 'completed', finishedAt: new Date(), ...result } }
+      );
+    } catch (error) {
+      console.error('Error in createConnections:', error.message);
+      await ConnectionJob.updateOne(
+        { userId, runId },
+        { $set: { status: 'failed', finishedAt: new Date(), error: error.message } }
+      ).catch(() => {});
     }
-  });
+  })();
+  localRuns.set(runId, run);
+  run.then(() => localRuns.delete(runId));
+  return run;
+}
 
-  flightQueue.on('error', error => {
-    console.error('Flight queue Redis error:', error.message);
-  });
-  flightQueue.process(CONCURRENCY, processFlightBatch);
-  return flightQueue;
-};
+async function waitForJob(userId, runId, waitMs) {
+  const deadline = Date.now() + waitMs;
+  const localRun = localRuns.get(runId);
+  if (localRun) {
+    await Promise.race([localRun, sleep(waitMs)]);
+  }
 
-const closeFlightQueue = async () => {
-  const queue = flightQueue;
-  flightQueue = undefined;
-  if (queue) await queue.close(true);
+  for (;;) {
+    const job = await ConnectionJob.findOne({ userId }).lean();
+    if (!job || job.runId !== runId || job.status !== 'processing') return job;
+    if (Date.now() >= deadline) return job;
+    await sleep(Math.min(STATUS_POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+
+const describeJob = (job) => {
+  if (!job) return { status: 'idle' };
+  if (isStale(job)) {
+    return { status: 'failed', message: 'Connection processing was interrupted. Please run it again.' };
+  }
+  if (job.status === 'processing') {
+    return { status: 'processing', message: 'Connection processing is still running.' };
+  }
+  if (job.status === 'failed') {
+    return { status: 'failed', message: 'Connection processing failed.' };
+  }
+  return {
+    status: 'completed',
+    message: `Successfully processed ${job.flightCount} flights and created connections.`,
+  };
 };
 
 /* ─────────────────────────────────────────────
-   CONTROLLER
+   CONTROLLERS
 ──────────────────────────────────────────── */
 
 async function createConnections(req, res) {
   try {
     console.log('createConnections called');
-    const queue = getFlightQueue();
-    await queue.isReady();
-
     const userId = req.user.id;
-    const user = await User.findById(userId, { hometimeZone: 1 }).lean();
-    const hometimeZone = user.hometimeZone;
 
-    // Reset connections and flags in parallel
-    await Promise.all([
-      Connections.deleteMany({ userId }),
-      Flights.updateMany({ userId }, { $set: { beyondODs: false, behindODs: false } })
-    ]);
-    console.log('Reset complete.');
-
-    // Respond immediately — don't make the client wait
-    // res.status(202).json({ message: 'Connection processing started. Check back shortly.' });
-
-    // Enqueue batches via Cursor (Extremely fast, low memory)
-    const BATCH_SIZE = 2000;
-    let totalQueued = 0;
-    const jobs = [];
-    let flightIdsBatch = [];
-
-    const cursor = Flights.find({ userId }, { _id: 1 }).lean().cursor();
-
-    for await (const flight of cursor) {
-      flightIdsBatch.push(flight._id.toString());
-
-      if (flightIdsBatch.length >= BATCH_SIZE) {
-        jobs.push(await queue.add(
-          { flightIdsBatch, userId, hometimeZone },
-          { ttl: 3600 * 1000 }
-        ));
-        totalQueued += flightIdsBatch.length;
-        console.log(`Queued ${totalQueued} flights`);
-        flightIdsBatch = []; // reset batch
-      }
-    }
-
-    // Queue any remaining flights
-    if (flightIdsBatch.length > 0) {
-      jobs.push(await queue.add(
-        { flightIdsBatch, userId, hometimeZone },
-        { ttl: 3600 * 1000 }
-      ));
-      totalQueued += flightIdsBatch.length;
-      console.log(`Queued final batch. Total: ${totalQueued} flights`);
-    }
+    const { job, acquired } = await acquireJob(userId);
+    if (acquired) startRun(userId, job.runId);
 
     // Wait for completion so downstream POO refreshes do not read partial connection data.
-    await Promise.all(jobs.map(job => job.finished()));
-    console.log(`All jobs complete. Successfully processed ${totalQueued} flights.`);
+    // Builds that outlive the wait return 202 and the client polls /createConnections/status.
+    const latest = await waitForJob(userId, job.runId, getJobWaitMs());
+    const { status, message } = describeJob(latest);
 
-    res.status(200).json({
-      success: true,
-      message: `Successfully processed ${totalQueued} flights and created connections.`
-    });
+    if (status === 'completed') {
+      return res.status(200).json({ success: true, status, message });
+    }
+    if (status === 'failed') {
+      return res.status(500).json({ error: 'Internal server error', status });
+    }
+    return res.status(202).json({ success: true, status: 'processing', message });
   } catch (error) {
     console.error('Error in createConnections:', error.message);
     if (!res.headersSent) {
-      const statusCode = error.statusCode || (error.code === 'QUEUE_UNAVAILABLE' ? 503 : 500);
-      res.status(statusCode).json({
-        error: statusCode === 503 ? error.message : 'Internal server error'
-      });
+      res.status(error.statusCode || 500).json({ error: 'Internal server error' });
     }
   }
 }
+
+async function getConnectionStatus(req, res) {
+  try {
+    const job = await ConnectionJob.findOne({ userId: req.user.id }).lean();
+    res.status(200).json({
+      ...describeJob(job),
+      startedAt: job?.startedAt || null,
+      finishedAt: job?.finishedAt || null,
+    });
+  } catch (error) {
+    console.error('Error reading connection status:', error.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// Builds run in-process; on shutdown, let any running build finish its writes.
+const closeFlightQueue = async () => {
+  await Promise.allSettled([...localRuns.values()]);
+};
 
 /* ─────────────────────────────────────────────
    QUERY BUILDERS (With Midnight Crossover Logic)
@@ -404,5 +463,7 @@ function addDays(date, days) {
 }
 
 module.exports = createConnections;
+module.exports.getConnectionStatus = getConnectionStatus;
+module.exports.buildConnectionsForUser = buildConnectionsForUser;
+module.exports.matchesConnectionQuery = matchesConnectionQuery;
 module.exports.closeFlightQueue = closeFlightQueue;
-module.exports.getFlightQueue = getFlightQueue;

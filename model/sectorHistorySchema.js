@@ -90,4 +90,6 @@ const sectorHistorySchema = new mongoose.Schema({
   }
 });
 
+sectorHistorySchema.index({ addedByRotation: 1, userId: 1 });
+
 module.exports = mongoose.model("SectorHistory", sectorHistorySchema);

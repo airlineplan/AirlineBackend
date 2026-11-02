@@ -67,6 +67,23 @@ const {
   isValidDepStn
 } = require('./controllerUtils');
 
+const FLIGHT_PAGE_SORT = { date: 1, flight: 1 };
+
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Request key -> flight field for text "contains" filters.
+const SEARCH_TEXT_FIELDS = {
+  flight: 'flight', depStn: 'depStn', std: 'std', bt: 'bt', ft: 'ft', sta: 'sta', arrStn: 'arrStn',
+  sector: 'sector', variant: 'variant', day: 'day', rotations: 'rotationNumber', domIntl: 'domIntl',
+  userTag1: 'userTag1', userTag2: 'userTag2', remarks1: 'remarks1', remarks2: 'remarks2',
+};
+
+// Request key -> flight field for numeric "contains" filters.
+const SEARCH_NUMERIC_FIELDS = {
+  bh: 'bh', fh: 'fh', seats: 'seats', CargoCapT: 'CargoCapT', dist: 'dist', pax: 'pax',
+  CargoT: 'CargoT', cargoT: 'CargoT', ask: 'ask', rsk: 'rsk', cargoAtk: 'cargoAtk', cargoRtk: 'cargoRtk',
+};
+
 const getFlights = async (req, res) => {
   try {
     // Get pagination parameters from the query (default to page 1, 10 rows per page)
@@ -74,6 +91,8 @@ const getFlights = async (req, res) => {
     const query = scopedUserQuery(req, { isComplete: true });
 
     const data = await Flights.find(query)
+      .sort(FLIGHT_PAGE_SORT) // Stable order so rows don't repeat or vanish between pages
+      .allowDiskUse(true)
       .skip((page - 1) * limit) // Skip documents for previous pages
       .limit(Number(limit)); // Limit results to `limit`
 
@@ -90,18 +109,29 @@ const getFlights = async (req, res) => {
 };
 const searchFlights = async (req, res) => {
   try {
-    const {
-      flight, depStn, std, bt, sta, arrStn, variant, date, day, rotations,
-      seats, cargoT, dist, pax, ask, rsk, cargoAtk, cargoRtk, domIntl,
-      userTag1, userTag2, remarks1, remarks2, acftType, page, limit,
-    } = req.body;
+    const { date, acftType, page, limit } = req.body;
 
     // Build a query object
     let query = categoryFilter(req.body.category);
 
-    // Add filters based on request parameters
+    // "Contains" filters. User input is escaped so characters like "(" or "+"
+    // are matched literally instead of failing the query.
     const addRegexFilter = (field, value) => {
-      if (value) query[field] = { $regex: value, $options: 'i' };
+      if (value) query[field] = { $regex: escapeRegExp(value), $options: 'i' };
+    };
+    // $regex never matches numbers, so numeric columns are matched on their text form.
+    const numericClauses = [];
+    const addNumericContainsFilter = (field, value) => {
+      if (value === undefined || value === null || value === '') return;
+      numericClauses.push({
+        $expr: {
+          $regexMatch: {
+            input: { $toString: `$${field}` },
+            regex: escapeRegExp(value),
+            options: 'i',
+          },
+        },
+      });
     };
 
 
@@ -109,8 +139,8 @@ const searchFlights = async (req, res) => {
     if (acftType) {
       // We ONLY search the fields that actually exist in your new schema
       const orConditions = [
-        { 'aircraft.registration': { $regex: acftType, $options: 'i' } },
-        { acftType: { $regex: acftType, $options: 'i' } }
+        { 'aircraft.registration': { $regex: escapeRegExp(acftType), $options: 'i' } },
+        { acftType: { $regex: escapeRegExp(acftType), $options: 'i' } }
       ];
 
       // If the user typed a number (like '1' or '1021'), also search the exact MSN
@@ -121,28 +151,10 @@ const searchFlights = async (req, res) => {
       query.$or = orConditions;
     }
 
-    addRegexFilter('flight', flight);
-    addRegexFilter('depStn', depStn);
-    addRegexFilter('std', std);
-    addRegexFilter('bt', bt);
-    addRegexFilter('sta', sta);
-    addRegexFilter('arrStn', arrStn);
-    addRegexFilter('variant', variant);
-    addRegexFilter('day', day);
-    addRegexFilter('rotations', rotations);
-    addRegexFilter('seats', seats);
-    addRegexFilter('cargoT', cargoT);
-    addRegexFilter('dist', dist);
-    addRegexFilter('pax', pax);
-    addRegexFilter('ask', ask);
-    addRegexFilter('rsk', rsk);
-    addRegexFilter('cargoAtk', cargoAtk);
-    addRegexFilter('cargoRtk', cargoRtk);
-    addRegexFilter('domIntl', domIntl);
-    addRegexFilter('userTag1', userTag1);
-    addRegexFilter('userTag2', userTag2);
-    addRegexFilter('remarks1', remarks1);
-    addRegexFilter('remarks2', remarks2);
+    // Request keys match the FLGTs column keys; a few legacy aliases map to schema fields.
+    Object.entries(SEARCH_TEXT_FIELDS).forEach(([bodyKey, field]) => addRegexFilter(field, req.body[bodyKey]));
+    Object.entries(SEARCH_NUMERIC_FIELDS).forEach(([bodyKey, field]) => addNumericContainsFilter(field, req.body[bodyKey]));
+    if (numericClauses.length > 0) query.$and = numericClauses;
 
     // Date filter
     if (date) {
@@ -159,7 +171,7 @@ const searchFlights = async (req, res) => {
     const limitNum = Number(limit);
 
     // Fetch flights
-    const data = await Flights.find(query).skip(skip).limit(limitNum);
+    const data = await Flights.find(query).sort(FLIGHT_PAGE_SORT).allowDiskUse(true).skip(skip).limit(limitNum);
     const costConfig = normalizeCostConfig(await CostConfig.findOne({ userId: req.user.id }).lean() || {});
     const mrContext = await buildMaintenanceReserveContext(req.user.id, data);
     const enrichedData = computeFlightCostsBatch(

@@ -13,4 +13,7 @@ const connectionSchema = new mongoose.Schema({
 })
 
 
+connectionSchema.index({ userId: 1, flightID: 1 });
+connectionSchema.index({ userId: 1, beyondOD: 1 });
+
 module.exports = mongoose.model("Connections", connectionSchema);

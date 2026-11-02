@@ -151,6 +151,7 @@ const CHUNK_SIZE = 1000;
 
     } catch (error) {
         if (workerData.jobId) await ImportJob.findByIdAndUpdate(workerData.jobId, { status: "failed", error: error.message });
+        try { if (workerData.filePath) fs.unlinkSync(workerData.filePath); } catch { /* already removed */ }
         process.exit(1);
     }
 })();

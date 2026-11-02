@@ -2911,6 +2911,7 @@ async function backfillMasterFieldsToPooRows(userId) {
     });
 
     const ops = [];
+    let matchedRows = 0;
     pooRows.forEach((row) => {
         const key = [
             normalizeDateKey(row.date),
@@ -2919,19 +2920,23 @@ async function backfillMasterFieldsToPooRows(userId) {
         ].join("|");
         const flight = flightMap.get(key);
         if (!flight) return;
+        matchedRows += 1;
+
+        const $set = {
+            depStn: normalizeStation(flight.depStn),
+            arrStn: normalizeStation(flight.arrStn),
+            userTag1: String(flight.userTag1 || "").trim(),
+            userTag2: String(flight.userTag2 || "").trim(),
+            variant: String(flight.variant || "").trim(),
+        };
+        // Rows already in sync are skipped; this runs on every POO populate, so
+        // rewriting every row each time made a single-date refresh O(all POO rows) writes.
+        if (Object.keys($set).every((field) => row[field] === $set[field])) return;
 
         ops.push({
             updateOne: {
                 filter: { _id: row._id, userId },
-                update: {
-                    $set: {
-                        depStn: normalizeStation(flight.depStn),
-                        arrStn: normalizeStation(flight.arrStn),
-                        userTag1: String(flight.userTag1 || "").trim(),
-                        userTag2: String(flight.userTag2 || "").trim(),
-                        variant: String(flight.variant || "").trim(),
-                    },
-                },
+                update: { $set },
             },
         });
     });
@@ -2940,7 +2945,7 @@ async function backfillMasterFieldsToPooRows(userId) {
         await PooTable.bulkWrite(ops, { ordered: false });
     }
 
-    return { matchedRows: ops.length, totalPooRows: pooRows.length };
+    return { matchedRows, totalPooRows: pooRows.length };
 }
 
 async function recalculatePooRevenueForConfig(userId, revenueConfig) {

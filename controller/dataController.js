@@ -28,6 +28,7 @@ const { COST_COMPONENTS, COST_PERSIST_FIELDS } = require("../utils/costFields");
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const { scopedUserQuery } = require("./accessScope");
+const { createDateRangeIndex, minMaxTime } = require("../utils/dateRangeIndex");
 const { syncPooForUserDates } = require("./pooController");
 
 const createConnections = require('../helper/createConnections');
@@ -318,27 +319,38 @@ const deleteFlightsAndUpdateSectors = async (req, res) => {
     const stationNamesToDelete = [...documentsToDelete.flatMap(doc => [doc.arrStn, doc.depStn])];
 
     const userId = req.user.id;
-    // Delete stations only if they are not present in other documents for the same user
-    for (const stationName of stationNamesToDelete) {
-      const station = await Stations.findOne({ stationName, userId });
-
-      if (station) {
-        if (station.freq === 1) {
-          // If freq is 1, delete the entry 
-          await Stations.deleteOne({ stationName, userId });
-        } else {
-          // If freq is greater than 1, decrement by 1
-          await Stations.updateOne(
-            { stationName, userId },
-            { $inc: { freq: -1 } }
-          );
-        }
+    // Delete stations only if they are not present in other documents for the same user.
+    // Equivalent to decrementing once per occurrence and deleting when freq reaches 1,
+    // but with one read and one bulk write instead of two round trips per station.
+    const stationOccurrences = new Map();
+    stationNamesToDelete.forEach((stationName) => {
+      stationOccurrences.set(stationName, (stationOccurrences.get(stationName) || 0) + 1);
+    });
+    const stations = await Stations.find({ stationName: { $in: [...stationOccurrences.keys()] }, userId })
+      .select("stationName freq")
+      .lean();
+    const stationOps = [];
+    const seenStationNames = new Set();
+    stations.forEach((station) => {
+      if (seenStationNames.has(station.stationName)) return;
+      seenStationNames.add(station.stationName);
+      const occurrences = stationOccurrences.get(station.stationName) || 0;
+      const filter = { stationName: station.stationName, userId };
+      if (typeof station.freq === "number" && station.freq >= 1 && station.freq <= occurrences) {
+        stationOps.push({ deleteOne: { filter } });
+      } else {
+        stationOps.push({ updateOne: { filter, update: { $inc: { freq: -occurrences } } } });
       }
+    });
+    if (stationOps.length > 0) {
+      await Stations.bulkWrite(stationOps, { ordered: true });
     }
 
     const result = await Data.deleteMany(scopedUserQuery(req, { _id: { $in: ids } }));
 
-    const flightsToDelete = await Flights.find(scopedUserQuery(req, { networkId: { $in: ids } }));
+    const flightsToDelete = await Flights.find(scopedUserQuery(req, { networkId: { $in: ids } }))
+      .select("date rotationNumber flight")
+      .lean();
     const deletedFlightDates = flightsToDelete.map((flight) => flight.date);
 
     const rotationNumbersToDelete = [...new Set(flightsToDelete
@@ -647,26 +659,48 @@ const updateData = async (req, res) => {
     ));
     const shouldControllerRevalidateAssignments = shouldRevalidateAssignments && !hasScheduleUpdate;
 
+    // The payload is the same for every row, so normalise it once.
+    const updatePayload = { ...updatePayloadFromBody };
+    if (updatePayload.domINTL) {
+      updatePayload.domINTL = updatePayload.domINTL.toLowerCase();
+    }
+    // Remove timezone from DB update (if not required in schema)
+    delete updatePayload.timeZone;
+    delete updatePayload.timezone;
+    const hasUpdatePayload = Object.keys(updatePayload).length > 0;
+
+    // Reject the whole batch before changing anything, so a missing ID can no longer
+    // leave earlier rows updated and later rows untouched.
+    if (hasUpdatePayload) {
+      const uniqueIds = [...new Set(idArray)];
+      const existingCount = await Data.countDocuments(scopedUserQuery(req, { _id: { $in: uniqueIds } }));
+      if (existingCount !== uniqueIds.length) {
+        return res.status(404).json({ message: "Data not found" });
+      }
+    }
+
+    // userIds whose assignments the row hooks asked to purge/revalidate.
+    const deferredAssignmentSync = { purge: new Set(), revalidate: new Set() };
+
     for (const dataId of idArray) {
       const existingFlightsForNetwork = await Flights.find(scopedUserQuery(req, { networkId: dataId }))
-        .select("date")
+        .select("date rotationNumber userId")
         .lean();
       datesToSync.push(...existingFlightsForNetwork.map((flight) => flight.date));
 
       // -------------------------------
       // 1️⃣ Handle rotation deletion
       // -------------------------------
-      const flightsWithRotation = await Flights.find(scopedUserQuery(req, {
-        networkId: dataId,
-        rotationNumber: { $exists: true, $ne: null }
-      }));
+      const flightWithRotation = existingFlightsForNetwork.find((flight) => (
+        flight.rotationNumber !== undefined && flight.rotationNumber !== null
+      ));
 
-      if (flightsWithRotation.length > 0) {
+      if (flightWithRotation) {
 
-        const rotationNumber = flightsWithRotation[0].rotationNumber;
+        const rotationNumber = flightWithRotation.rotationNumber;
 
         const result = await RotationDetails.aggregate([
-          { $match: { rotationNumber: rotationNumber } },
+          { $match: { rotationNumber: rotationNumber, userId: flightWithRotation.userId || userId } },
           { $sort: { depNumber: -1 } },
           { $limit: 1 },
           { $project: { depNumber: 1 } }
@@ -679,22 +713,8 @@ const updateData = async (req, res) => {
         }
       }
 
-      // -------------------------------
-      // 2️⃣ Build Safe Update Payload
-      // -------------------------------
-      const updatePayload = { ...updatePayloadFromBody };
-
-      // Normalize domINTL
-      if (updatePayload.domINTL) {
-        updatePayload.domINTL = updatePayload.domINTL.toLowerCase();
-      }
-
-      // Remove timezone from DB update (if not required in schema)
-      delete updatePayload.timeZone;
-      delete updatePayload.timezone;
-
       // If nothing to update
-      if (Object.keys(updatePayload).length === 0) {
+      if (!hasUpdatePayload) {
         continue;
       }
 
@@ -704,20 +724,45 @@ const updateData = async (req, res) => {
       const updatedData = await Data.findOneAndUpdate(
         scopedUserQuery(req, { _id: dataId }),
         { $set: updatePayload },
-        { new: true, runValidators: true, skipAssignmentResync: shouldControllerRevalidateAssignments }
+        {
+          new: true,
+          runValidators: true,
+          skipAssignmentResync: shouldControllerRevalidateAssignments,
+          deferAssignmentSync: true,
+        }
       );
 
       if (!updatedData) {
         return res.status(404).json({ message: "Data not found" });
       }
 
+      const rowSync = updatedData.$locals?.deferredAssignmentSync;
+      if (rowSync?.purge) deferredAssignmentSync.purge.add(String(updatedData.userId));
+      if (rowSync?.revalidate) deferredAssignmentSync.revalidate.add(String(updatedData.userId));
+
       updatedFlights.push(updatedData);
+    }
+
+    for (const ownerUserId of deferredAssignmentSync.purge) {
+      try {
+        await purgeStaleAssignmentsForUser({ userId: ownerUserId });
+      } catch (purgeError) {
+        console.error("Assignment purge failed after master update:", purgeError);
+      }
     }
 
     const currentFlightsForNetworks = await Flights.find(scopedUserQuery(req, { networkId: { $in: idArray } }))
       .select("date")
       .lean();
     datesToSync.push(...currentFlightsForNetworks.map((flight) => flight.date));
+
+    for (const ownerUserId of deferredAssignmentSync.revalidate) {
+      try {
+        await revalidateAssignmentsForUser({ userId: ownerUserId });
+      } catch (revalidationError) {
+        console.error("Assignment revalidation failed after master update:", revalidationError);
+      }
+    }
 
     if (shouldControllerRevalidateAssignments) {
       try {
@@ -746,7 +791,7 @@ const singleData = async (req, res) => {
       return res.status(400).json({ message: "Invalid product ID" });
     }
 
-    const product = await Data.findById(req.params.id);
+    const product = await Data.findOne(scopedUserQuery(req, { _id: req.params.id }));
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
@@ -788,12 +833,16 @@ const getConnections = async (req, res) => {
       flightsQuery.arrStn = { $in: to };
     }
 
-    const allFlights = await Flights.find(flightsQuery).lean();
+    const allFlights = await Flights.find(flightsQuery)
+      .select("date beyondODs behindODs seats CargoCapT")
+      .lean();
 
     if (!allFlights.length) return res.json([]);
 
-    const minDate = new Date(Math.min(...allFlights.map(f => new Date(f.date))));
-    const maxDate = new Date(Math.max(...allFlights.map(f => new Date(f.date))));
+    const flightDateRange = minMaxTime(allFlights.map(f => new Date(f.date)));
+    const minDate = new Date(flightDateRange.min);
+    const maxDate = new Date(flightDateRange.max);
+    const flightsByDate = createDateRangeIndex(allFlights, (f) => new Date(f.date).getTime());
 
     minDate.setUTCHours(0, 0, 0, 0);
     maxDate.setUTCHours(0, 0, 0, 0);
@@ -838,10 +887,7 @@ const getConnections = async (req, res) => {
         periodStartDate = new Date(periodEndDate);
       }
 
-      const flightsInPeriod = allFlights.filter(f => {
-        const d = new Date(f.date);
-        return d >= periodStartDate && d <= periodEndDate;
-      });
+      const flightsInPeriod = flightsByDate.between(periodStartDate, periodEndDate);
 
       const beyond = flightsInPeriod.filter(f => f.beyondODs);
       const behind = flightsInPeriod.filter(f => f.behindODs);
@@ -871,6 +917,12 @@ const getConnections = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch connections" });
   }
 };
+const LIST_PAGE_FLIGHT_FIELDS = [
+  "date", "day", "flight", "depStn", "arrStn", "sector", "variant", "acftType", "rotationNumber",
+  "std", "sta", "bt", "domIntl", "userTag1", "userTag2", "category",
+  "fh", "bh", "seats", "pax", "dist", "ask", "rsk", "rpk", "cargoAtk", "cargoRtk", "CargoCapT", "CargoT",
+].join(" ");
+
 const getListPageData = async (req, res) => {
   try {
     const {
@@ -921,7 +973,10 @@ const getListPageData = async (req, res) => {
     // We fetch the raw data directly. The React frontend contains a 
     // sophisticated Pivot algorithm that handles Date bucketing, 
     // hierarchical grouping, and metric aggregation dynamically.
-    const flights = await Flights.find(matchQuery).lean();
+    // Only the fields the List pivot groups or aggregates on; full flight rows carry ~160 cost fields.
+    const flights = await Flights.find(matchQuery)
+      .select(LIST_PAGE_FLIGHT_FIELDS)
+      .lean();
 
     return res.json({
       flights: flights || []

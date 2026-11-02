@@ -20,6 +20,9 @@ const {
     projectDailyState
 } = require("../services/maintenanceProjectionService");
 const moment = require('moment'); // <-- Added missing moment import
+const { createFlightNumberMatcher } = require("../utils/flightNumberMatch");
+
+const RESET_PREFETCH_MIN_GROUPS = 5;
 
 const getUserIdFromReq = (req) => req.user?.id || req.userId || req.user?.userId || req.user?._id;
 const isValidObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ""));
@@ -800,10 +803,10 @@ const getEffectiveUsageForDate = async ({ userId, effectiveMsn, date, metric, as
         const flightNumbers = [...new Set(assignments
             .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
             .filter(Boolean))];
-        const flightRegexArray = flightNumbers.map((flightNumber) => new RegExp(`^${escapeRegex(flightNumber)}$`, "i"));
-        const flightRecords = flightRegexArray.length > 0
+        const matchesFlightNumber = createFlightNumberMatcher(flightNumbers);
+        const flightRecords = flightNumbers.length > 0
             ? (await getUtilisationFlights({ userId: String(userId), from: date.toDate(), to: date.toDate(), select: "flight bh fh aircraft" }))
-                .filter(row => (!row.aircraft?.msn || Number(row.aircraft.msn) === msnNumber) && flightRegexArray.some(pattern => pattern.test(row.flight)))
+                .filter(row => (!row.aircraft?.msn || Number(row.aircraft.msn) === msnNumber) && matchesFlightNumber(row.flight))
             : [];
         const flightsByNumber = new Map();
         flightRecords.forEach((flight) => {
@@ -1321,15 +1324,33 @@ const recomputeMaintenanceTimeline = async ({
         return generatedOccurrence;
     };
 
+    // With many groups, read every reset once instead of one query per group.
+    // Only string keys are prefetched, so lookups match MongoDB equality exactly.
+    const hasStringResetKeys = (key) => [key.msnEsn, key.pn, key.snBn].every(value => typeof value === "string");
+    const resetLookupKey = (msnEsn, pn, snBn) => JSON.stringify([msnEsn, pn, snBn]);
+    const prefetchedResets = new Map();
+    const shouldPrefetchResets = resetGroups.length > RESET_PREFETCH_MIN_GROUPS;
+    if (shouldPrefetchResets) {
+        const allResets = await MaintenanceReset.find({ userId: String(userId) }).sort({ date: 1 }).lean();
+        allResets.forEach(reset => {
+            if (!hasStringResetKeys(reset)) return;
+            const key = resetLookupKey(reset.msnEsn, reset.pn, reset.snBn);
+            if (!prefetchedResets.has(key)) prefetchedResets.set(key, []);
+            prefetchedResets.get(key).push(reset);
+        });
+    }
+
     for (const group of resetGroups) {
         const { msnEsn, pn, snBn } = group._id;
 
-        const resets = await MaintenanceReset.find({
-            userId: String(userId),
-            msnEsn,
-            pn,
-            snBn
-        }).sort({ date: 1 }).lean();
+        const resets = shouldPrefetchResets && hasStringResetKeys(group._id)
+            ? (prefetchedResets.get(resetLookupKey(msnEsn, pn, snBn)) || [])
+            : await MaintenanceReset.find({
+                userId: String(userId),
+                msnEsn,
+                pn,
+                snBn
+            }).sort({ date: 1 }).lean();
         if (resets.length === 0) continue;
 
         for (let i = 0; i < resets.length; i++) {

@@ -39,6 +39,8 @@ const rotationDetailsSchema = new mongoose.Schema({
     },
 });
 
+rotationDetailsSchema.index({ userId: 1, rotationNumber: 1, depNumber: 1 });
+
 const RotationDetails = mongoose.model('RotationDetails', rotationDetailsSchema);
 
 module.exports = RotationDetails;

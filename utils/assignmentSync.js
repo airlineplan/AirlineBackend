@@ -5,6 +5,8 @@ const GroundDay = require("../model/groundDay");
 const Station = require("../model/stationSchema");
 const User = require("../model/userSchema");
 const moment = require("moment");
+const { minMaxTime } = require("./dateRangeIndex");
+const { findByFlightNumbers } = require("./flightNumberMatch");
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -338,19 +340,18 @@ const buildValidationContext = async ({ userId, rows, includeGroundDays = true }
     };
   }
 
-  const minDate = new Date(Math.min(...dateSet));
-  const maxDate = new Date(Math.max(...dateSet));
-  const flightRegexArray = [...flightSet].map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
+  const dateRange = minMaxTime(dateSet);
+  const minDate = new Date(dateRange.min);
+  const maxDate = new Date(dateRange.max);
   const acftRegexArray = [...acftSet].map((acft) => new RegExp(`^${escapeRegExp(acft)}$`, "i"));
 
   const [flights, fleetData, groundDays, stations, user, masterDateRangeRows] = await Promise.all([
-    Flight.find({
-      userId,
-      date: { $gte: minDate, $lte: maxDate },
-      flight: { $in: flightRegexArray },
-    })
-      .select("_id flight date depStn arrStn std sta variant rotationNumber addedByRotation legNumber")
-      .lean(),
+    findByFlightNumbers(
+      Flight,
+      { userId, date: { $gte: minDate, $lte: maxDate } },
+      [...flightSet],
+      "_id flight date depStn arrStn std sta variant rotationNumber addedByRotation legNumber"
+    ),
     Fleet.find({
       userId,
       category: "Aircraft",
@@ -859,22 +860,19 @@ const purgeStaleAssignmentsForUser = async ({ userId }) => {
     return { deletedCount: result.deletedCount || 0 };
   }
 
-  const minDate = moment.utc(Math.min(...dates.map((date) => date.getTime()))).startOf("day").toDate();
-  const maxDate = moment.utc(Math.max(...dates.map((date) => date.getTime()))).endOf("day").toDate();
-  const flightRegexArray = [...new Set(assignments
+  const dateRange = minMaxTime(dates.map((date) => date.getTime()));
+  const minDate = moment.utc(dateRange.min).startOf("day").toDate();
+  const maxDate = moment.utc(dateRange.max).endOf("day").toDate();
+  const flightNumbers = [...new Set(assignments
     .map((assignment) => String(assignment.flightNumber || "").trim().toUpperCase())
-    .filter(Boolean))]
-    .map((flight) => new RegExp(`^${escapeRegExp(flight)}$`, "i"));
+    .filter(Boolean))];
 
-  const flights = flightRegexArray.length > 0
-    ? await Flight.find({
-      userId,
-      date: { $gte: minDate, $lte: maxDate },
-      flight: { $in: flightRegexArray },
-    })
-      .select("date flight")
-      .lean()
-    : [];
+  const flights = await findByFlightNumbers(
+    Flight,
+    { userId, date: { $gte: minDate, $lte: maxDate } },
+    flightNumbers,
+    "date flight"
+  );
 
   const activeFlightKeys = new Set(flights.map((flight) => (
     buildDateFlightKey(moment.utc(flight.date).format("YYYY-MM-DD"), flight.flight)

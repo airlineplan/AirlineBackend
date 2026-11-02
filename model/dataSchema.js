@@ -4,7 +4,6 @@ const FLIGHT = require("../model/flight");
 const Sector = require("../model/sectorSchema");
 const Stations = require("../model/stationSchema");
 const StationsHistory = require("../model/stationHistorySchema");
-const userData = require("../model/userSchema");
 const { calculateBH_FH } = require('../utils/calculateFlightHours');
 const { purgeStaleAssignmentsForUser, revalidateAssignmentsForUser } = require("../utils/assignmentSync");
 const moment = require("moment");
@@ -261,15 +260,10 @@ function normalizeFlightGenerationDoc(doc) {
 async function calculateSTA(doc) {
   if (!doc.std || !doc.bt || !doc.depStn || !doc.arrStn) return;
 
-  const depStation = await Stations.findOne({
-    stationName: doc.depStn,
-    userId: doc.userId
-  });
-
-  const arrStation = await Stations.findOne({
-    stationName: doc.arrStn,
-    userId: doc.userId
-  });
+  const [depStation, arrStation] = await Promise.all([
+    Stations.findOne({ stationName: doc.depStn, userId: doc.userId }).lean(),
+    Stations.findOne({ stationName: doc.arrStn, userId: doc.userId }).lean(),
+  ]);
 
   let depTzMins = null;
   let arrTzMins = null;
@@ -433,6 +427,9 @@ async function createStations(doc) {
 }
 
 
+const DEFAULT_FLIGHT_LIMIT = 100000;
+const FLIGHT_INSERT_CHUNK_SIZE = 1000;
+
 async function createFlgts(doc) {
   doc = normalizeFlightGenerationDoc(doc);
   const startDate = startOfUtcDay(doc.effFromDt);
@@ -446,7 +443,7 @@ async function createFlgts(doc) {
   };
 
   // Fetch flight limit from .env
-  const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || 100;
+  const FLIGHT_LIMIT = parseInt(process.env.FLIGHT_LIMIT, 10) || DEFAULT_FLIGHT_LIMIT;
   let currentFlightCount;
 
   try {
@@ -481,9 +478,11 @@ async function createFlgts(doc) {
   const paxLF = toFiniteNumber(doc.paxLF);
   const cargoLF = toFiniteNumber(doc.cargoLF);
 
+  const pendingFlights = [];
+
   while (currentDate <= endDate) {
     // Stop if the overall flight limit is reached
-    if (currentFlightCount >= FLIGHT_LIMIT) {
+    if (currentFlightCount + pendingFlights.length >= FLIGHT_LIMIT) {
       console.log(`Flight limit of ${FLIGHT_LIMIT} reached while processing.`);
       break;
     }
@@ -497,7 +496,7 @@ async function createFlgts(doc) {
       const flightDate = new Date(currentDate);
       flightDate.setUTCHours(0, 0, 0, 0);
 
-      const newFlight = new FLIGHT({
+      pendingFlights.push({
         date: flightDate,
         day: dayOfWeek,
         flight: doc.flight,
@@ -540,21 +539,20 @@ async function createFlgts(doc) {
         behind1: doc.behind1,
         behind2: doc.behind2,
       });
-
-      try {
-        await newFlight.save();
-
-        //tracker for creating connections
-        userData.findByIdAndUpdate(doc.userId, { todoConnection: true });
-
-        currentFlightCount++; // Increment the flight count after successful save
-        console.log("New flight entry created.");
-      } catch (error) {
-        console.error("Error creating new flight entry:", error);
-      }
     }
 
     currentDate = addUtcDays(currentDate, 1);
+  }
+
+  // One insertMany per chunk instead of one save() round trip per date.
+  // ordered:false keeps inserting the remaining rows when one row fails, as the old per-row try/catch did.
+  for (let i = 0; i < pendingFlights.length; i += FLIGHT_INSERT_CHUNK_SIZE) {
+    const chunk = pendingFlights.slice(i, i + FLIGHT_INSERT_CHUNK_SIZE);
+    try {
+      await FLIGHT.insertMany(chunk, { ordered: false });
+    } catch (error) {
+      console.error("Error creating new flight entries:", error);
+    }
   }
 }
 
@@ -620,6 +618,7 @@ dataSchema.post('save', async function (doc) {
 dataSchema.post("findOneAndUpdate", async function (doc) {
   const networkId = doc._id;
   const shouldSkipAssignmentResync = this.getOptions?.()?.skipAssignmentResync === true;
+  const shouldDeferAssignmentSync = this.getOptions?.()?.deferAssignmentSync === true;
   try {
     const data = await Sector.findOne({ networkId: networkId });
     if (!data) {
@@ -680,13 +679,13 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
     }
 
     if (oldArrStn !== doc.arrStn) {
-      await updateStationFrequency(doc.arrStn, 1);
-      await updateStationFrequency(oldArrStn, -1);
+      await updateStationFrequency(doc.arrStn, 1, doc.userId);
+      await updateStationFrequency(oldArrStn, -1, doc.userId);
     }
 
     if (oldDepStn !== doc.depStn) {
-      await updateStationFrequency(doc.depStn, 1);
-      await updateStationFrequency(oldDepStn, -1);
+      await updateStationFrequency(doc.depStn, 1, doc.userId);
+      await updateStationFrequency(oldDepStn, -1, doc.userId);
     }
 
     const originalScheduleDoc = {
@@ -742,7 +741,9 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
         domINTL: doc.domINTL,
         userId: doc.userId
       });
-      await purgeStaleAssignmentsForUser({ userId: doc.userId });
+      if (!(shouldDeferAssignmentSync && markDeferredAssignmentSync(doc, "purge"))) {
+        await purgeStaleAssignmentsForUser({ userId: doc.userId });
+      }
       return;
     }
 
@@ -781,7 +782,7 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
 
       await FLIGHT.updateMany({ networkId: networkId }, { $set: flightUpdatePayload });
 
-      if (!shouldSkipAssignmentResync) {
+      if (!shouldSkipAssignmentResync && !(shouldDeferAssignmentSync && markDeferredAssignmentSync(doc, "revalidate"))) {
         await revalidateAssignmentsForUser({ userId: doc.userId });
       }
       return;
@@ -793,13 +794,27 @@ dataSchema.post("findOneAndUpdate", async function (doc) {
   }
 });
 
-async function updateStationFrequency(stationName, change) {
+async function updateStationFrequency(stationName, change, userId) {
   await Stations.updateOne(
-    { stationName: stationName },
+    { stationName: stationName, userId },
     { $inc: { freq: change } }
   );
 }
 
+// Callers that update many network rows pass { deferAssignmentSync: true } and run
+// one purge/revalidate after the batch instead of one full-user pass per row.
+function markDeferredAssignmentSync(doc, action) {
+  if (!doc?.$locals) return false;
+  doc.$locals.deferredAssignmentSync = {
+    ...(doc.$locals.deferredAssignmentSync || {}),
+    [action]: true,
+  };
+  return true;
+}
 
+
+
+dataSchema.index({ userId: 1 });
+dataSchema.index({ addedByRotation: 1 });
 
 module.exports = mongoose.model("Data", dataSchema);

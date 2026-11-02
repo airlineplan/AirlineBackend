@@ -44,4 +44,6 @@ const maintenanceStatusSchema = new Schema({
   },
 }, { timestamps: true });
 
+maintenanceStatusSchema.index({ userId: 1, date: 1 });
+
 module.exports = mongoose.model("MaintenanceStatus", maintenanceStatusSchema);

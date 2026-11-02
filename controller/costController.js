@@ -38,6 +38,8 @@ const {
 const { buildMaintenanceReserveContext } = require("../utils/maintenanceReserveContext");
 const moment = require("moment");
 
+const COST_SAVE_CHUNK_SIZE = 1000;
+
 const SCHEDULED_MAINTENANCE_SOURCE = "SCHEDULED_MAINTENANCE";
 
 const getScheduledMaintenanceOccurrenceKey = (row = {}) => {
@@ -721,14 +723,28 @@ exports.recalculateAndSaveCostPageData = async (req, res) => {
       "msn", "eng1Esn", "eng2Esn", "apun", "sn", "snList", "mrDebug",
     ];
     costColumns.push(...COST_PERSIST_FIELDS);
+    // updateOne already dropped keys outside the schema (strict mode); filter them up front.
+    const persistedCostColumns = [...new Set(costColumns)].filter((key) => Flights.schema.path(key));
 
-    await Promise.all(enrichedFlights.map((row) => {
+    // Chunked bulk writes instead of one concurrent updateOne per flight, which
+    // exhausted the connection pool and memory on large schedules.
+    const costUpdateOps = [];
+    enrichedFlights.forEach((row) => {
       const $set = {};
-      costColumns.forEach((key) => {
+      persistedCostColumns.forEach((key) => {
         if (row[key] !== undefined) $set[key] = row[key];
       });
-      return Flights.updateOne({ _id: row._id, userId, category: row.category || "Planned" }, { $set });
-    }));
+      if (Object.keys($set).length === 0) return;
+      costUpdateOps.push({
+        updateOne: {
+          filter: { _id: row._id, userId, category: row.category || "Planned" },
+          update: { $set },
+        },
+      });
+    });
+    for (let i = 0; i < costUpdateOps.length; i += COST_SAVE_CHUNK_SIZE) {
+      await Flights.bulkWrite(costUpdateOps.slice(i, i + COST_SAVE_CHUNK_SIZE), { ordered: false });
+    }
 
     const actualUpdated = await recalculateActualCosts(userId);
     res.status(200).json({ success: true, updated: enrichedFlights.length, actualUpdated });

@@ -81,4 +81,6 @@ const stationHistorySchema = new mongoose.Schema({
     }
 });
 
+stationHistorySchema.index({ addedByRotation: 1, userId: 1 });
+
 module.exports = mongoose.model("StationHistory", stationHistorySchema);

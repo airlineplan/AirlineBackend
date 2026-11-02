@@ -24,6 +24,8 @@ const Connections = require("../model/connectionSchema");
 const { dayNamesForDow, occurrenceDates, utcDateOnly } = require("../utils/rotationDates");
 
 const createConnections = require('../helper/createConnections');
+const { scopedUserQuery } = require("./accessScope");
+const { minMaxTime } = require("../utils/dateRangeIndex");
 
 
 moment.tz.setDefault("America/New_York");
@@ -320,10 +322,11 @@ const deleteRotation = async (userId, rotationNumber, totalDepNumber) => {
 const singleRotationDetail = async (req, res) => {
   try {
     // Fetch data from RotationDetails collection
-    const rotationDetails = await RotationDetails.find({ rotationNumber: req.params.id });
+    // Rotation numbers are only unique per user, so scope by owner.
+    const rotationDetails = await RotationDetails.find(scopedUserQuery(req, { rotationNumber: req.params.id }));
 
     // Fetch data from RotationSummary collection based on rotationNumber
-    const rotationSummary = await RotationSummary.findOne({ rotationNumber: req.params.id });
+    const rotationSummary = await RotationSummary.findOne(scopedUserQuery(req, { rotationNumber: req.params.id }));
 
     // Combine rotationDetails and rotationSummary and send as response
     res.status(200).json({ rotationDetails, rotationSummary });
@@ -359,8 +362,15 @@ const getNextRotationNumber = async (req, res) => {
   try {
     const userId = req.user.id;
     // Fetch the latest rotationNumber and increment it for the new rotation
-    const latestRotation = await RotationSummary.findOne({ userId: userId }, {}, { sort: { 'rotationNumber': -1 } });
-    const nextRotationNumber = latestRotation ? parseInt(latestRotation.rotationNumber) + 1 : 1;
+    // rotationNumber is stored as a string, so a string sort ranks "9" above "10".
+    // Take the numeric maximum instead.
+    const rotationNumbers = await RotationSummary.distinct("rotationNumber", { userId: userId });
+    let highestRotationNumber = 0;
+    rotationNumbers.forEach((value) => {
+      const parsed = parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > highestRotationNumber) highestRotationNumber = parsed;
+    });
+    const nextRotationNumber = highestRotationNumber + 1;
 
     // Send the nextRotationNumber as a response
     res.json({ nextRotationNumber });
@@ -490,7 +500,7 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     const networkIdToCheck = existingFlights.length > 0 ? existingFlights[0].networkId : "";
     const allFlightsWithSameNetworkId = await Flights.find({
       networkId: networkIdToCheck
-    });
+    }).select("date").lean();
 
     // Use query copies for range comparisons (don't mutate originals)
     queryStartDate.setUTCHours(0, 0, 0, 0);
@@ -499,11 +509,11 @@ const addRotationDetailsFlgtChange = async (req, res) => {
     const allFlightsWithSameNetworkIdDates = allFlightsWithSameNetworkId.map(flight => flight.date);
 
     // Check if existingFlightDates is a subset of allFlightDates
-    const isSubset = existingFlightsDates.every(date => allFlightsWithSameNetworkIdDates.some(d => d.getTime() === date.getTime()));
+    const networkDateTimes = new Set(allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
+    const isSubset = existingFlightsDates.every(date => networkDateTimes.has(date.getTime()));
 
     // check for date ranges
-    const minDate = Math.min(...allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
-    const maxDate = Math.max(...allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
+    const { min: minDate, max: maxDate } = minMaxTime(allFlightsWithSameNetworkIdDates.map(d => d.getTime()));
 
     // Convert dates to milliseconds for comparison
     const startEffDateInMillis = queryStartDate.getTime();
