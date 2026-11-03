@@ -51,11 +51,18 @@ const startImportWorker = (workerData) => (done) => {
     await ImportJob.findByIdAndUpdate(workerData.jobId, {
       status: "failed",
       error: err.message,
-    });
+    }).catch((updateError) => console.error("❌ Could not mark import failed:", updateError));
   });
 
   worker.on("exit", (code) => {
     console.log("🚪 Worker exited with code:", code);
+    if (code !== 0) {
+      // A worker that dies without an "error" event would otherwise leave the job "processing" forever.
+      ImportJob.updateOne(
+        { _id: workerData.jobId, status: "processing" },
+        { status: "failed", error: `Import worker exited with code ${code}` }
+      ).catch(() => {});
+    }
     done();
   });
 };

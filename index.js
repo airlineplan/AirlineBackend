@@ -10,6 +10,12 @@ const {
 const { connectRedis, disconnectRedis } = require("./config/redis");
 const { getAppMode, validateRuntimeConfig } = require("./config/runtime");
 
+// A stray rejection outside a request (a background job, an event handler) must
+// not take down every tenant request with it.
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+
 const start = async () => {
   const mode = getAppMode();
   validateRuntimeConfig();

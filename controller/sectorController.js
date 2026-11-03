@@ -373,7 +373,7 @@ const updateSector = async (req, res) => {
 };
 const singleSector = async (req, res) => {
   try {
-    const product = await Sector.findById(req.params.id);
+    const product = await Sector.findOne(scopedUserQuery(req, { _id: req.params.id }));
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });

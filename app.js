@@ -3,6 +3,7 @@ const fs = require("fs");
 const cors = require("cors");
 const express = require("express");
 const mongoose = require("mongoose");
+require("./utils/asyncErrors");
 
 const { getAppMode, getTenantRuntimeConfig } = require("./config/runtime");
 const { getRedisClient } = require("./config/redis");
@@ -137,9 +138,14 @@ const createApp = () => {
 
   serveFrontend(app);
 
-  app.use((error, _req, res, _next) => {
+  app.use((error, _req, res, next) => {
     console.error(error);
-    res.status(error.statusCode || 500).json({
+    if (res.headersSent) return next(error);
+    // Malformed ids and invalid field values are client errors, not server faults.
+    if (error?.name === "CastError" || error?.name === "ValidationError") {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+    return res.status(error.statusCode || 500).json({
       error: error.statusCode ? error.message : "Internal server error",
     });
   });

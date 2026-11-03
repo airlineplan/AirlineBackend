@@ -3,6 +3,7 @@ const RevenueConfig = require("../model/revenueConfigSchema");
 const CostConfig = require("../model/costConfigSchema");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const config = require("../config/config");
 const Otp = require("../model/otp");
 const { sendOtpEmail } = require("../services/emailService");
@@ -113,7 +114,7 @@ exports.loginUser = async (req, res) => {
       return res.status(403).json({ error: "This user has been deactivated" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = await bcrypt.compare(String(password || ""), user.password);
     if (!isMatch) {
       return res.status(400).json({ error: "Invalid credentials" });
     }
@@ -135,50 +136,81 @@ exports.loginUser = async (req, res) => {
     user.lastLoginAt = new Date();
     await user.save();
 
-    jwt.sign(payload, config.secret, { expiresIn: process.env.JWT_EXPIRES_IN || "7h" }, (err, token) => {
-      if (err) throw err;
-      res.json({ message: "Login successful", token, user: buildUserPayload(user) });
-    });
+    const token = jwt.sign(payload, config.secret, { expiresIn: process.env.JWT_EXPIRES_IN || "7h" });
+    res.json({ message: "Login successful", token, user: buildUserPayload(user) });
   } catch (error) {
     console.error(error.message);
     res.status(500).json({ error: "Server error" });
   }
 };
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_SENT_MESSAGE = "If an account exists for this email, an OTP has been sent to it";
+
+const hashOtp = (email, code) =>
+  crypto.createHash("sha256").update(`${email}:${String(code ?? "").trim()}`).digest("hex");
+
+const otpMatches = (storedHash, email, code) => {
+  const expected = Buffer.from(String(storedHash || ""), "hex");
+  const supplied = Buffer.from(hashOtp(email, code), "hex");
+  return expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);
+};
+
+const otpError = (message) => ({ statusText: "error", message, error: message });
+
 exports.changePassword = async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
-    const data = await Otp.findOne({
-      email,
-      code: req.body.otpCode,
-    });
+    const otpCode = String(req.body?.otpCode ?? "").trim();
+    const password = req.body?.password;
 
-    const response = {};
-    if (data) {
-      let currentTime = new Date().getTime();
-      let diff = data.expireIn - currentTime;
-      if (diff < 0) {
-        response.message = "Token Expire";
-        response.statusText = "error";
-      } else {
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(req.body.password, salt);
-
-        const user = await User.findOne({ email });
-        if (!user) {
-          response.message = "User not found";
-          response.statusText = "error";
-        } else {
-          user.password = hashedPassword;
-          await user.save();
-          response.message = "Password Changed Successfully";
-          response.statusText = "Success";
-        }
-      }
-    } else {
-      response.message = "Invalid OTP";
-      response.statusText = "error";
+    if (!email || !otpCode || typeof password !== "string" || !password) {
+      return res.status(400).json(otpError("Email, OTP and new password are required"));
     }
-    res.status(200).json(response);
+
+    // Only the most recently issued code is valid.
+    const latest = await Otp.findOne({ email }).sort({ createdAt: -1 }).lean();
+    if (!latest) {
+      return res.status(200).json(otpError("Invalid OTP"));
+    }
+    if (latest.expireIn < Date.now()) {
+      await Otp.deleteMany({ email });
+      return res.status(200).json(otpError("Token Expire"));
+    }
+
+    // Spend an attempt before comparing, atomically, so parallel guesses
+    // cannot exceed the limit.
+    const attempt = await Otp.findOneAndUpdate(
+      { _id: latest._id, attempts: { $lt: OTP_MAX_ATTEMPTS } },
+      { $inc: { attempts: 1 } },
+      { new: true }
+    ).lean();
+    if (!attempt) {
+      await Otp.deleteMany({ email });
+      return res.status(200).json(otpError("Too many incorrect attempts. Please request a new OTP"));
+    }
+
+    if (!otpMatches(attempt.code, email, otpCode)) {
+      return res.status(200).json(otpError("Invalid OTP"));
+    }
+
+    // Consume the code before changing the password so it cannot be replayed.
+    const consumed = await Otp.deleteOne({ _id: attempt._id });
+    if (consumed.deletedCount !== 1) {
+      return res.status(200).json(otpError("Invalid OTP"));
+    }
+    await Otp.deleteMany({ email });
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(200).json(otpError("Invalid OTP"));
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+    await user.save();
+    return res.status(200).json({ statusText: "Success", message: "Password Changed Successfully" });
   } catch (error) {
     console.error(error.message);
     res.status(500).json({ error: "Server error" });
@@ -188,28 +220,36 @@ exports.changePassword = async (req, res) => {
 exports.sendEmail = async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
-    const data = await User.findOne({ email });
-
-    const responseType = {};
-
-    if (data) {
-      const otpcode = Math.floor(Math.random() * 9000) + 1000;
-      const otpData = new Otp({
-        email,
-        code: otpcode,
-        expireIn: new Date().getTime() + 300 * 1000,
-      });
-
-      await otpData.save();
-
-      await sendOtpEmail({ to: email, otp: otpcode });
-
-      responseType.statusText = "Success";
-      responseType.message = "Please Check Your Email Id";
-    } else {
-      responseType.statusText = "error";
-      responseType.message = "Email id not Exist";
+    if (!email) {
+      return res.status(400).json({ statusText: "error", message: "Email is required" });
     }
+
+    // The same response whether or not the account exists, so this endpoint
+    // cannot be used to discover registered emails.
+    const responseType = { statusText: "Success", message: OTP_SENT_MESSAGE };
+
+    const user = await User.findOne({ email }).select("_id").lean();
+    if (!user) {
+      return res.status(200).json(responseType);
+    }
+
+    const recent = await Otp.findOne({
+      email,
+      createdAt: { $gt: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
+    }).lean();
+    if (recent) {
+      return res.status(200).json(responseType);
+    }
+
+    const otpcode = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+    await Otp.deleteMany({ email });
+    await Otp.create({
+      email,
+      code: hashOtp(email, otpcode),
+      expireIn: Date.now() + OTP_TTL_MS,
+    });
+
+    await sendOtpEmail({ to: email, otp: otpcode });
 
     res.status(200).json(responseType);
   } catch (error) {
