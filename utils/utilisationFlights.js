@@ -98,7 +98,8 @@ async function getUtilisationFlights({ userId, from, to, select } = {}) {
   requireUserId(userId);
   const filter = {
     userId,
-    category: { $in: [CATEGORIES.PLANNED, CATEGORIES.ACTUAL] },
+    // null also matches legacy documents saved before category existed (treated as Planned).
+    category: { $in: [CATEGORIES.PLANNED, CATEGORIES.ACTUAL, null] },
     date: windowFilter(from, to),
   };
   // Read identity independently of select: callers may request only BH/FH, or

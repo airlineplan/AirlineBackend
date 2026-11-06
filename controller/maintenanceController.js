@@ -468,7 +468,7 @@ const getFlightDateBounds = async ({ userId } = {}) => {
     const userMatch = userId ? { userId: String(userId) } : {};
     const [datedBounds, effectiveBounds] = await Promise.all([
         Flight.aggregate([
-            { $match: { ...userMatch, category: { $in: ["Planned", "Actual"] }, date: { $type: "date" } } },
+            { $match: { ...userMatch, category: { $in: ["Planned", "Actual", null] }, date: { $type: "date" } } },
             {
                 $group: {
                     _id: null,
@@ -1055,7 +1055,7 @@ const createMaintenanceDashboardUsageResolver = async ({
         .map(assignment => String(assignment.flightNumber || "").trim().toUpperCase())
         .filter(Boolean))];
     const flightFilter = {
-        category: { $in: ["Planned", "Actual"] },
+        category: { $in: ["Planned", "Actual", null] },
         date: {
             $gte: rangeStart.toDate(),
             $lt: rangeEnd.clone().endOf("day").toDate()

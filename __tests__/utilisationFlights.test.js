@@ -119,6 +119,14 @@ test("bounds include the entire final UTC date, and a timed Actual replaces midn
   assert.equal(flights[0].category, "Actual");
 });
 
+test("legacy flights saved without a category count as Planned utilisation", async () => {
+  await Flight.collection.insertOne({ userId: USER_ID, date: day(5), flight: "L1", aircraft: aircraft(100), fh: 2 });
+  await Flight.collection.insertOne({ userId: USER_ID, date: day(6), flight: "L2", aircraft: aircraft(100), fh: 2 });
+  await seedFlight(day(6), "Actual", { flight: "A1" });
+  const flights = await getUtilisationFlights({ userId: USER_ID, from, to });
+  assert.deepEqual(flights.map((flight) => flight.flight), ["L1", "A1"]);
+});
+
 test("other users' Actual rows do not suppress this user's Planned flights", async () => {
   await seedFlight(day(3), "Planned");
   await seedFlight(day(3), "Actual", { userId: OTHER_USER_ID });
