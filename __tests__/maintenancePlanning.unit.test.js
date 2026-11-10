@@ -31,6 +31,10 @@ test("Severity Matrix applies the workbook exact, average, edge and CTD examples
   assert.equal(lookupSeverityRate(matrix, { condition: " 25% HARSH ", thrust: 24, derate: 10 }, 150, 100).baseRate, 281.47);
   assert.equal(lookupSeverityRate(matrix, { ...ctd, thrust: 23 }, 130, 100).baseRate, 0);
   assert.equal(lookupSeverityRate(matrix, ctd, 0, 0).baseRate, 0);
+  // H:C 2.12 sits between rows 2 and 2.5 (average); with no higher row, the lower row alone applies.
+  const hcMatrix = { columns: [{ condition: "Normal", thrust: 15, derate: 0 }], rows: [{ hc: 2, rates: [17] }, { hc: 2.5, rates: [25] }] };
+  assert.equal(lookupSeverityRate(hcMatrix, { condition: "Normal", thrust: 15, derate: 0 }, 133, 62).baseRate, 21);
+  assert.equal(lookupSeverityRate({ ...hcMatrix, rows: hcMatrix.rows.slice(0, 1) }, { condition: "Normal", thrust: 15, derate: 0 }, 133, 62).baseRate, 17);
 });
 test("matrix validation rejects duplicates, missing rates and invalid precision", () => {
   assert.deepEqual(validateMatrix(defaultMatrix()), defaultMatrix());

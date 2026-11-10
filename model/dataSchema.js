@@ -215,7 +215,9 @@ function normalizeScheduleDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
 
-  return date.toISOString();
+  // Schedules are day-granular. The same day can be stored with different times
+  // (05:30Z from older saves, 00:00Z from the update form); that is not a change.
+  return date.toISOString().slice(0, 10);
 }
 
 function hasScheduleChange(originalDoc, updatedDoc) {
